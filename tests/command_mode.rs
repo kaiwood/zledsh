@@ -45,7 +45,7 @@ fn redirections_are_resolved_left_to_right_and_do_not_leak() {
 fn unsupported_syntax_is_rejected_before_execution() {
     for tail in [
         r#"printf '%s' "$(printf wrong)""#,
-        "printf wrong | printf wrong",
+        "printf wrong || printf wrong",
         "printf 'unclosed",
         "if /usr/bin/false; then printf wrong; fi",
     ] {

@@ -51,9 +51,10 @@ impl From<&str> for ParseError {
     }
 }
 
-pub(crate) fn parse(source: &str) -> ParseResult<Vec<Command>> {
+pub(crate) fn parse(source: &str) -> ParseResult<Vec<Vec<Command>>> {
     let mut input = source.chars().peekable();
     let mut commands = Vec::new();
+    let mut stages = Vec::new();
     let mut command = Command::default();
     while let Some(&next) = input.peek() {
         match next {
@@ -65,10 +66,21 @@ pub(crate) fn parse(source: &str) -> ParseResult<Vec<Command>> {
                     input.next();
                 }
             }
+            '|' => {
+                input.next();
+                if input.peek() == Some(&'|') {
+                    return Err("logical OR is not supported".into());
+                }
+                if command.words.is_empty() && command.redirects.is_empty() {
+                    return Err("missing pipeline command".into());
+                }
+                stages.push(std::mem::take(&mut command));
+            }
             '\n' | ';' => {
                 input.next();
                 if !command.words.is_empty() || !command.redirects.is_empty() {
-                    commands.push(std::mem::take(&mut command));
+                    stages.push(std::mem::take(&mut command));
+                    commands.push(std::mem::take(&mut stages));
                 } else if next == ';' {
                     return Err("unexpected ';'".into());
                 }
@@ -91,7 +103,7 @@ pub(crate) fn parse(source: &str) -> ParseResult<Vec<Command>> {
                     if command.words.is_empty() {
                         let head: String = input
                             .clone()
-                            .take_while(|ch| !matches!(ch, ' ' | '\t' | '\n' | ';' | '>'))
+                            .take_while(|ch| !matches!(ch, ' ' | '\t' | '\n' | ';' | '>' | '|'))
                             .collect();
                         if matches!(
                             head.as_str(),
@@ -124,7 +136,10 @@ pub(crate) fn parse(source: &str) -> ParseResult<Vec<Command>> {
         }
     }
     if !command.words.is_empty() || !command.redirects.is_empty() {
-        commands.push(command);
+        stages.push(command);
+        commands.push(stages);
+    } else if !stages.is_empty() {
+        return Err(ParseError::Incomplete("missing pipeline command"));
     }
     Ok(commands)
 }
@@ -154,7 +169,7 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
     };
     let mut started = false;
     while let Some(&ch) = input.peek() {
-        if matches!(ch, ' ' | '\t' | '\n' | ';' | '>') {
+        if matches!(ch, ' ' | '\t' | '\n' | ';' | '>' | '|') {
             break;
         }
         input.next();
@@ -166,7 +181,7 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
                 Some(ch) => literal(&mut word, ch),
                 None => return Err("trailing backslash".into()),
             },
-            '|' | '&' | '<' | '(' | ')' | '{' | '}' | '`' | '$' | '*' | '?' | '[' | '~' => {
+            '&' | '<' | '(' | ')' | '{' | '}' | '`' | '$' | '*' | '?' | '[' | '~' => {
                 return Err(ParseError::Invalid(format!(
                     "unsupported unquoted syntax: {ch}"
                 )));

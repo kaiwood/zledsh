@@ -111,6 +111,30 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
+  def test_pipeline_interrupts_and_resumes_as_one_foreground_job
+    binary = File.expand_path("../target/debug/kward", __dir__)
+    probe = "#{Shellwords.escape(SPIKE)} --foreground-probe"
+    prompt = "pipeline> "
+    with_terminal(binary, "shell", env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
+      writer.write("#{probe} | /bin/cat\n")
+      read_until(reader, "foreground ready\r\n")
+      writer.write("\x03")
+      read_until(reader, prompt)
+
+      writer.write("#{probe} | /bin/cat\n")
+      read_until(reader, "foreground ready\r\n")
+      writer.write("\x1a")
+      read_until(reader, "Stopped\r\n")
+      read_until(reader, prompt)
+      writer.write("fg\n")
+      read_until(reader, "fg\r\n")
+      writer.write("pipeline input\n")
+      read_until(reader, "foreground read: pipeline input\r\n")
+      read_until(reader, prompt)
+      exit_spike(reader, writer, pid)
+    end
+  end
+
   private
 
   def with_spike(&block)

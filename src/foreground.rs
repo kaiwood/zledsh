@@ -1,6 +1,8 @@
 use std::io;
 use std::process::Child;
 
+use crate::process::{Outcome, Pipeline, Stage};
+
 use crate::terminal_modes::{TTY, attributes, give_terminal, set_attributes};
 
 pub(crate) struct Foreground {
@@ -23,38 +25,50 @@ impl Foreground {
     pub fn run(&mut self, spawn: impl FnOnce() -> io::Result<Child>) -> io::Result<u8> {
         let terminal = ShellTerminal::save(self.shell_group)?;
         let child = spawn()?;
-        self.wait(Job(Some(child.id() as libc::pid_t)), terminal)
+        self.wait(Pipeline::from_foreground_child(child), terminal)
+    }
+
+    pub fn run_pipeline(&mut self, stages: Vec<Stage>) -> io::Result<u8> {
+        let terminal = ShellTerminal::save(self.shell_group)?;
+        let (job, gate) = Pipeline::start(stages, true)?;
+        if let Err(error) = give_terminal(job.group.unwrap()) {
+            drop(job);
+            return Err(error);
+        }
+        drop(gate);
+        self.wait(job, terminal)
     }
 
     pub fn resume(&mut self) -> io::Result<u8> {
         let terminal = ShellTerminal::save(self.shell_group)?;
-        let StoppedJob { job, modes } = self
+        let StoppedJob { mut job, modes } = self
             .stopped
             .pop()
             .ok_or_else(|| io::Error::other("no stopped job"))?;
         set_attributes(&modes)?;
-        give_terminal(job.pid())?;
-        cvt(unsafe { libc::kill(-job.pid(), libc::SIGCONT) })?;
+        let group = job.group.unwrap();
+        give_terminal(group)?;
+        cvt(unsafe { libc::kill(-group, libc::SIGCONT) })?;
+        job.resumed();
         self.wait(job, terminal)
     }
 
-    fn wait(&mut self, mut job: Job, terminal: ShellTerminal) -> io::Result<u8> {
-        let status = job.wait()?;
-        let stopped_modes = if libc::WIFSTOPPED(status) {
-            Some(attributes()?)
-        } else {
-            None
-        };
-        terminal.restore()?;
-        if let Some(modes) = stopped_modes {
-            self.stopped.push(StoppedJob { job, modes });
-            eprintln!("\nStopped");
-            Ok(128 + libc::WSTOPSIG(status) as u8)
-        } else if libc::WIFSIGNALED(status) {
-            eprintln!();
-            Ok(128 + libc::WTERMSIG(status) as u8)
-        } else {
-            Ok(libc::WEXITSTATUS(status) as u8)
+    fn wait(&mut self, mut job: Pipeline, terminal: ShellTerminal) -> io::Result<u8> {
+        match job.wait()? {
+            Outcome::Stopped(code) => {
+                let modes = attributes()?;
+                terminal.restore()?;
+                self.stopped.push(StoppedJob { job, modes });
+                eprintln!("\nStopped");
+                Ok(code)
+            }
+            Outcome::Exited { code, signaled } => {
+                terminal.restore()?;
+                if signaled {
+                    eprintln!();
+                }
+                Ok(code)
+            }
         }
     }
 }
@@ -91,43 +105,8 @@ impl Drop for ShellTerminal {
 }
 
 struct StoppedJob {
-    job: Job,
+    job: Pipeline,
     modes: libc::termios,
-}
-
-struct Job(Option<libc::pid_t>);
-
-impl Job {
-    fn pid(&self) -> libc::pid_t {
-        self.0.expect("job is still live")
-    }
-
-    fn wait(&mut self) -> io::Result<libc::c_int> {
-        let mut status = 0;
-        waitpid(self.pid(), &mut status, libc::WUNTRACED)?;
-        if !libc::WIFSTOPPED(status) {
-            self.0 = None;
-        }
-        Ok(status)
-    }
-}
-
-impl Drop for Job {
-    fn drop(&mut self) {
-        if let Some(pid) = self.0 {
-            unsafe { libc::kill(-pid, libc::SIGKILL) };
-            let _ = waitpid(pid, std::ptr::null_mut(), 0);
-        }
-    }
-}
-
-fn waitpid(pid: libc::pid_t, status: *mut libc::c_int, flags: libc::c_int) -> io::Result<()> {
-    loop {
-        match cvt(unsafe { libc::waitpid(pid, status, flags) }) {
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            result => return result.map(|_| ()),
-        }
-    }
 }
 
 fn cvt(result: libc::c_int) -> io::Result<libc::c_int> {

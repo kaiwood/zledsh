@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, BufRead, Write};
+use std::os::fd::OwnedFd;
 use std::process::Stdio;
 use std::rc::Rc;
 
@@ -34,9 +35,19 @@ impl<'a> Invocation<'a> {
         }
     }
 
-    pub fn run(&mut self, commands: &[Command], input: &mut impl BufRead) {
+    pub fn run(&mut self, commands: &[Vec<Command>], input: &mut impl BufRead) {
         let original = [Output::Stdout, Output::Stderr];
-        for command in commands {
+        for pipeline in commands {
+            let [command] = pipeline.as_slice() else {
+                self.status = match self.pipeline(pipeline) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        report(&original[1], &format!("pipeline: {error}"));
+                        1
+                    }
+                };
+                continue;
+            };
             let mut output = original.clone();
             if let Err(error) = self.redirect(&command.redirects, &mut output) {
                 report(&output[1], &error);
@@ -180,7 +191,7 @@ impl<'a> Invocation<'a> {
         Ok(())
     }
 
-    fn external(&mut self, argv: &[String], output: &[Output; 2]) -> u8 {
+    fn execution_environment(&self) -> (OsString, HashMap<OsString, OsString>) {
         let path = self
             .variables
             .get("PATH")
@@ -193,9 +204,83 @@ impl<'a> Invocation<'a> {
                 env.insert(name.into(), value.into());
             }
         }
+        (path, env)
+    }
+
+    fn pipeline(&mut self, commands: &[Command]) -> io::Result<u8> {
+        let (path, env) = self.execution_environment();
+        let mut stdin = process::duplicate(libc::STDIN_FILENO)?;
+        let mut stages = Vec::new();
+        for (index, command) in commands.iter().enumerate() {
+            let next = if index + 1 == commands.len() {
+                None
+            } else {
+                Some(process::pipe()?)
+            };
+            let (stdout, next_input) = match next {
+                Some((read, write)) => (Output::File(Rc::new(File::from(write))), Some(read)),
+                None => (Output::Stdout, None),
+            };
+            let mut output = [stdout, Output::Stderr];
+            let mut argv: Vec<_> = command
+                .words
+                .iter()
+                .flat_map(|word| self.expand(word))
+                .collect();
+            if let Err(error) = self.redirect(&command.redirects, &mut output) {
+                report(&output[1], &error);
+                argv = vec!["exit".into(), "1".into()];
+            } else if argv.is_empty() || command.words.iter().all(|word| word.assignment) {
+                argv = vec!["exit".into(), "0".into()];
+            }
+            let name = argv[0].clone();
+            let exec = if is_builtin(&name) {
+                let executable = std::env::current_exe()?;
+                let mut args = vec![
+                    executable
+                        .to_str()
+                        .ok_or_else(|| io::Error::other("shell path must be UTF-8"))?
+                        .to_owned(),
+                    crate::PIPELINE_BUILTIN.into(),
+                ];
+                args.extend(argv);
+                let mut local_env = env.clone();
+                local_env.extend(
+                    self.variables
+                        .iter()
+                        .map(|(key, value)| (key.into(), value.into())),
+                );
+                process::Exec::new(&args, &path, local_env)?
+            } else {
+                process::Exec::new(&argv, &path, env.clone())?
+            };
+            stages.push(process::Stage {
+                exec,
+                streams: [stdin, output[0].descriptor()?, output[1].descriptor()?],
+                missing: format!("kwsh: {name}: command not found\n").into_bytes(),
+                failed: format!("kwsh: {name}: cannot execute\n").into_bytes(),
+            });
+            match next_input {
+                Some(read) => stdin = read,
+                None => break,
+            }
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(tty) = &mut self.foreground {
+            return tty.run_pipeline(stages);
+        }
+        let (mut job, gate) = process::Pipeline::start(stages, false)?;
+        drop(gate);
+        match job.wait()? {
+            process::Outcome::Exited { code, .. } | process::Outcome::Stopped(code) => Ok(code),
+        }
+    }
+
+    fn external(&mut self, argv: &[String], output: &[Output; 2]) -> u8 {
+        let (path, env) = self.execution_environment();
         let streams = output[0]
-            .stdio()
-            .and_then(|stdout| Ok((stdout, output[1].stdio()?)));
+            .descriptor()
+            .and_then(|stdout| Ok((Stdio::from(stdout), Stdio::from(output[1].descriptor()?))));
         let (stdout, stderr) = match streams {
             Ok(streams) => streams,
             Err(error) => {
@@ -342,6 +427,13 @@ impl<'a> Invocation<'a> {
     }
 }
 
+pub(crate) fn is_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "exit" | "cd" | "pwd" | "export" | "read" | "printf" | "fg"
+    )
+}
+
 fn valid_name(name: &str) -> bool {
     let mut chars = name.bytes();
     chars
@@ -358,11 +450,11 @@ enum Output {
 }
 
 impl Output {
-    fn stdio(&self) -> io::Result<Stdio> {
+    fn descriptor(&self) -> io::Result<OwnedFd> {
         match self {
             Self::Stdout => process::duplicate(libc::STDOUT_FILENO),
             Self::Stderr => process::duplicate(libc::STDERR_FILENO),
-            Self::File(file) => file.try_clone().map(Stdio::from),
+            Self::File(file) => file.try_clone().map(OwnedFd::from),
         }
     }
 

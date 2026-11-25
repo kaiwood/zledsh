@@ -15,10 +15,16 @@ use std::{
     process::ExitCode,
 };
 
+const PIPELINE_BUILTIN: &str = "--kwsh-pipeline-builtin";
+
 /// Launch the plain `kwsh` profile.
 pub fn plain() -> ExitCode {
     let mut args = env::args_os();
     let name = args.next().unwrap_or_else(|| "kwsh".into());
+    let mut args = args.peekable();
+    if args.next_if(|arg| arg == PIPELINE_BUILTIN).is_some() {
+        return run_pipeline_builtin(args);
+    }
     run("kwsh", name, args)
 }
 
@@ -26,12 +32,49 @@ pub fn plain() -> ExitCode {
 pub fn kward_shell() -> ExitCode {
     let mut args = env::args_os();
     let mut name = args.next().unwrap_or_else(|| "kward".into());
-    if args.next().as_deref() != Some("shell".as_ref()) {
-        eprintln!("Usage: kward shell -c command [name [args...]]");
-        return 2.into();
+    match args.next().as_deref().and_then(|arg| arg.to_str()) {
+        Some("shell") => {}
+        Some(PIPELINE_BUILTIN) => return run_pipeline_builtin(args),
+        _ => {
+            eprintln!("Usage: kward shell -c command [name [args...]]");
+            return 2.into();
+        }
     }
     name.push(" shell");
     run("kward shell", name, args)
+}
+
+fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
+    let Ok(args) = args
+        .map(OsString::into_string)
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return 2.into();
+    };
+    let Some(name) = args.first() else {
+        return 2.into();
+    };
+    if !runtime::is_builtin(name) {
+        return 2.into();
+    }
+    if name == "fg" {
+        eprintln!("kwsh: fg: not available in a pipeline stage");
+        return 1.into();
+    }
+    let command = syntax::Command {
+        words: args
+            .into_iter()
+            .map(|arg| syntax::Word {
+                parts: vec![syntax::Part::Literal(arg)],
+                assignment: false,
+            })
+            .collect(),
+        redirects: Vec::new(),
+    };
+    let mut input = BufReader::with_capacity(1, process::Stdin);
+    let mut invocation = runtime::Invocation::new("kwsh", &[]);
+    invocation.run(&[vec![command]], &mut input);
+    invocation.status.into()
 }
 
 fn run(program: &str, name: OsString, args: impl Iterator<Item = OsString>) -> ExitCode {
