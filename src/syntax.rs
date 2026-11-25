@@ -26,7 +26,27 @@ pub(crate) enum Part {
 }
 
 type Source<'a> = Peekable<Chars<'a>>;
-type ParseResult<T> = Result<T, String>;
+type ParseResult<T> = Result<T, ParseError>;
+
+pub(crate) enum ParseError {
+    Invalid(String),
+    Incomplete(&'static str),
+}
+
+impl ParseError {
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Invalid(message) => message,
+            Self::Incomplete(message) => message,
+        }
+    }
+}
+
+impl From<&str> for ParseError {
+    fn from(message: &str) -> Self {
+        Self::Invalid(message.to_owned())
+    }
+}
 
 pub(crate) fn parse(source: &str) -> ParseResult<Vec<Command>> {
     let mut input = source.chars().peekable();
@@ -109,7 +129,9 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
                 None => return Err("trailing backslash".into()),
             },
             '|' | '&' | '<' | '(' | ')' | '{' | '}' | '`' | '$' | '*' | '?' | '[' | '~' => {
-                return Err(format!("unsupported unquoted syntax: {ch}"));
+                return Err(ParseError::Invalid(format!(
+                    "unsupported unquoted syntax: {ch}"
+                )));
             }
             _ => literal(&mut word, ch),
         }
@@ -129,7 +151,7 @@ fn single_quoted(input: &mut Source<'_>) -> ParseResult<String> {
         }
         text.push(ch);
     }
-    Err("unclosed single quote".into())
+    Err(ParseError::Incomplete("unclosed single quote"))
 }
 
 fn double_quoted(input: &mut Source<'_>, word: &mut Word) -> ParseResult<()> {
@@ -151,7 +173,7 @@ fn double_quoted(input: &mut Source<'_>, word: &mut Word) -> ParseResult<()> {
             _ => literal(word, ch),
         }
     }
-    Err("unclosed double quote".into())
+    Err(ParseError::Incomplete("unclosed double quote"))
 }
 
 fn parameter(input: &mut Source<'_>, word: &mut Word) -> ParseResult<()> {

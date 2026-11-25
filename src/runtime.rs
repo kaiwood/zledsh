@@ -1,23 +1,36 @@
+use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::rc::Rc;
 
 use crate::syntax::{Command, Part, Redirect, Word};
 
 pub(crate) struct Invocation<'a> {
-    pub name: &'a str,
-    pub args: &'a [String],
+    name: &'a str,
+    args: &'a [String],
+    variables: HashMap<String, String>,
+    pub status: u8,
+    pub exited: bool,
 }
 
-impl Invocation<'_> {
-    pub fn run(&self, commands: &[Command]) -> u8 {
-        let mut status = 0;
+impl<'a> Invocation<'a> {
+    pub fn new(name: &'a str, args: &'a [String]) -> Self {
+        Self {
+            name,
+            args,
+            variables: HashMap::new(),
+            status: 0,
+            exited: false,
+        }
+    }
+
+    pub fn run(&mut self, commands: &[Command], input: &mut impl BufRead) {
         let original = [Output::Stdout, Output::Stderr];
         for command in commands {
             let mut output = original.clone();
             if let Err(error) = self.redirect(&command.redirects, &mut output) {
                 report(&output[1], &error);
-                status = 1;
+                self.status = 1;
                 continue;
             }
             let argv: Vec<_> = command
@@ -26,13 +39,14 @@ impl Invocation<'_> {
                 .flat_map(|word| self.expand(word))
                 .collect();
             let Some((name, args)) = argv.split_first() else {
-                status = 0;
+                self.status = 0;
                 continue;
             };
             match name.as_str() {
                 "exit" => {
-                    return match args {
-                        [] => status,
+                    self.exited = true;
+                    self.status = match args {
+                        [] => self.status,
                         [arg] => match arg.parse::<i64>() {
                             Ok(value) => value as u8,
                             Err(_) => {
@@ -45,9 +59,19 @@ impl Invocation<'_> {
                             2
                         }
                     };
+                    return;
+                }
+                "read" => {
+                    self.status = match self.read(args, input) {
+                        Ok(complete) => u8::from(!complete),
+                        Err(error) => {
+                            report(&output[1], &format!("read: {error}"));
+                            1
+                        }
+                    };
                 }
                 "printf" => {
-                    status = match printf(args)
+                    self.status = match printf(args)
                         .and_then(|text| output[0].write(&text).map_err(|e| e.to_string()))
                     {
                         Ok(()) => 0,
@@ -59,11 +83,56 @@ impl Invocation<'_> {
                 }
                 _ => {
                     report(&output[1], &format!("unsupported command: {name}"));
-                    return 127;
+                    self.status = 127;
+                    return;
                 }
             }
         }
-        status
+    }
+
+    fn read(&mut self, args: &[String], input: &mut impl BufRead) -> Result<bool, String> {
+        let (raw, name) = match args {
+            [name] => (false, name),
+            [flag, name] if flag == "-r" => (true, name),
+            _ => return Err("expected read [-r] name".into()),
+        };
+        if !valid_name(name) {
+            return Err("expected a variable name".into());
+        }
+        let mut characters = Vec::new();
+        let mut line = String::new();
+        let complete = 'lines: loop {
+            line.clear();
+            input
+                .read_line(&mut line)
+                .map_err(|error| error.to_string())?;
+            let mut chars = line.chars();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '\n' => break 'lines true,
+                    '\\' if !raw => match chars.next() {
+                        Some('\n') => continue 'lines,
+                        Some(escaped) => characters.push((escaped, false)),
+                        None => break 'lines false,
+                    },
+                    ch => characters.push((ch, matches!(ch, ' ' | '\t'))),
+                }
+            }
+            break false;
+        };
+        let first = characters
+            .iter()
+            .position(|&(_, separator)| !separator)
+            .unwrap_or(characters.len());
+        let end = characters
+            .iter()
+            .rposition(|&(_, separator)| !separator)
+            .map_or(first, |index| index + 1);
+        self.variables.insert(
+            name.clone(),
+            characters[first..end].iter().map(|&(ch, _)| ch).collect(),
+        );
+        Ok(complete)
     }
 
     fn expand(&self, word: &Word) -> Vec<String> {
@@ -85,7 +154,9 @@ impl Invocation<'_> {
                     }
                 }
                 Part::Variable { name, default } => {
-                    if let Some(value) = std::env::var_os(name) {
+                    if let Some(value) = self.variables.get(name) {
+                        field.push_str(value);
+                    } else if let Some(value) = std::env::var_os(name) {
                         field.push_str(&value.to_string_lossy());
                     } else if let Some(value) = default {
                         field.push_str(value);
@@ -120,6 +191,14 @@ impl Invocation<'_> {
         }
         Ok(())
     }
+}
+
+fn valid_name(name: &str) -> bool {
+    let mut chars = name.bytes();
+    chars
+        .next()
+        .is_some_and(|ch| ch == b'_' || ch.is_ascii_alphabetic())
+        && chars.all(|ch| ch == b'_' || ch.is_ascii_alphanumeric())
 }
 
 #[derive(Clone)]
