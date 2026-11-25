@@ -57,7 +57,7 @@ struct Settings {
 }
 
 impl Settings {
-    fn load(home: &Path) -> Result<Self> {
+    fn load(home: &Path, effort_override: Option<&str>) -> Result<Self> {
         const INVALID: Error =
             Error::Message("invalid ~/.kwsh/chatgpt.json; expected model and/or reasoning_effort");
         let file = match OpenOptions::new()
@@ -67,7 +67,7 @@ impl Settings {
         {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Self::default());
+                return Self::default().with_effort_override(effort_override);
             }
             Err(_) => return Err(INVALID),
         };
@@ -83,7 +83,14 @@ impl Settings {
             return Err(INVALID);
         }
         let settings: Self = serde_json::from_slice(&bytes).map_err(|_| INVALID)?;
-        if settings.reasoning_effort.as_deref().is_some_and(|effort| {
+        settings.with_effort_override(effort_override)
+    }
+
+    fn with_effort_override(mut self, effort_override: Option<&str>) -> Result<Self> {
+        if let Some(effort) = effort_override {
+            self.reasoning_effort = Some(effort.into());
+        }
+        if self.reasoning_effort.as_deref().is_some_and(|effort| {
             !matches!(
                 effort,
                 "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
@@ -93,7 +100,7 @@ impl Settings {
                 "reasoning_effort must be none, minimal, low, medium, high, or xhigh",
             ));
         }
-        Ok(settings)
+        Ok(self)
     }
 }
 
@@ -108,10 +115,11 @@ impl Session {
     pub fn connect(
         home: &Path,
         preferred_model: Option<&str>,
+        effort_override: Option<&str>,
         allow_sign_in: bool,
         cancelled: &AtomicBool,
     ) -> Result<Self> {
-        let settings = Settings::load(home)?;
+        let settings = Settings::load(home, effort_override)?;
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .https_only(true)
             .proxy(None)
@@ -558,7 +566,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let path = home.path().join(".kwsh/chatgpt.json");
         assert!(
-            Settings::load(home.path())
+            Settings::load(home.path(), None)
                 .unwrap()
                 .reasoning_effort
                 .is_none()
@@ -569,7 +577,7 @@ mod tests {
             r#"{"model":"chosen-model","reasoning_effort":"high"}"#,
         )
         .unwrap();
-        let settings = Settings::load(home.path()).unwrap();
+        let settings = Settings::load(home.path(), None).unwrap();
         let body = request_body(
             settings.model.as_deref().unwrap(),
             settings.reasoning_effort.as_deref(),
@@ -583,7 +591,28 @@ mod tests {
                 .is_none()
         );
         std::fs::write(path, r#"{"reasoning_effort":"typo"}"#).unwrap();
-        assert!(Settings::load(home.path()).is_err());
+        assert!(Settings::load(home.path(), None).is_err());
+    }
+
+    #[test]
+    fn reasoning_effort_override_takes_precedence_and_is_validated() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".kwsh/chatgpt.json");
+        let load = |effort| Settings::load(home.path(), Some(effort));
+        assert_eq!(
+            load("low").unwrap().reasoning_effort.as_deref(),
+            Some("low")
+        );
+        std::fs::create_dir(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            path,
+            r#"{"model":"chosen-model","reasoning_effort":"high"}"#,
+        )
+        .unwrap();
+        let settings = load("medium").unwrap();
+        assert_eq!(settings.model.as_deref(), Some("chosen-model"));
+        assert_eq!(settings.reasoning_effort.as_deref(), Some("medium"));
+        assert!(load("typo").is_err());
     }
 
     #[test]

@@ -44,9 +44,10 @@ pub(crate) fn run(
             .filter(|path| path.is_absolute())
             .ok_or_else(|| io::Error::other("ChatGPT sign-in requires an absolute HOME"))?;
         let model = invocation.variable("KWSH_CHATGPT_MODEL");
+        let effort = invocation.variable("KWSH_CHATGPT_REASONING_EFFORT");
         eprintln!("Connecting to ChatGPT. If sign-in is needed, continue in your browser.");
         match editor.chatgpt_task(input, move |cancelled| {
-            chatgpt::Session::connect(&home, model.as_deref(), true, cancelled)
+            chatgpt::Session::connect(&home, model.as_deref(), effort.as_deref(), true, cancelled)
         })? {
             Some(Ok(session)) => {
                 eprintln!("Connected to ChatGPT (model: {}).", session.model);
@@ -116,6 +117,7 @@ pub(crate) fn run(
                         .map(PathBuf::from)
                         .filter(|path| path.is_absolute());
                     let model = invocation.variable("KWSH_CHATGPT_MODEL");
+                    let effort = invocation.variable("KWSH_CHATGPT_REASONING_EFFORT");
                     let question = instruction.trim().to_owned();
                     match editor.chatgpt_task(input, move |cancelled| {
                         let session = match session {
@@ -125,6 +127,7 @@ pub(crate) fn run(
                                     "ChatGPT requires an absolute HOME",
                                 ))?,
                                 model.as_deref(),
+                                effort.as_deref(),
                                 false,
                                 cancelled,
                             )?),
