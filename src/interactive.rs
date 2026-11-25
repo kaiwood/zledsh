@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::{env, fs};
 
 use crate::foreground::Foreground;
+use crate::history::History;
 use crate::runtime::Invocation;
 use crate::syntax::{self, ParseError};
 use crate::terminal_modes::{
@@ -25,11 +26,14 @@ pub(crate) fn run(
         None
     };
     let mut source = String::new();
-    let mut number = 1;
+    let mut history = History::new(invocation);
     while !invocation.exited {
-        let prompt = crate::prompt::render(invocation, kward, !source.is_empty(), number);
+        let mut prompt = crate::prompt::render(invocation, kward, !source.is_empty(), history.next);
+        if kward && history.paused {
+            prompt.insert_str(0, "[private] ");
+        }
         if let Some(editor) = &editor {
-            match editor.read_line(input, &prompt)? {
+            match editor.read_line(input, &prompt, &mut history, source.is_empty())? {
                 Line::Submitted(line) => source.push_str(&line),
                 Line::Cancelled => {
                     source.clear();
@@ -44,6 +48,10 @@ pub(crate) fn run(
                 break;
             }
         }
+        if kward && history.control(&source) {
+            source.clear();
+            continue;
+        }
         match syntax::parse(&source) {
             Ok(commands) => invocation.run(&commands, input),
             Err(ParseError::Incomplete(_)) => continue,
@@ -52,9 +60,7 @@ pub(crate) fn run(
                 invocation.status = 2;
             }
         }
-        if !source.trim().is_empty() {
-            number += 1;
-        }
+        history.record(&source);
         source.clear();
     }
     if !source.is_empty() {
@@ -133,10 +139,17 @@ impl EditorTerminal {
         })
     }
 
-    fn read_line(&self, input: &mut impl BufRead, prompt: &str) -> io::Result<Line> {
+    fn read_line(
+        &self,
+        input: &mut impl BufRead,
+        prompt: &str,
+        history: &mut History,
+        primary: bool,
+    ) -> io::Result<Line> {
         set_attributes(&self.editor)?;
         let mut stderr = io::stderr().lock();
-        let line = write_prompt(&mut stderr, prompt).and_then(|()| read_keys(input, &mut stderr));
+        let line = write_prompt(&mut stderr, prompt)
+            .and_then(|()| read_keys(input, &mut stderr, prompt, history, primary));
         // Builtins such as `read` run with the user's cooked settings.
         set_attributes(&self.original)?;
         line
@@ -160,7 +173,15 @@ fn write_prompt(output: &mut impl Write, prompt: &str) -> io::Result<()> {
     output.flush()
 }
 
-fn read_keys(input: &mut impl BufRead, echo: &mut impl Write) -> io::Result<Line> {
+fn read_keys(
+    input: &mut impl BufRead,
+    echo: &mut impl Write,
+    prompt: &str,
+    history: &mut History,
+    primary: bool,
+) -> io::Result<Line> {
+    let mut cursor = None;
+    let mut draft = Vec::new();
     let mut line = Vec::new();
     let mut byte = [0];
     loop {
@@ -189,6 +210,41 @@ fn read_keys(input: &mut impl BufRead, echo: &mut impl Write) -> io::Result<Line
                 while line.pop().is_some_and(|ch| ch & 0b1100_0000 == 0b1000_0000) {}
                 echo.write_all(b"\x08 \x08")?;
             }
+            27 => {
+                if !read_key_byte(input)?.is_some_and(|byte| byte == b'[' || byte == b'O') {
+                    continue;
+                }
+                let Some(direction) = read_key_byte(input)? else {
+                    continue;
+                };
+                if !matches!(direction, b'A' | b'B') || !primary || history.paused {
+                    continue;
+                }
+                if direction == b'A' && cursor.is_none() {
+                    history.refresh();
+                    draft.clone_from(&line);
+                }
+                let size = history.entries().len();
+                if direction == b'A' {
+                    cursor = cursor.unwrap_or(size).checked_sub(1).or(cursor);
+                } else if let Some(index) = cursor {
+                    cursor = (index + 1 < size).then_some(index + 1);
+                } else {
+                    continue;
+                }
+                line = cursor
+                    .and_then(|index| history.entries().nth(index))
+                    .map_or_else(|| draft.clone(), |text| text.as_bytes().to_vec());
+                echo.write_all(b"\r\x1b[2K")?;
+                echo.write_all(prompt.as_bytes())?;
+                for ch in String::from_utf8_lossy(&line).chars() {
+                    if ch.is_control() {
+                        write!(echo, "{}", ch.escape_default())?;
+                    } else {
+                        write!(echo, "{ch}")?;
+                    }
+                }
+            }
             b' '..=b'~' | 128..=255 | b'\t' => {
                 line.push(byte[0]);
                 echo.write_all(&byte)?;
@@ -196,5 +252,17 @@ fn read_keys(input: &mut impl BufRead, echo: &mut impl Write) -> io::Result<Line
             _ => {}
         }
         echo.flush()?;
+    }
+}
+
+fn read_key_byte(input: &mut impl BufRead) -> io::Result<Option<u8>> {
+    let mut byte = [0];
+    loop {
+        match input.read(&mut byte) {
+            Ok(0) => return Ok(None),
+            Ok(_) => return Ok(Some(byte[0])),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
     }
 }

@@ -1,6 +1,8 @@
 #[cfg(target_os = "macos")]
 mod foreground;
 #[cfg(target_os = "macos")]
+mod history;
+#[cfg(target_os = "macos")]
 mod interactive;
 mod process;
 #[cfg(target_os = "macos")]

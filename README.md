@@ -10,6 +10,8 @@ This slice supports `cd`, `pwd`, `exit` and a limited `printf` (`%s` and `%%`), 
 
 On macOS, run `target/debug/kwsh` or `target/debug/kward shell` without arguments for an interactive prompt. Both use `PS1` and `PS2`; `kward shell` also accepts a Zsh-style `PROMPT` (try `PROMPT='%~ [%?] %# '`), provides basic line editing, and runs supported commands and assignments from `.kward/kwshrc` and `.kwshrc` under your home directory. Plain `kwsh` skips those files. Both profiles load the file named by the launch environment’s `ENV`, if set, after the rc files. `ENV`, `PS1`, and `PS2` allow parameter expansion, not command substitution. Ctrl+C interrupts a foreground command or pipeline; Ctrl+Z stops it, and `fg` resumes the most recently stopped job. A pipeline reports its last stage’s status, and builtin stages run separately from the live shell. Background jobs and the `?` assistant are not implemented yet.
 
+Set `HISTFILE` before the first prompt to opt into persistent history. For example, put `export HISTFILE="$HOME/.kwsh_history"` in `~/.kwshrc`. History otherwise stays in memory; `HISTSIZE` defaults to 512. At the `kward shell` prompt, use the Up and Down keys to recall previous commands. Use `history pause` before entering a sensitive command, then `history resume` to start recording again. Pausing does not erase earlier history or hide your input from terminal scrollback. Unsafe files (including symlinks and files not owned by you with mode `0600`) are left untouched.
+
 ## Development
 
 Use Rust 1.85 or newer (edition 2024). From the repository root:

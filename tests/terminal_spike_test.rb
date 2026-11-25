@@ -1,5 +1,6 @@
 require "io/console"
 require "minitest/autorun"
+require "json"
 require "pty"
 require "rbconfig"
 require "shellwords"
@@ -155,6 +156,31 @@ class TerminalSpikeTest < Minitest::Test
         end
         exit_spike(reader, writer, pid)
       end
+    end
+  end
+
+  def test_private_commands_are_not_persisted_or_recalled
+    binary = File.expand_path("../target/debug/kward", __dir__)
+    env = { "PROMPT" => "hist> ", "HISTFILE" => "history.jsonl", "TERM" => "xterm" }
+    with_terminal(binary, "shell", env: env, prompt: "hist> ") do |reader, writer, pid, home|
+      writer.write("printf 'public-output\\n'\n")
+      read_until(reader, "public-output\r\n")
+      read_until(reader, "hist> ")
+      writer.write("history pause\n")
+      read_until(reader, "[private] hist> ")
+      writer.write("printf 'private-output\\n'\n")
+      read_until(reader, "private-output\r\n")
+      read_until(reader, "[private] hist> ")
+      writer.write("history resume\n")
+      read_until(reader, "hist> ")
+      writer.write("\e[A\n")
+      read_until(reader, "public-output\r\n")
+      read_until(reader, "hist> ")
+      exit_spike(reader, writer, pid)
+      path = File.join(home, "history.jsonl")
+      assert_equal 0o600, File.stat(path).mode & 0o777
+      assert_equal ["printf 'public-output\\n'", "printf 'public-output\\n'", "exit"],
+        File.readlines(path).map { |line| JSON.parse(line).last }
     end
   end
 
