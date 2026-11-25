@@ -1,6 +1,12 @@
 # kwsh
 
-`kwsh` is a work-in-progress standalone Rust port of Kward’s shell for macOS and Linux. The `kwsh` binary is still a placeholder; the terminal prototype is a separate Cargo example.
+`kwsh` is a work-in-progress standalone Rust port of Kward’s shell for macOS and Linux. Both `kwsh -c` and `kward shell -c` run a small subset of shell commands using the same Rust interpreter. The terminal prototype is a separate Cargo example.
+
+```sh
+cargo run --locked -- -c 'printf "<%s>\n" "$0" "$@"' demo 'two words'
+```
+
+This slice supports `exit` and a limited `printf` (`%s` and `%%`), quoted positional arguments and simple environment substitutions, sequential commands, and output redirection for fd 1 and 2. External commands, redirected stdin, and interactive mode are not implemented yet. Unsupported syntax is not passed to another shell.
 
 ## Development
 
@@ -22,15 +28,15 @@ ruby tests/shell_parity_test.rb
 
 Set `KWSH_REFERENCE` to use a checkout in a different location. Each case runs with a temporary home and working directory. The suite checks both `kward shell` and plain `kwsh`: `-c` arguments, exit status, output and a redirected file, input redirected into the shell, and interactive startup, command output and exit in a PTY. The PTY checks also verify that `kward shell` loads `~/.kwshrc` and plain `kwsh` does not.
 
-To run the same cases against another build, set **both** `KWSH_KWARD_CMD` and `KWSH_PLAIN_CMD` to the corresponding launch commands. They are split into arguments, not evaluated by a shell. Use absolute paths for any path arguments after the executable, since the tests run from a temporary directory. For example, once the Rust implementation supports both profiles:
+To run the same cases against another build, set **both** `KWSH_KWARD_CMD` and `KWSH_PLAIN_CMD` to the corresponding launch commands. They are split into arguments, not evaluated by a shell. Use absolute paths for any path arguments after the executable, since the tests run from a temporary directory. To check the implemented `-c` behavior against the same fixtures:
 
 ```sh
 KWSH_KWARD_CMD='./target/debug/kward shell' \
 KWSH_PLAIN_CMD='./target/debug/kwsh' \
-ruby tests/shell_parity_test.rb
+ruby tests/shell_parity_test.rb --name '/_command$/'
 ```
 
-The current Rust binary is a placeholder and is not expected to pass. The initial baseline is macOS only; Linux validation is deferred.
+The redirected-input and PTY parity cases still target unimplemented Rust behavior. Linux validation is deferred.
 
 ### Terminal and process spike (macOS)
 
