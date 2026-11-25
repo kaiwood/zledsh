@@ -135,15 +135,39 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
+  def test_startup_and_prompt_profiles
+    { "kwsh" => [], "kward" => ["shell"] }.each do |name, args|
+      binary = File.expand_path("../target/debug/#{name}", __dir__)
+      env = { "ENV" => '$HOME/startup file', "PS1" => '$MARK! !!> ', "PROMPT" => nil, "TERM" => "xterm" }
+      with_terminal(binary, *args, env: env, prompt: "$ ", setup: ->(home) {
+        File.write(File.join(home, "startup file"), "printf 'startup:%s\\n' \"$RC\"\nMARK=env\n")
+        File.write(File.join(home, ".kwshrc"), "RC=kward\nENV=ignored\nPROMPT='%~ [%?] %%> '\n") if name == "kward"
+        File.write(File.join(home, "ignored"), "exit 42\n")
+      }, start: false) do |reader, writer, pid|
+        if name == "kward"
+          assert_includes read_until(reader, "~ [0] %> "), "startup:kward"
+          writer.write("cd moved; /usr/bin/false\n")
+          read_until(reader, "~/moved [1] %> ")
+          writer.write("cd ..\n")
+          read_until(reader, "~ [0] %> ")
+        else
+          assert_includes read_until(reader, "env1 !> "), "startup:\r\n"
+        end
+        exit_spike(reader, writer, pid)
+      end
+    end
+  end
+
   private
 
   def with_spike(&block)
     with_terminal(SPIKE, env: {}, prompt: PROMPT, &block)
   end
 
-  def with_terminal(executable, *args, env:, prompt:)
+  def with_terminal(executable, *args, env:, prompt:, setup: nil, start: true)
     Dir.mktmpdir("kwsh-terminal-") do |work|
       Dir.mkdir(File.join(work, "moved"))
+      setup&.call(work)
       # Keep the session leader alive: macOS revokes the tty when it exits.
       bootstrap = <<~'RUBY'
         def tty_modes
@@ -164,7 +188,7 @@ class TerminalSpikeTest < Minitest::Test
         PTY.spawn({ "HOME" => work, "KWARD_CONFIG_PATH" => nil }.merge(env), RbConfig.ruby, "-e", bootstrap, executable, *args,
                   chdir: work, 9 => descriptor) do |reader, writer, pid|
           reader.winsize = [24, 80]
-          read_until(reader, prompt)
+          read_until(reader, prompt) if start
           yield reader, writer, pid, work
         ensure
           reader.close

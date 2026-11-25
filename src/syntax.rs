@@ -229,6 +229,28 @@ fn double_quoted(input: &mut Source<'_>, word: &mut Word) -> ParseResult<()> {
     Err(ParseError::Incomplete("unclosed double quote"))
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) fn parameter_text(value: &str) -> Result<Word, String> {
+    let mut word = Word::default();
+    let mut input = value.chars().peekable();
+    while let Some(ch) = input.next() {
+        match ch {
+            '$' => parameter(&mut input, &mut word).map_err(|error| error.message().to_owned())?,
+            '`' => return Err("command substitution is not supported".into()),
+            '\\' if input
+                .peek()
+                .is_some_and(|ch| matches!(ch, '$' | '`' | '\\' | '\n')) =>
+            {
+                if let Some(next) = input.next().filter(|ch| *ch != '\n') {
+                    literal(&mut word, next);
+                }
+            }
+            _ => literal(&mut word, ch),
+        }
+    }
+    Ok(word)
+}
+
 fn parameter(input: &mut Source<'_>, word: &mut Word) -> ParseResult<()> {
     let part = match input.peek() {
         Some('0') => {

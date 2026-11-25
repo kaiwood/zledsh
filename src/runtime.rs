@@ -369,6 +369,11 @@ impl<'a> Invocation<'a> {
             .or_else(|| std::env::var(name).ok())
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn parameter_text(&self, value: &str) -> Result<String, String> {
+        crate::syntax::parameter_text(value).map(|word| self.expand(&word).join(" "))
+    }
+
     fn expand(&self, word: &Word) -> Vec<String> {
         let mut fields = Vec::new();
         let mut field = String::new();

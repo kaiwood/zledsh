@@ -3,6 +3,8 @@ mod foreground;
 #[cfg(target_os = "macos")]
 mod interactive;
 mod process;
+#[cfg(target_os = "macos")]
+mod prompt;
 mod runtime;
 mod syntax;
 #[cfg(target_os = "macos")]

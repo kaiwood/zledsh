@@ -15,9 +15,7 @@ pub(crate) fn run(
     kward: bool,
 ) -> io::Result<u8> {
     invocation.foreground = Some(Foreground::new()?);
-    if kward {
-        load_startup(invocation, input);
-    }
+    load_startup(invocation, input, kward);
     if invocation.exited {
         return Ok(invocation.status);
     }
@@ -27,14 +25,9 @@ pub(crate) fn run(
         None
     };
     let mut source = String::new();
+    let mut number = 1;
     while !invocation.exited {
-        let prompt = if !source.is_empty() {
-            invocation.variable("PS2").unwrap_or_else(|| "> ".into())
-        } else {
-            let rich = kward.then(|| invocation.variable("PROMPT")).flatten();
-            rich.or_else(|| invocation.variable("PS1"))
-                .unwrap_or_else(|| "$ ".into())
-        };
+        let prompt = crate::prompt::render(invocation, kward, !source.is_empty(), number);
         if let Some(editor) = &editor {
             match editor.read_line(input, &prompt)? {
                 Line::Submitted(line) => source.push_str(&line),
@@ -59,6 +52,9 @@ pub(crate) fn run(
                 invocation.status = 2;
             }
         }
+        if !source.trim().is_empty() {
+            number += 1;
+        }
         source.clear();
     }
     if !source.is_empty() {
@@ -68,11 +64,25 @@ pub(crate) fn run(
     Ok(invocation.status)
 }
 
-fn load_startup(invocation: &mut Invocation<'_>, input: &mut impl BufRead) {
+fn load_startup(invocation: &mut Invocation<'_>, input: &mut impl BufRead, kward: bool) {
     // Do not run user startup files if real and effective IDs differ.
     if unsafe { libc::getuid() != libc::geteuid() || libc::getgid() != libc::getegid() } {
         return;
     }
+    let startup = invocation.variable("ENV");
+    if kward {
+        load_kwshrc(invocation, input);
+    }
+    if let Some(value) = startup.filter(|_| !invocation.exited) {
+        match invocation.parameter_text(&value) {
+            Ok(path) if Path::new(&path).is_file() => load_rc(Path::new(&path), invocation, input),
+            Ok(_) => {}
+            Err(error) => eprintln!("kwsh: ENV: {error}"),
+        }
+    }
+}
+
+fn load_kwshrc(invocation: &mut Invocation<'_>, input: &mut impl BufRead) {
     let home = env::var_os("HOME")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from);
