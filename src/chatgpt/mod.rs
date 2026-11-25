@@ -200,6 +200,48 @@ impl Session {
 
 const MAX_TOOL_ROUNDS: usize = 8;
 
+/// Text-only follow-up context for one interactive shell session.
+#[derive(Default)]
+pub(crate) struct Conversation {
+    exchanges: std::collections::VecDeque<[Value; 2]>,
+}
+
+impl Conversation {
+    pub fn begin(&self, question: &str, context: &ShellContext) -> Result<Turn> {
+        let mut turn = Turn::new(question, context)?;
+        turn.input
+            .splice(..0, self.exchanges.iter().flatten().cloned());
+        Ok(turn)
+    }
+
+    pub fn remember(&mut self, question: &str, answer: &str) {
+        const LIMIT: usize = 4;
+        fn shortened(text: &str) -> &str {
+            let mut end = text.len().min(4096);
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            &text[..end]
+        }
+        let answer = if answer.is_empty() {
+            "The shell displayed command output directly."
+        } else {
+            answer
+        };
+        self.exchanges.push_back([
+            json!({"role":"user", "content": shortened(question)}),
+            json!({"role":"assistant", "content": shortened(answer)}),
+        ]);
+        if self.exchanges.len() > LIMIT {
+            self.exchanges.pop_front();
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.exchanges.clear();
+    }
+}
+
 pub(crate) struct Turn {
     input: Vec<Value>,
     call_ids: std::collections::HashSet<String>,

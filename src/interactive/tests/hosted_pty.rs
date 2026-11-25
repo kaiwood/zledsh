@@ -66,10 +66,6 @@ fn hosted_turns_in_a_real_terminal() {
         assert_eq!(fs::read(work.path().join("foo.txt"))?, b"bar");
         writer.write_all(b"? cat the file\n")?;
         wait_for(&mut reader, "\r\ntest> cat foo.txt\r\nbar\r\ntest> ")?;
-        writer.write_all(b"? wait\n")?;
-        wait_for(&mut reader, "fixture pending\r\n")?;
-        writer.write_all(b"\x03")?;
-        wait_for(&mut reader, "turn cancelled\r\ntest> ")?;
         writer.write_all(b"history pause\n")?;
         wait_for(&mut reader, "[private] test> ")?;
         writer.write_all(b"? must not be sent\n")?;
@@ -79,6 +75,12 @@ fn hosted_turns_in_a_real_terminal() {
         )?;
         writer.write_all(b"history resume\n")?;
         wait_for(&mut reader, "\r\ntest> ")?;
+        writer.write_all(b"? memory cleared\n")?;
+        wait_for(&mut reader, "cleared\r\ntest> ")?;
+        writer.write_all(b"? wait\n")?;
+        wait_for(&mut reader, "fixture pending\r\n")?;
+        writer.write_all(b"\x03")?;
+        wait_for(&mut reader, "turn cancelled\r\ntest> ")?;
         writer.write_all(b"exit\n")?;
         wait_for(&mut reader, "1 passed")?;
         Ok(())
@@ -130,7 +132,25 @@ fn wait_for(
 
 fn respond(request: &Value, cancelled: &AtomicBool) -> Result<chatgpt::Reply, chatgpt::Error> {
     let input = request["input"].as_array().unwrap();
-    let prompt: Value = serde_json::from_str(input[0]["content"].as_str().unwrap()).unwrap();
+    let prompt: Value = input
+        .iter()
+        .rev()
+        .filter_map(|item| item["content"].as_str())
+        .find_map(|content| serde_json::from_str(content).ok())
+        .unwrap();
+    if prompt["question"] == "memory cleared" {
+        assert_eq!(input.len(), 1);
+    }
+    if prompt["question"] == "write to that file" {
+        assert_eq!(input[0]["content"], "create a file");
+        assert_eq!(input[1]["content"], "created");
+    }
+    if prompt["question"] == "memory cleared" {
+        let event = json!({"type":"response.completed", "response": {"object":"response", "status":"completed", "output":[
+            {"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"cleared"}]}
+        ]}});
+        return chatgpt::Session::fixture_stream(&format!("data: {event}\n\n"), cancelled);
+    }
     let (command, tool, answer) = match prompt["question"].as_str().unwrap() {
         "create a file" => ("touch foo.txt", "run_shell_command", "created"),
         "write to that file" => ("printf bar > foo.txt", "run_shell_command", "wrote"),

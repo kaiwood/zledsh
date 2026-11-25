@@ -83,6 +83,7 @@ fn run_shell(
     let mut history = History::new(invocation);
     let mut pending_draft = String::new();
     let mut last_command = None;
+    let mut conversation = chatgpt::Conversation::default();
     while !invocation.exited {
         invocation.foreground.as_mut().unwrap().refresh()?;
         let mut prompt = crate::prompt::render(invocation, !source.is_empty(), history.next);
@@ -148,10 +149,12 @@ fn run_shell(
                         input,
                         &mut chatgpt,
                         &mut shell,
-                        instruction.trim(),
-                        &context,
+                        conversation.begin(instruction.trim(), &context),
                     )? {
-                        Some(Ok(answer)) => show_answer(&answer),
+                        Some(Ok(answer)) => {
+                            conversation.remember(instruction.trim(), &answer);
+                            show_answer(&answer);
+                        }
                         Some(Err(error)) => eprintln!("kwsh: ChatGPT: {error}"),
                         None => eprintln!("^C\nturn cancelled"),
                     }
@@ -167,6 +170,7 @@ fn run_shell(
         if history.control(&source) {
             if history.paused {
                 last_command = None;
+                conversation.clear();
             }
             source.clear();
             continue;
@@ -273,10 +277,9 @@ fn ask_chatgpt(
     input: &mut impl BufRead,
     session: &mut Option<Arc<chatgpt::Session>>,
     shell: &mut AgentShell<'_, '_>,
-    instruction: &str,
-    context: &ShellContext,
+    turn: Result<chatgpt::Turn, chatgpt::Error>,
 ) -> io::Result<Option<Result<String, chatgpt::Error>>> {
-    let mut turn = match chatgpt::Turn::new(instruction, context) {
+    let mut turn = match turn {
         Ok(turn) => turn,
         Err(error) => return Ok(Some(Err(error))),
     };
