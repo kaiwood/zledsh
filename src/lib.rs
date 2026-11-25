@@ -1,5 +1,6 @@
 #[cfg(target_os = "macos")]
 mod interactive;
+mod process;
 mod runtime;
 mod syntax;
 #[cfg(target_os = "macos")]
@@ -8,7 +9,7 @@ mod terminal_modes;
 use std::{
     env,
     ffi::OsString,
-    io::{self, BufRead},
+    io::{self, BufRead, BufReader},
     process::ExitCode,
 };
 
@@ -47,14 +48,16 @@ fn run_command(
     mut args: impl Iterator<Item = OsString>,
 ) -> Result<u8, String> {
     let option = args.next();
-    let mut input = io::stdin().lock();
+    // The next bytes may belong to a child reading fd 0 directly.
+    let mut input = BufReader::with_capacity(1, process::Stdin);
     let Some(option) = option else {
         let mut invocation =
             runtime::Invocation::new(name.to_str().ok_or("command name must be UTF-8")?, &[]);
         #[cfg(target_os = "macos")]
         {
             use std::io::IsTerminal;
-            if input.is_terminal() && io::stderr().is_terminal() {
+            if io::stdin().is_terminal() && io::stderr().is_terminal() {
+                invocation.allow_external = false;
                 return interactive::run(&mut invocation, &mut input, program == "kward shell")
                     .map_err(|error| error.to_string());
             }

@@ -88,6 +88,36 @@ pub(crate) fn parse(source: &str) -> ParseResult<Vec<Command>> {
                         duplicate,
                     });
                 } else {
+                    if command.words.is_empty() {
+                        let head: String = input
+                            .clone()
+                            .take_while(|ch| !matches!(ch, ' ' | '\t' | '\n' | ';' | '>'))
+                            .collect();
+                        if matches!(
+                            head.as_str(),
+                            "if" | "then"
+                                | "elif"
+                                | "else"
+                                | "fi"
+                                | "for"
+                                | "while"
+                                | "until"
+                                | "do"
+                                | "done"
+                                | "case"
+                                | "esac"
+                                | "select"
+                                | "function"
+                                | "!"
+                                | "[["
+                                | "]]"
+                                | "time"
+                        ) {
+                            return Err(ParseError::Invalid(format!(
+                                "unsupported shell keyword: {head}"
+                            )));
+                        }
+                    }
                     command.words.push(word(&mut input)?);
                 }
             }

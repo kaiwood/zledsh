@@ -1,7 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, BufRead, Write};
+use std::process::Stdio;
 use std::rc::Rc;
+
+use crate::process;
 
 use crate::syntax::{Command, Part, Redirect, Word};
 
@@ -9,6 +13,8 @@ pub(crate) struct Invocation<'a> {
     name: &'a str,
     args: &'a [String],
     variables: HashMap<String, String>,
+    exported: HashSet<String>,
+    pub allow_external: bool,
     pub status: u8,
     pub exited: bool,
 }
@@ -19,6 +25,8 @@ impl<'a> Invocation<'a> {
             name,
             args,
             variables: HashMap::new(),
+            exported: HashSet::new(),
+            allow_external: true,
             status: 0,
             exited: false,
         }
@@ -78,16 +86,14 @@ impl<'a> Invocation<'a> {
                 "export" => {
                     self.status = 0;
                     for arg in args {
-                        if arg
-                            .split_once('=')
-                            .is_some_and(|(name, _)| valid_name(name))
-                        {
-                            self.assign(arg);
-                        } else if !valid_name(arg) {
+                        let name = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
+                        if !valid_name(name) {
                             report(&output[1], "export: expected a variable name or assignment");
                             self.status = 2;
                             break;
                         }
+                        self.exported.insert(name.to_owned());
+                        self.assign(arg);
                     }
                 }
                 "read" => {
@@ -110,11 +116,56 @@ impl<'a> Invocation<'a> {
                         }
                     };
                 }
+                _ if self.allow_external => self.status = self.external(&argv, &output),
                 _ => {
                     report(&output[1], &format!("unsupported command: {name}"));
                     self.status = 127;
                     return;
                 }
+            }
+        }
+    }
+
+    fn external(&self, argv: &[String], output: &[Output; 2]) -> u8 {
+        let path = self
+            .variables
+            .get("PATH")
+            .map(OsString::from)
+            .or_else(|| std::env::var_os("PATH"))
+            .unwrap_or_else(|| OsString::from("/usr/bin:/bin"));
+        let mut env: HashMap<OsString, OsString> = std::env::vars_os().collect();
+        for (name, value) in &self.variables {
+            if self.exported.contains(name) || env.contains_key(OsStr::new(name)) {
+                env.insert(name.into(), value.into());
+            }
+        }
+        let streams = output[0]
+            .stdio()
+            .and_then(|stdout| Ok((stdout, output[1].stdio()?)));
+        let (stdout, stderr) = match streams {
+            Ok(streams) => streams,
+            Err(error) => {
+                report(&output[1], &format!("{}: {error}", argv[0]));
+                return 1;
+            }
+        };
+        match process::spawn(argv, &path, env, stdout, stderr) {
+            Ok(mut child) => match child.wait() {
+                Ok(status) => process::status_code(status),
+                Err(error) => {
+                    report(&output[1], &format!("{}: {error}", argv[0]));
+                    1
+                }
+            },
+            Err(error) => {
+                let missing = error.raw_os_error() == Some(libc::ENOENT);
+                let message = if missing {
+                    "command not found".to_owned()
+                } else {
+                    error.to_string()
+                };
+                report(&output[1], &format!("{}: {message}", argv[0]));
+                if missing { 127 } else { 126 }
             }
         }
     }
@@ -252,6 +303,14 @@ enum Output {
 }
 
 impl Output {
+    fn stdio(&self) -> io::Result<Stdio> {
+        match self {
+            Self::Stdout => process::duplicate(libc::STDOUT_FILENO),
+            Self::Stderr => process::duplicate(libc::STDERR_FILENO),
+            Self::File(file) => file.try_clone().map(Stdio::from),
+        }
+    }
+
     fn write(&self, text: &str) -> io::Result<()> {
         match self {
             Self::Stdout => {

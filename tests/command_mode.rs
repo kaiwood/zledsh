@@ -47,6 +47,7 @@ fn unsupported_syntax_is_rejected_before_execution() {
         r#"printf '%s' "$(printf wrong)""#,
         "printf wrong | printf wrong",
         "printf 'unclosed",
+        "if /usr/bin/false; then printf wrong; fi",
     ] {
         let script = format!("printf earlier; {tail}");
         let output = run(&script, &[]);
@@ -54,12 +55,4 @@ fn unsupported_syntax_is_rejected_before_execution() {
         assert!(output.stdout.is_empty(), "{script}");
         assert!(!output.stderr.is_empty(), "{script}");
     }
-}
-
-#[test]
-fn external_programs_are_not_dispatched_in_this_slice() {
-    let output = run("/bin/echo wrong; printf wrong", &[]);
-    assert_eq!(output.status.code(), Some(127));
-    assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported command"));
 }
