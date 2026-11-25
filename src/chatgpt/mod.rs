@@ -409,11 +409,23 @@ fn access_token(
     allow_sign_in: bool,
     cancelled: &AtomicBool,
 ) -> Result<String> {
+    access_token_with_refresh(agent, home, allow_sign_in, cancelled, |saved| {
+        oauth::refresh(agent, saved)
+    })
+}
+
+fn access_token_with_refresh(
+    agent: &ureq::Agent,
+    home: &Path,
+    allow_sign_in: bool,
+    cancelled: &AtomicBool,
+    refresh: impl FnOnce(&credentials::Credentials) -> Result<credentials::Credentials>,
+) -> Result<String> {
     let store = credentials::Store::lock(home, cancelled)?;
     let previous = store.load()?;
     let current = match previous.as_ref() {
         Some(saved) if saved.usable_at(credentials::now()?) => return Ok(saved.access.clone()),
-        Some(saved) => match oauth::refresh(agent, saved) {
+        Some(saved) => match refresh(saved) {
             Err(Error::SignIn) if allow_sign_in => {
                 oauth::authorize(agent, store.directory(), cancelled, Some(saved))?
             }
@@ -746,6 +758,42 @@ mod tests {
             access_token(&agent, home.path(), true, &cancelled).unwrap(),
             "fixture-access"
         );
+    }
+
+    #[test]
+    fn saves_rotated_credentials_even_if_the_turn_was_cancelled() {
+        let home = tempfile::tempdir().unwrap();
+        let cancelled = AtomicBool::new(false);
+        let agent = ureq::Agent::new_with_defaults();
+        let fixture = |access: &str, refresh: &str, expires_at| credentials::Credentials {
+            client: "fixture-client".into(),
+            subject: "fixture-subject".into(),
+            access: access.into(),
+            refresh: refresh.into(),
+            expires_at,
+        };
+        credentials::Store::lock(home.path(), &cancelled)
+            .unwrap()
+            .save(&fixture("previous-access", "previous-refresh", 0))
+            .unwrap();
+        let access = access_token_with_refresh(&agent, home.path(), false, &cancelled, |saved| {
+            assert_eq!(saved.refresh, "previous-refresh");
+            cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(fixture(
+                "rotated-access",
+                "rotated-refresh",
+                credentials::now()? + 3600,
+            ))
+        })
+        .unwrap();
+        assert_eq!(access, "rotated-access");
+        let saved = credentials::Store::lock(home.path(), &AtomicBool::new(false))
+            .unwrap()
+            .load()
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved.refresh, "rotated-refresh");
+        assert_eq!(saved.access, "rotated-access");
     }
 
     fn response(status: u16, format: &str, body: &str) -> ureq::http::Response<ureq::Body> {
