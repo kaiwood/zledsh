@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use super::{
     Error, Result,
-    credentials::{self, Credentials},
+    credentials::{self, Credentials, HOST_FILE},
 };
 
 const ISSUER: &str = "https://auth.openai.com";
@@ -26,11 +26,11 @@ const SCOPES: &str =
 
 pub(super) fn authorize(
     agent: &ureq::Agent,
-    home: &Path,
+    directory: &Path,
     cancelled: &AtomicBool,
     previous: Option<&Credentials>,
 ) -> Result<Credentials> {
-    let host = host_id(home)
+    let host = host_id(directory)
         .map_err(|_| Error::Message("could not read or create the ChatGPT host ID"))?;
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|_| Error::Message("could not start the sign-in callback"))?;
@@ -197,8 +197,8 @@ fn secret() -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-fn host_id(home: &Path) -> io::Result<String> {
-    let path = home.join(".kwsh-chatgpt-host");
+fn host_id(directory: &Path) -> io::Result<String> {
+    let path = directory.join(HOST_FILE);
     let read = || {
         let file = OpenOptions::new()
             .read(true)
@@ -237,7 +237,7 @@ fn host_id(home: &Path) -> io::Result<String> {
         }
         let _ = write!(id, "{byte:02x}");
     }
-    let mut file = tempfile::NamedTempFile::new_in(home)?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
     file.write_all(id.as_bytes())?;
     file.as_file().sync_all()?;
     match file.persist_noclobber(&path) {
@@ -572,7 +572,7 @@ mod tests {
     #[test]
     fn host_identifier_is_stable_and_rejects_unsafe_files() {
         let home = tempfile::tempdir().unwrap();
-        let path = home.path().join(".kwsh-chatgpt-host");
+        let path = home.path().join(HOST_FILE);
         let first = host_id(home.path()).unwrap();
         assert_eq!(host_id(home.path()).unwrap(), first);
         assert_eq!(

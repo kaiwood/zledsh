@@ -121,11 +121,11 @@ fn access_token(
         Some(saved) if saved.usable_at(credentials::now()?) => return Ok(saved.access.clone()),
         Some(saved) => match oauth::refresh(agent, saved) {
             Err(Error::SignIn) if allow_sign_in => {
-                oauth::authorize(agent, home, cancelled, Some(saved))?
+                oauth::authorize(agent, store.directory(), cancelled, Some(saved))?
             }
             result => result?,
         },
-        None if allow_sign_in => oauth::authorize(agent, home, cancelled, None)?,
+        None if allow_sign_in => oauth::authorize(agent, store.directory(), cancelled, None)?,
         None => return Err(Error::SignIn),
     };
     // A refresh may already have rotated the token by the time Ctrl+C arrives.

@@ -1,7 +1,7 @@
-use std::fs::{File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Read};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -37,33 +37,25 @@ pub(super) struct Store {
     _lock: File,
 }
 
+pub(super) const HOST_FILE: &str = "chatgpt-host";
+const SESSION_FILE: &str = "chatgpt-session";
+
 const STORE_ERROR: Error = Error::Message("could not access the private ChatGPT credentials file");
 
 impl Store {
     pub fn lock(home: &Path, cancelled: &AtomicBool) -> Result<Self> {
-        let path = home.join(".kwsh-chatgpt-session");
-        let lock = options()
-            .write(true)
-            .create(true)
-            .mode(0o600)
-            .open(home.join(".kwsh-chatgpt-session.lock"))
-            .map_err(|_| STORE_ERROR)?;
-        validate(&lock)?;
-        loop {
-            oauth::check_cancelled(cancelled)?;
-            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                break;
-            }
-            let error = io::Error::last_os_error();
-            if !matches!(
-                error.kind(),
-                io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
-            ) {
-                return Err(STORE_ERROR);
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        Ok(Self { path, _lock: lock })
+        let directory = home.join(".kwsh");
+        prepare_directory(&directory)?;
+        let lock = lock_file(&directory.join("chatgpt-session.lock"), cancelled)?;
+        migrate(home, &directory, cancelled)?;
+        Ok(Self {
+            path: directory.join(SESSION_FILE),
+            _lock: lock,
+        })
+    }
+
+    pub fn directory(&self) -> &Path {
+        self.path.parent().expect("session path has a parent")
     }
 
     pub fn load(&self) -> Result<Option<Credentials>> {
@@ -106,6 +98,80 @@ impl Store {
     }
 }
 
+fn prepare_directory(path: &Path) -> Result<()> {
+    const DIRECTORY_ERROR: Error =
+        Error::Message("~/.kwsh must be a directory you own with mode 0700 (not a symlink)");
+    match DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(DIRECTORY_ERROR),
+    }
+    let stat = fs::symlink_metadata(path).map_err(|_| DIRECTORY_ERROR)?;
+    if !stat.is_dir() || stat.uid() != unsafe { libc::getuid() } || stat.mode() & 0o7777 != 0o700 {
+        return Err(DIRECTORY_ERROR);
+    }
+    Ok(())
+}
+
+fn migrate(home: &Path, directory: &Path, cancelled: &AtomicBool) -> Result<()> {
+    let paths = [
+        (home.join(".kwsh-chatgpt-host"), directory.join(HOST_FILE)),
+        (
+            home.join(".kwsh-chatgpt-session"),
+            directory.join(SESSION_FILE),
+        ),
+    ];
+    let mut needed = false;
+    for (old, new) in &paths {
+        needed |= !exists(new)? && exists(old)?;
+    }
+    if !needed {
+        return Ok(());
+    }
+    // Coordinate with a previous build that might still be rotating credentials.
+    let _legacy_lock = lock_file(&home.join(".kwsh-chatgpt-session.lock"), cancelled)?;
+    for (old, new) in paths {
+        if !exists(&new)? && exists(&old)? {
+            let file = options().open(&old).map_err(|_| STORE_ERROR)?;
+            validate(&file)?;
+            fs::rename(old, new).map_err(|_| STORE_ERROR)?;
+        }
+    }
+    Ok(())
+}
+
+fn exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(STORE_ERROR),
+    }
+}
+
+fn lock_file(path: &Path, cancelled: &AtomicBool) -> Result<File> {
+    let lock = options()
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|_| STORE_ERROR)?;
+    validate(&lock)?;
+    loop {
+        oauth::check_cancelled(cancelled)?;
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(lock);
+        }
+        let error = io::Error::last_os_error();
+        if !matches!(
+            error.kind(),
+            io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+        ) {
+            return Err(STORE_ERROR);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn options() -> OpenOptions {
     let mut options = OpenOptions::new();
     options
@@ -130,6 +196,61 @@ fn validate(file: &File) -> Result<()> {
 mod tests {
     use super::*;
     use std::os::unix::fs::{PermissionsExt, symlink};
+
+    #[test]
+    fn moves_existing_chatgpt_state_without_overwriting_new_state() {
+        let home = tempfile::tempdir().unwrap();
+        let home = home.path();
+        let running = AtomicBool::new(false);
+        let legacy_host = home.join(".kwsh-chatgpt-host");
+        let legacy_session = home.join(".kwsh-chatgpt-session");
+        let write_private = |path: &Path, contents: &[u8]| {
+            use std::io::Write;
+            options()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(path)
+                .unwrap()
+                .write_all(contents)
+                .unwrap();
+        };
+        write_private(
+            &legacy_host,
+            b"urn:uuid:00000000-0000-4000-8000-000000000000",
+        );
+        write_private(&legacy_session, br#"{"client":"fixture-client","subject":"fixture-subject","access":"fixture-access","refresh":"fixture-refresh","expires_at":1000}"#);
+        {
+            let store = Store::lock(home, &running).unwrap();
+            assert_eq!(store.load().unwrap().unwrap().access, "fixture-access");
+            assert_eq!(store.directory().metadata().unwrap().mode() & 0o777, 0o700);
+            assert_eq!(
+                fs::read(store.directory().join(HOST_FILE)).unwrap(),
+                b"urn:uuid:00000000-0000-4000-8000-000000000000"
+            );
+            assert!(!legacy_host.exists());
+            assert!(!legacy_session.exists());
+        }
+        write_private(&legacy_session, b"stale file");
+        let store = Store::lock(home, &running).unwrap();
+        assert_eq!(store.load().unwrap().unwrap().access, "fixture-access");
+        assert_eq!(fs::read(&legacy_session).unwrap(), b"stale file");
+    }
+
+    #[test]
+    fn rejects_insecure_or_symlinked_state_directories() {
+        let home = tempfile::tempdir().unwrap();
+        let directory = home.path().join(".kwsh");
+        let running = AtomicBool::new(false);
+        DirBuilder::new().mode(0o755).create(&directory).unwrap();
+        assert!(Store::lock(home.path(), &running).is_err());
+        let other = home.path().join("other");
+        fs::rename(&directory, &other).unwrap();
+        fs::set_permissions(&other, fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(&other, &directory).unwrap();
+        assert!(Store::lock(home.path(), &running).is_err());
+        assert!(other.read_dir().unwrap().next().is_none());
+    }
 
     #[test]
     fn reloads_the_latest_token_pair_and_rejects_unsafe_permissions() {
