@@ -365,6 +365,7 @@ dependencies = [
  "jsonwebtoken",
  "libc",
  "ring",
+ "serde",
  "serde_json",
  "tempfile",
  "ureq",

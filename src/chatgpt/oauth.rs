@@ -12,7 +12,10 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use ring::{digest, rand};
 use serde_json::Value;
 
-use super::{Error, Result};
+use super::{
+    Error, Result,
+    credentials::{self, Credentials},
+};
 
 const ISSUER: &str = "https://auth.openai.com";
 const RESOURCE: &str = "https://api.openai.com/v1";
@@ -25,7 +28,8 @@ pub(super) fn authorize(
     agent: &ureq::Agent,
     home: &Path,
     cancelled: &AtomicBool,
-) -> Result<String> {
+    previous: Option<&Credentials>,
+) -> Result<Credentials> {
     let host = host_id(home)
         .map_err(|_| Error::Message("could not read or create the ChatGPT host ID"))?;
     let listener = TcpListener::bind(("127.0.0.1", 0))
@@ -42,9 +46,11 @@ pub(super) fn authorize(
     let nonce = secret()?;
     let verifier = secret()?;
     let challenge = URL_SAFE_NO_PAD.encode(digest::digest(&digest::SHA256, verifier.as_bytes()));
-    let query = form(&[
-        ("client_id", TEMP_CLIENT),
-        ("agent_name_hint", "kwsh"),
+    let mut fields = vec![
+        (
+            "client_id",
+            previous.map_or(TEMP_CLIENT, |saved| saved.client.as_str()),
+        ),
         ("ext_agent_host_id", &host),
         ("response_type", "code"),
         ("redirect_uri", &redirect),
@@ -54,7 +60,11 @@ pub(super) fn authorize(
         ("nonce", &nonce),
         ("code_challenge_method", "S256"),
         ("code_challenge", &challenge),
-    ]);
+    ];
+    if previous.is_none() {
+        fields.push(("agent_name_hint", "kwsh"));
+    }
+    let query = form(&fields);
     let url = format!("{ISSUER}/api/accounts/authorize?{query}");
     check_cancelled(cancelled)?;
     let status = Command::new("/usr/bin/open")
@@ -67,7 +77,13 @@ pub(super) fn authorize(
     if !status.success() {
         return Err(Error::Message("could not open the browser"));
     }
-    let grant = await_callback(listener, &address, &state, cancelled)?;
+    let grant = await_callback(
+        listener,
+        &address,
+        &state,
+        cancelled,
+        previous.map(|saved| saved.client.as_str()),
+    )?;
     check_cancelled(cancelled)?;
     let body = form(&[
         ("grant_type", "authorization_code"),
@@ -85,14 +101,87 @@ pub(super) fn authorize(
             Error::Message("OpenAI rejected the authorization code or the token request failed")
         })?;
     let reply = super::read_json(reply)?;
-    let (access, id) = plan_tokens(&reply)?;
+    let (_, id) = plan_tokens(&reply)?;
     check_cancelled(cancelled)?;
     let keys = agent
         .get("https://auth.openai.com/.well-known/jwks.json")
         .call()
         .map_err(|_| Error::Message("could not fetch OpenAI signing keys"))?;
-    verify_identity(id, &super::read_json(keys)?, &grant.client, &nonce)?;
-    Ok(access.to_owned())
+    let subject = verify_identity(id, &super::read_json(keys)?, &grant.client, &nonce)?;
+    if previous.is_some_and(|saved| saved.subject != subject) {
+        return Err(Error::Message(
+            "ChatGPT returned a different account for this registration",
+        ));
+    }
+    credentials_from(&reply, grant.client, subject)
+}
+
+pub(super) fn refresh(agent: &ureq::Agent, saved: &Credentials) -> Result<Credentials> {
+    let body = form(&[
+        ("grant_type", "refresh_token"),
+        ("client_id", &saved.client),
+        ("refresh_token", &saved.refresh),
+        ("resource", RESOURCE),
+    ]);
+    let mut reply = agent
+        .post("https://auth.openai.com/api/accounts/oauth/token")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .send(body)
+        .map_err(|_| Error::Message("ChatGPT token refresh failed; try again later"))?;
+    if !reply.status().is_success() {
+        if matches!(reply.status().as_u16(), 400 | 401) {
+            let error: std::result::Result<Value, _> =
+                reply.body_mut().with_config().limit(8192).read_json();
+            if error.ok().is_some_and(|value| {
+                matches!(
+                    value["error"].as_str(),
+                    Some(
+                        "invalid_grant"
+                            | "invalid_refresh_token"
+                            | "token_expired"
+                            | "refresh_token_expired"
+                            | "refresh_token_invalidated"
+                            | "refresh_token_reused"
+                    )
+                )
+            }) {
+                return Err(Error::SignIn);
+            }
+        }
+        return Err(Error::Message(
+            "ChatGPT token refresh failed; saved credentials were not changed",
+        ));
+    }
+    credentials_from(
+        &super::read_json(reply)?,
+        saved.client.clone(),
+        saved.subject.clone(),
+    )
+}
+
+fn credentials_from(reply: &Value, client: String, subject: String) -> Result<Credentials> {
+    check_plan(reply)?;
+    let ttl = reply["expires_in"]
+        .as_u64()
+        .filter(|ttl| *ttl > 0)
+        .ok_or(Error::Message("missing ChatGPT token expiry"))?;
+    let expires_at = credentials::now()?
+        .checked_add(ttl)
+        .ok_or(Error::Message("invalid ChatGPT token expiry"))?;
+    Ok(Credentials {
+        client,
+        subject,
+        expires_at,
+        access: token(reply, "access_token")
+            .ok_or(Error::Message("missing OpenAI access token"))?
+            .into(),
+        refresh: token(reply, "refresh_token")
+            .ok_or(Error::Message("missing OpenAI refresh token"))?
+            .into(),
+    })
 }
 
 fn form(fields: &[(&str, &str)]) -> String {
@@ -182,7 +271,12 @@ enum Callback {
     Accepted(Grant),
 }
 
-fn parse_callback(request: &[u8], address: &str, expected_state: &str) -> Option<Callback> {
+fn parse_callback(
+    request: &[u8],
+    address: &str,
+    expected_state: &str,
+    expected_client: Option<&str>,
+) -> Option<Callback> {
     let mut headers = [httparse::EMPTY_HEADER; 32];
     let mut parsed = httparse::Request::new(&mut headers);
     if !parsed.parse(request).ok()?.is_complete() || parsed.method != Some("GET") {
@@ -212,7 +306,14 @@ fn parse_callback(request: &[u8], address: &str, expected_state: &str) -> Option
         return Some(Callback::Denied);
     }
     let code = params.remove("code")?;
-    let client = params.remove("client_id")?;
+    let supplied = params.remove("client_id");
+    if expected_client
+        .zip(supplied.as_deref())
+        .is_some_and(|(expected, actual)| expected != actual)
+    {
+        return Some(Callback::Invalid);
+    }
+    let client = supplied.as_deref().or(expected_client)?;
     if code.is_empty()
         || code.len() > 4096
         || !code.bytes().all(|b| b.is_ascii_graphic())
@@ -227,7 +328,7 @@ fn parse_callback(request: &[u8], address: &str, expected_state: &str) -> Option
     }
     Some(Callback::Accepted(Grant {
         code: code.into_owned(),
-        client: client.into_owned(),
+        client: client.to_owned(),
     }))
 }
 
@@ -236,6 +337,7 @@ fn await_callback(
     address: &str,
     state: &str,
     cancelled: &AtomicBool,
+    expected_client: Option<&str>,
 ) -> Result<Grant> {
     let deadline = Instant::now() + Duration::from_secs(180);
     while Instant::now() < deadline {
@@ -244,7 +346,7 @@ fn await_callback(
             Ok((mut stream, _)) => {
                 let callback = read_callback(&mut stream)
                     .ok()
-                    .and_then(|bytes| parse_callback(&bytes, address, state));
+                    .and_then(|bytes| parse_callback(&bytes, address, state, expected_client));
                 let (status, message) = match callback {
                     Some(Callback::Accepted(_)) => (
                         "200 OK",
@@ -312,6 +414,14 @@ fn read_callback(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
 }
 
 fn plan_tokens(reply: &Value) -> Result<(&str, &str)> {
+    check_plan(reply)?;
+    Ok((
+        token(reply, "access_token").ok_or(Error::Message("missing OpenAI access token"))?,
+        token(reply, "id_token").ok_or(Error::Message("missing OpenAI ID token"))?,
+    ))
+}
+
+fn check_plan(reply: &Value) -> Result<()> {
     let scopes = reply["scope"].as_str().unwrap_or_default();
     if !["resource.invoke", "chatgpt.tokens.use.direct"]
         .iter()
@@ -325,18 +435,16 @@ fn plan_tokens(reply: &Value) -> Result<(&str, &str)> {
     {
         return Err(Error::Message("unexpected OpenAI token type"));
     }
-    let token = |name: &str| {
-        reply[name].as_str().filter(|value| {
-            !value.is_empty() && value.len() <= 16384 && value.bytes().all(|b| b.is_ascii_graphic())
-        })
-    };
-    Ok((
-        token("access_token").ok_or(Error::Message("missing OpenAI access token"))?,
-        token("id_token").ok_or(Error::Message("missing OpenAI ID token"))?,
-    ))
+    Ok(())
 }
 
-fn verify_identity(token: &str, keys: &Value, client: &str, nonce: &str) -> Result<()> {
+fn token<'a>(reply: &'a Value, name: &str) -> Option<&'a str> {
+    reply[name].as_str().filter(|value| {
+        !value.is_empty() && value.len() <= 16384 && value.bytes().all(|b| b.is_ascii_graphic())
+    })
+}
+
+fn verify_identity(token: &str, keys: &Value, client: &str, nonce: &str) -> Result<String> {
     const INVALID: Error = Error::Message("OpenAI ID token failed validation");
     let header = decode_header(token).map_err(|_| INVALID)?;
     let kid = header
@@ -382,7 +490,7 @@ fn verify_identity(token: &str, keys: &Value, client: &str, nonce: &str) -> Resu
     {
         return Err(INVALID);
     }
-    Ok(())
+    Ok(claims["sub"].as_str().ok_or(INVALID)?.to_owned())
 }
 
 pub(super) fn check_cancelled(cancelled: &AtomicBool) -> Result<()> {
@@ -405,7 +513,7 @@ mod tests {
     #[test]
     fn callback_requires_exact_host_path_and_state() {
         let address = "127.0.0.1:12345";
-        let parse = |request: &str| parse_callback(request.as_bytes(), address, "expected");
+        let parse = |request: &str| parse_callback(request.as_bytes(), address, "expected", None);
         assert!(
             matches!(parse("GET /auth/callback?state=expected&code=sample&client_id=oaiapp_test HTTP/1.1\r\nHost: 127.0.0.1:12345\r\n\r\n"), Some(Callback::Accepted(Grant { client, code })) if client == "oaiapp_test" && code == "sample")
         );

@@ -30,7 +30,7 @@ pub(crate) fn run(
     } else {
         None
     };
-    let chatgpt = if connect_chatgpt {
+    let mut chatgpt = if connect_chatgpt {
         if !matching_identity() {
             return Err(io::Error::other(
                 "ChatGPT sign-in is unavailable when real and effective IDs differ",
@@ -44,15 +44,12 @@ pub(crate) fn run(
             .filter(|path| path.is_absolute())
             .ok_or_else(|| io::Error::other("ChatGPT sign-in requires an absolute HOME"))?;
         let model = invocation.variable("KWSH_CHATGPT_MODEL");
-        eprintln!("Continue with ChatGPT in your browser. Press Ctrl+C to cancel.");
+        eprintln!("Connecting to ChatGPT. If sign-in is needed, continue in your browser.");
         match editor.chatgpt_task(input, move |cancelled| {
-            chatgpt::Session::connect(&home, model.as_deref(), cancelled)
+            chatgpt::Session::connect(&home, model.as_deref(), true, cancelled)
         })? {
             Some(Ok(session)) => {
-                eprintln!(
-                    "Signed in to ChatGPT for this session (model: {}).",
-                    session.model
-                );
+                eprintln!("Connected to ChatGPT (model: {}).", session.model);
                 Some(Arc::new(session))
             }
             Some(Err(error)) => return Err(io::Error::other(error.to_string())),
@@ -103,29 +100,50 @@ pub(crate) fn run(
                 );
             } else if instruction.trim().is_empty() {
                 eprintln!("Shell prompt instruction required after ?");
-            } else if let Some((editor, session)) = editor.as_ref().zip(chatgpt.as_ref()) {
-                let session = Arc::clone(session);
-                let question = instruction.trim().to_owned();
-                match editor
-                    .chatgpt_task(input, move |cancelled| session.answer(&question, cancelled))?
-                {
-                    Some(Ok(answer)) => show_answer(&answer),
-                    Some(Err(error)) => eprintln!("kwsh: ChatGPT: {error}"),
-                    None => eprintln!("^C\nturn cancelled"),
+            } else if let Some(editor) = &editor {
+                let program = invocation.variable("KWSH_ASSISTANT_EXEC");
+                if let Some(program) = program.filter(|_| chatgpt.is_none() && !connect_chatgpt) {
+                    pending_draft = ask(
+                        editor,
+                        Path::new(&program),
+                        instruction.trim(),
+                        invocation,
+                        input,
+                    )?;
+                } else if matching_identity() {
+                    let session = chatgpt.clone();
+                    let home = env::var_os("HOME")
+                        .map(PathBuf::from)
+                        .filter(|path| path.is_absolute());
+                    let model = invocation.variable("KWSH_CHATGPT_MODEL");
+                    let question = instruction.trim().to_owned();
+                    match editor.chatgpt_task(input, move |cancelled| {
+                        let session = match session {
+                            Some(session) => session,
+                            None => Arc::new(chatgpt::Session::connect(
+                                home.as_deref().ok_or(chatgpt::Error::Message(
+                                    "ChatGPT requires an absolute HOME",
+                                ))?,
+                                model.as_deref(),
+                                false,
+                                cancelled,
+                            )?),
+                        };
+                        let answer = session.answer(&question, cancelled)?;
+                        Ok((session, answer))
+                    })? {
+                        Some(Ok((session, answer))) => {
+                            chatgpt = Some(session);
+                            show_answer(&answer);
+                        }
+                        Some(Err(error)) => eprintln!("kwsh: ChatGPT: {error}"),
+                        None => eprintln!("^C\nturn cancelled"),
+                    }
+                } else {
+                    eprintln!("kwsh: ChatGPT is unavailable when real and effective IDs differ");
                 }
-            } else if let Some((editor, program)) = editor
-                .as_ref()
-                .zip(invocation.variable("KWSH_ASSISTANT_EXEC"))
-            {
-                pending_draft = ask(
-                    editor,
-                    Path::new(&program),
-                    instruction.trim(),
-                    invocation,
-                    input,
-                )?;
             } else {
-                eprintln!("kwsh: assistant requires a configured provider and line editor");
+                eprintln!("kwsh: assistant requires the line editor");
             }
             source.clear();
             continue;

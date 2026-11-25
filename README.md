@@ -14,11 +14,11 @@ Set `HISTFILE` before the first prompt to opt into persistent history. For examp
 
 ### Try ChatGPT subscription sign-in (macOS)
 
-Start `kwsh --chatgpt`, then continue in your browser with a ChatGPT account eligible for plan usage. Back at the `kwsh` prompt, try `? Say hello in one sentence`. No API key, Codex CLI, or local provider executable is needed. This uses [OpenAI’s Sign in with ChatGPT flow](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) and the [Responses API for ChatGPT plan usage](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
+The first time, start `kwsh --chatgpt`, then continue in your browser with a ChatGPT account eligible for plan usage. Back at the `kwsh` prompt, try `? Say hello in one sentence`. No API key, Codex CLI, or local provider executable is needed. This uses [OpenAI’s Sign in with ChatGPT flow](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) and the [Responses API for ChatGPT plan usage](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
 
 By default `kwsh` selects the first listed model in the account’s catalog and prints its name at sign-in. To choose a different listed model, set `KWSH_CHATGPT_MODEL` to its slug before launch or in `~/.kwshrc`. `--chatgpt` takes precedence over `KWSH_ASSISTANT_EXEC` for that session.
 
-This preview sends only the text after `?`. It does not send history, read files, run tools, or stage commands. Private mode blocks requests. Ctrl+C discards a pending answer and returns to the prompt. Tokens stay in memory; the only sign-in data saved locally is the installation identifier in `~/.kwsh-chatgpt-host`. Sign in again after restarting or if the access token expires. Saved accounts, refresh, and sign-out are not yet implemented. To revoke the app’s grant, use your ChatGPT settings.
+This preview sends only the text after `?`. It does not send history, read files, run tools, or stage commands. Private mode blocks requests. Ctrl+C discards a pending answer and returns to the prompt. Later sessions can start with plain `kwsh`: if no local provider is configured, the first `?` prompt uses the saved ChatGPT account. `kwsh --chatgpt` also reuses the saved account and only opens a browser when sign-in is needed. `kwsh` refreshes access before expiry. Access and refresh tokens are in `~/.kwsh-chatgpt-session`, an owner-only (`0600`) file, separate from shell config and history. It is not encrypted; do not share it. The installation identifier is in `~/.kwsh-chatgpt-host`. This preview supports one saved account. To revoke the app’s grant, use your ChatGPT settings.
 
 ### Use a local provider
 

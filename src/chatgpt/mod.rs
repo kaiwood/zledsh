@@ -1,8 +1,9 @@
+mod credentials;
 mod oauth;
 
 use std::fmt;
 use std::io::{BufRead, BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
 pub enum Error {
+    SignIn,
     Message(&'static str),
     Response {
         message: &'static str,
@@ -27,6 +29,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::SignIn => f.write_str("ChatGPT sign-in required; run kwsh --chatgpt"),
             Self::Message(message) => f.write_str(message),
             Self::Response {
                 message,
@@ -46,7 +49,7 @@ impl fmt::Display for Error {
 
 pub struct Session {
     agent: ureq::Agent,
-    token: String,
+    home: PathBuf,
     pub model: String,
 }
 
@@ -54,6 +57,7 @@ impl Session {
     pub fn connect(
         home: &Path,
         preferred_model: Option<&str>,
+        allow_sign_in: bool,
         cancelled: &AtomicBool,
     ) -> Result<Self> {
         let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -64,7 +68,7 @@ impl Session {
             .user_agent(concat!("kwsh/", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
-        let token = oauth::authorize(&agent, home, cancelled)?;
+        let token = access_token(&agent, home, allow_sign_in, cancelled)?;
         oauth::check_cancelled(cancelled)?;
         let reply = agent
             .get("https://api.openai.com/v1/models")
@@ -74,7 +78,7 @@ impl Session {
         let model = choose_model(&read_json(reply)?, preferred_model)?;
         Ok(Self {
             agent,
-            token,
+            home: home.to_owned(),
             model,
         })
     }
@@ -84,10 +88,12 @@ impl Session {
             return Err(Error::Message("instructions must be at most 8192 bytes"));
         }
         oauth::check_cancelled(cancelled)?;
+        let token = access_token(&self.agent, &self.home, false, cancelled)?;
+        oauth::check_cancelled(cancelled)?;
         let reply = self
             .agent
             .post("https://api.openai.com/v1/responses")
-            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Authorization", format!("Bearer {token}"))
             .header("Accept", "text/event-stream")
             .config()
             .http_status_as_error(false)
@@ -101,6 +107,31 @@ impl Session {
             .map_err(request_error)?;
         read_answer(reply, cancelled)
     }
+}
+
+fn access_token(
+    agent: &ureq::Agent,
+    home: &Path,
+    allow_sign_in: bool,
+    cancelled: &AtomicBool,
+) -> Result<String> {
+    let store = credentials::Store::lock(home, cancelled)?;
+    let previous = store.load()?;
+    let current = match previous.as_ref() {
+        Some(saved) if saved.usable_at(credentials::now()?) => return Ok(saved.access.clone()),
+        Some(saved) => match oauth::refresh(agent, saved) {
+            Err(Error::SignIn) if allow_sign_in => {
+                oauth::authorize(agent, home, cancelled, Some(saved))?
+            }
+            result => result?,
+        },
+        None if allow_sign_in => oauth::authorize(agent, home, cancelled, None)?,
+        None => return Err(Error::SignIn),
+    };
+    // A refresh may already have rotated the token by the time Ctrl+C arrives.
+    // Commit the replacement before honoring cancellation in the caller.
+    store.save(&current)?;
+    Ok(current.access)
 }
 
 fn read_answer(
@@ -341,6 +372,35 @@ fn parse_stream(input: impl Read, cancelled: &AtomicBool) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resumes_saved_credentials_without_network_or_browser() {
+        let home = tempfile::tempdir().unwrap();
+        let cancelled = AtomicBool::new(false);
+        let agent = ureq::Agent::new_with_defaults();
+        assert!(matches!(
+            access_token(&agent, home.path(), false, &cancelled),
+            Err(Error::SignIn)
+        ));
+        credentials::Store::lock(home.path(), &cancelled)
+            .unwrap()
+            .save(&credentials::Credentials {
+                client: "fixture-client".into(),
+                subject: "fixture-subject".into(),
+                access: "fixture-access".into(),
+                refresh: "fixture-refresh".into(),
+                expires_at: credentials::now().unwrap() + 3600,
+            })
+            .unwrap();
+        assert_eq!(
+            access_token(&agent, home.path(), false, &cancelled).unwrap(),
+            "fixture-access"
+        );
+        assert_eq!(
+            access_token(&agent, home.path(), true, &cancelled).unwrap(),
+            "fixture-access"
+        );
+    }
 
     fn response(status: u16, format: &str, body: &str) -> ureq::http::Response<ureq::Body> {
         ureq::http::Response::builder()
