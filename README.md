@@ -1,6 +1,6 @@
 # kwsh
 
-`kwsh` is a work-in-progress standalone Rust port of Kward’s shell for macOS and Linux. This repository currently contains only the project skeleton; it does not run shell commands yet.
+`kwsh` is a work-in-progress standalone Rust port of Kward’s shell for macOS and Linux. The `kwsh` binary is still a placeholder; the terminal prototype is a separate Cargo example.
 
 ## Development
 
@@ -31,3 +31,14 @@ ruby tests/shell_parity_test.rb
 ```
 
 The current Rust binary is a placeholder and is not expected to pass. The initial baseline is macOS only; Linux validation is deferred.
+
+### Terminal and process spike (macOS)
+
+```sh
+cargo build --locked --example terminal_spike
+ruby tests/terminal_spike_test.rb
+```
+
+The PTY suite exercises Ctrl+Z and `fg`, restoration of the stopped job’s terminal settings and the original settings on exit, and inheritance of fd 9. It also tests a fake `?` turn over private pipes: the interpreter changes its own working directory, the provider’s draft is editable without executing, and Ctrl+C cancels and reaps a waiting provider without ending the session.
+
+The example recognizes only fixed test commands. It does not parse shell syntax, run arbitrary commands, contact a provider, or change either invocation profile. Ruby runs the test harness, not the Rust example.
