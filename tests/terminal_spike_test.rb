@@ -233,6 +233,18 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
+  def test_ctrl_k_deletes_to_end_of_current_line_without_moving_cursor
+    prompt = "kill-line> "
+    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
+      prefix = "printf '%s\\n' gardé"
+      writer.write("\e[200~#{prefix} unwanted\nprintf 'next\\n'\e[201~")
+      writer.write("\x01" + "\x06" * prefix.length + "\x0b-edited\n")
+      read_until(reader, "\r\ngardé-edited\r\nnext\r\n".b)
+      read_until(reader, prompt)
+      exit_spike(reader, writer, pid)
+    end
+  end
+
   def test_rbenv_bootstrap_loads_and_completes_subcommands_and_values
     prompt = "rbenv> "
     env = { "PROMPT" => prompt, "TERM" => "xterm", "ENV" => nil }

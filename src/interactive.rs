@@ -625,6 +625,14 @@ fn read_keys(
                 line.drain(start..cursor);
                 cursor = start;
             }
+            Key::Byte(11) if cursor < line.len() => {
+                // At an embedded newline, delete it to join the two lines.
+                let end = line[cursor..]
+                    .iter()
+                    .position(|&byte| byte == b'\n')
+                    .map_or(line.len(), |offset| cursor + offset.max(1));
+                line.drain(cursor..end);
+            }
             Key::Byte(21) => {
                 line.drain(..cursor);
                 cursor = 0;
