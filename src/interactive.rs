@@ -10,17 +10,13 @@ use crate::terminal_modes::{
     TTY, attributes, editor_attributes, restore_attributes, set_attributes,
 };
 
-pub(crate) fn run(
-    invocation: &mut Invocation<'_>,
-    input: &mut impl BufRead,
-    kward: bool,
-) -> io::Result<u8> {
+pub(crate) fn run(invocation: &mut Invocation<'_>, input: &mut impl BufRead) -> io::Result<u8> {
     invocation.foreground = Some(Foreground::new()?);
-    load_startup(invocation, input, kward);
+    load_startup(invocation, input);
     if invocation.exited {
         return Ok(invocation.status);
     }
-    let editor = if kward && invocation.variable("TERM").as_deref() != Some("dumb") {
+    let editor = if invocation.variable("TERM").as_deref() != Some("dumb") {
         Some(EditorTerminal::new()?)
     } else {
         None
@@ -29,8 +25,8 @@ pub(crate) fn run(
     let mut history = History::new(invocation);
     let mut pending_draft = String::new();
     while !invocation.exited {
-        let mut prompt = crate::prompt::render(invocation, kward, !source.is_empty(), history.next);
-        if kward && history.paused {
+        let mut prompt = crate::prompt::render(invocation, !source.is_empty(), history.next);
+        if history.paused {
             prompt.insert_str(0, "[private] ");
         }
         let primary = source.is_empty();
@@ -57,7 +53,7 @@ pub(crate) fn run(
                 break;
             }
         }
-        if let Some(instruction) = source.strip_prefix('?').filter(|_| kward && primary) {
+        if let Some(instruction) = source.strip_prefix('?').filter(|_| primary) {
             if history.paused {
                 eprintln!(
                     "Shell agent unavailable while history is paused. Use history resume first."
@@ -81,7 +77,7 @@ pub(crate) fn run(
             source.clear();
             continue;
         }
-        if kward && history.control(&source) {
+        if history.control(&source) {
             source.clear();
             continue;
         }
@@ -153,15 +149,13 @@ fn ask(
     }
 }
 
-fn load_startup(invocation: &mut Invocation<'_>, input: &mut impl BufRead, kward: bool) {
+fn load_startup(invocation: &mut Invocation<'_>, input: &mut impl BufRead) {
     // Do not run user startup files if real and effective IDs differ.
     if unsafe { libc::getuid() != libc::geteuid() || libc::getgid() != libc::getegid() } {
         return;
     }
     let startup = invocation.variable("ENV");
-    if kward {
-        load_kwshrc(invocation, input);
-    }
+    load_kwshrc(invocation, input);
     if let Some(value) = startup.filter(|_| !invocation.exited) {
         match invocation.parameter_text(&value) {
             Ok(path) if Path::new(&path).is_file() => load_rc(Path::new(&path), invocation, input),

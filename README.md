@@ -1,6 +1,6 @@
 # kwsh
 
-`kwsh` is a work-in-progress standalone Rust port of Kward’s shell for macOS and Linux. Both `kwsh -c` and `kward shell -c` run a small subset of shell commands using the same Rust interpreter. The terminal prototype is a separate Cargo example.
+`kwsh` is a work-in-progress standalone Rust port of Kward’s shell for macOS and Linux. `kwsh` is the only executable. Run it without arguments for an interactive shell or use `kwsh -c` to run a command. No Ruby or Kward installation is required. The terminal prototype is a separate Cargo example.
 
 ```sh
 cargo run --locked -- -c 'printf "<%s>\n" "$0" "$@"' demo 'two words'
@@ -8,11 +8,11 @@ cargo run --locked -- -c 'printf "<%s>\n" "$0" "$@"' demo 'two words'
 
 This slice supports `cd`, `pwd`, `exit` and a limited `printf` (`%s` and `%%`), quoted positional arguments and simple environment substitutions, sequential commands, foreground pipelines such as `ls | grep pattern`, and output redirection for fd 1 and 2. With redirected stdin, the shell reads commands from that stream; `read [-r] name` consumes data from the same stream and sets a session variable. The shell runs external commands by path or by searching `PATH`. An executable file without a valid native format or shebang fails with status 126; nothing is handed off to `/bin/sh` as a fallback.
 
-On macOS, run `target/debug/kwsh` or `target/debug/kward shell` without arguments for an interactive prompt. Both use `PS1` and `PS2`; `kward shell` also accepts a Zsh-style `PROMPT` (try `PROMPT='%~ [%?] %# '`), provides basic line editing, and runs supported commands and assignments from `.kward/kwshrc` and `.kwshrc` under your home directory. Plain `kwsh` skips those files. Both profiles load the file named by the launch environment’s `ENV`, if set, after the rc files. `ENV`, `PS1`, and `PS2` allow parameter expansion, not command substitution. Ctrl+C interrupts a foreground command or pipeline; Ctrl+Z stops it, and `fg` resumes the most recently stopped job. A pipeline reports its last stage’s status, and builtin stages run separately from the live shell. Background jobs are not implemented yet.
+On macOS, run `target/debug/kwsh` without arguments for an interactive prompt. It supports `PS1`, `PS2`, and a Zsh-style `PROMPT` (try `PROMPT='%~ [%?] %# '`). Interactive sessions load supported commands from `~/.kward/kwshrc` and `~/.kwshrc`, then the file named by the launch environment’s `ENV`, if set. `ENV`, `PS1`, and `PS2` allow parameter expansion, not command substitution. Ctrl+C interrupts a foreground command or pipeline; Ctrl+Z stops it, and `fg` resumes the most recently stopped job. A pipeline reports its last stage’s status, and builtin stages run separately from the live shell. Background jobs are not implemented yet.
 
-Set `HISTFILE` before the first prompt to opt into persistent history. For example, put `export HISTFILE="$HOME/.kwsh_history"` in `~/.kwshrc`. History otherwise stays in memory; `HISTSIZE` defaults to 512. At the `kward shell` prompt, use Up and Down to recall commands, Tab to complete simple command names or paths, Ctrl+W to erase the last word, and Ctrl+U to clear the draft. Use `history pause` before entering a sensitive command, then `history resume` to start recording again. Pausing does not erase earlier history or hide your input from terminal scrollback. Unsafe files (including symlinks and files not owned by you with mode `0600`) are left untouched.
+Set `HISTFILE` before the first prompt to opt into persistent history. For example, put `export HISTFILE="$HOME/.kwsh_history"` in `~/.kwshrc`. History otherwise stays in memory; `HISTSIZE` defaults to 512. At the `kwsh` prompt, use Up and Down to recall commands, Tab to complete simple command names or paths, Ctrl+W to erase the last word, and Ctrl+U to clear the draft. Use `history pause` before entering a sensitive command, then `history resume` to start recording again. Pausing does not erase earlier history or hide your input from terminal scrollback. Unsafe files (including symlinks and files not owned by you with mode `0600`) are left untouched.
 
-The experimental `?` prompt is available only in `kward shell` with the line editor enabled. Set `KWSH_ASSISTANT_EXEC` to the absolute path of a trusted local provider executable. It receives a JSON object with `instruction` on stdin and returns a JSON object with optional `answer`, `directory`, and `draft` strings. It does not receive shell history or terminal input. The optional directory changes the live shell’s cwd; a draft is placed in the editor and only runs if you submit it. Ctrl+C cancels the turn, and private mode blocks requests. There is no built-in API provider yet.
+The experimental `?` prompt is available in interactive `kwsh` with the line editor enabled. Set `KWSH_ASSISTANT_EXEC` to the absolute path of a trusted local provider executable. It receives a JSON object with `instruction` on stdin and returns a JSON object with optional `answer`, `directory`, and `draft` strings. It does not receive shell history or terminal input. The optional directory changes the live shell’s cwd; a draft is placed in the editor and only runs if you submit it. Ctrl+C cancels the turn, and private mode blocks requests. There is no built-in API provider yet.
 
 ## Development
 
@@ -32,14 +32,12 @@ The parity suite is separate from `cargo test`. It uses Ruby with Minitest and e
 ruby tests/shell_parity_test.rb
 ```
 
-Set `KWSH_REFERENCE` to use a checkout in a different location. Each case runs with a temporary home and working directory. The suite checks both `kward shell` and plain `kwsh`: `-c` arguments, exit status, output and a redirected file, input redirected into the shell, and interactive startup, command output and exit in a PTY. The PTY checks also verify that `kward shell` loads `~/.kwshrc` and plain `kwsh` does not.
+Set `KWSH_REFERENCE` to use a checkout in a different location. Each case runs with a temporary home and working directory. The suite checks command mode, redirected input, and interactive startup and execution in a PTY. The legacy Ruby `kward shell` command is used **only** as a test reference; the Rust project does not ship that command.
 
-To run the same cases against another build, set **both** `KWSH_KWARD_CMD` and `KWSH_PLAIN_CMD` to the corresponding launch commands. They are split into arguments, not evaluated by a shell. Use absolute paths for any path arguments after the executable, since the tests run from a temporary directory. To check the Rust binaries against the same fixtures:
+Set `KWSH_CMD` to run the same cases against a build of `kwsh`. The value is split into arguments, not evaluated by a shell. Use absolute paths for path arguments after the executable, since the tests run from a temporary directory.
 
 ```sh
-KWSH_KWARD_CMD='./target/debug/kward shell' \
-KWSH_PLAIN_CMD='./target/debug/kwsh' \
-ruby tests/shell_parity_test.rb
+KWSH_CMD='./target/debug/kwsh' ruby tests/shell_parity_test.rb
 ```
 
 Linux validation is deferred.
@@ -51,6 +49,6 @@ cargo build --locked --bins --example terminal_spike
 ruby tests/terminal_spike_test.rb
 ```
 
-The PTY suite exercises Ctrl+Z and `fg`, restoration of the stopped job’s terminal settings and the original settings on exit, and inheritance of fd 9. It also tests a fake `?` turn over private pipes: the interpreter changes its own working directory, the provider’s draft is editable without executing, and Ctrl+C cancels and reaps a waiting provider without ending the session. The suite also runs both Rust shell profiles to check foreground signals, stop/resume, and restoration of the original terminal settings.
+The PTY suite exercises Ctrl+Z and `fg`, restoration of the stopped job’s terminal settings and the original settings on exit, and inheritance of fd 9. It also tests a fake `?` turn over private pipes: the interpreter changes its own working directory, the provider’s draft is editable without executing, and Ctrl+C cancels and reaps a waiting provider without ending the session. The suite also runs `kwsh` to check foreground signals, stop/resume, and restoration of the original terminal settings.
 
-The example recognizes only fixed test commands. It does not parse shell syntax, run arbitrary commands, contact a provider, or change either invocation profile. Ruby runs the test harness, not the Rust example.
+The example recognizes only fixed test commands. It does not parse shell syntax, run arbitrary commands, contact a provider, or change `kwsh` behavior. Ruby runs the test harness, not the Rust example.

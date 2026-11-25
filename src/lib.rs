@@ -25,31 +25,21 @@ use std::{
 
 const PIPELINE_BUILTIN: &str = "--kwsh-pipeline-builtin";
 
-/// Launch the plain `kwsh` profile.
-pub fn plain() -> ExitCode {
+/// Launch the standalone `kwsh` shell.
+pub fn launch() -> ExitCode {
     let mut args = env::args_os();
     let name = args.next().unwrap_or_else(|| "kwsh".into());
     let mut args = args.peekable();
     if args.next_if(|arg| arg == PIPELINE_BUILTIN).is_some() {
         return run_pipeline_builtin(args);
     }
-    run("kwsh", name, args)
-}
-
-/// Launch the standalone `kward shell` profile.
-pub fn kward_shell() -> ExitCode {
-    let mut args = env::args_os();
-    let mut name = args.next().unwrap_or_else(|| "kward".into());
-    match args.next().as_deref().and_then(|arg| arg.to_str()) {
-        Some("shell") => {}
-        Some(PIPELINE_BUILTIN) => return run_pipeline_builtin(args),
-        _ => {
-            eprintln!("Usage: kward shell -c command [name [args...]]");
-            return 2.into();
+    match run_command(name, args) {
+        Ok(status) => status.into(),
+        Err(error) => {
+            eprintln!("kwsh: {error}");
+            2.into()
         }
     }
-    name.push(" shell");
-    run("kward shell", name, args)
 }
 
 fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
@@ -85,21 +75,7 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
     invocation.status.into()
 }
 
-fn run(program: &str, name: OsString, args: impl Iterator<Item = OsString>) -> ExitCode {
-    match run_command(program, name, args) {
-        Ok(status) => status.into(),
-        Err(error) => {
-            eprintln!("kwsh: {error}");
-            2.into()
-        }
-    }
-}
-
-fn run_command(
-    program: &str,
-    name: OsString,
-    mut args: impl Iterator<Item = OsString>,
-) -> Result<u8, String> {
+fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Result<u8, String> {
     let option = args.next();
     // The next bytes may belong to a child reading fd 0 directly.
     let mut input = BufReader::with_capacity(1, process::Stdin);
@@ -110,7 +86,7 @@ fn run_command(
         {
             use std::io::IsTerminal;
             if io::stdin().is_terminal() && io::stderr().is_terminal() {
-                return interactive::run(&mut invocation, &mut input, program == "kward shell")
+                return interactive::run(&mut invocation, &mut input)
                     .map_err(|error| error.to_string());
             }
         }
@@ -118,7 +94,7 @@ fn run_command(
     };
     match option.to_str() {
         Some("--help") => {
-            println!("Usage: {program} [-c command [name [args...]]]");
+            println!("Usage: kwsh [-c command [name [args...]]]");
             return Ok(0);
         }
         Some("-c") => {}

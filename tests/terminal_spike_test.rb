@@ -9,6 +9,7 @@ require "tmpdir"
 
 class TerminalSpikeTest < Minitest::Test
   SPIKE = File.expand_path(ENV.fetch("KWSH_SPIKE", File.expand_path("../target/debug/examples/terminal_spike", __dir__)))
+  KWSH = File.expand_path("../target/debug/kwsh", __dir__)
   PROMPT = "spike> "
   TIMEOUT = 5
 
@@ -73,8 +74,7 @@ class TerminalSpikeTest < Minitest::Test
   end
 
   def test_real_interpreter_cancels_draft_and_restores_terminal
-    kward = File.expand_path("../target/debug/kward", __dir__)
-    with_terminal(kward, "shell", env: { "PROMPT" => "rust> ", "TERM" => "xterm" }, prompt: "rust> ") do |reader, writer, pid|
+    with_terminal(KWSH, env: { "PROMPT" => "rust> ", "TERM" => "xterm" }, prompt: "rust> ") do |reader, writer, pid|
       writer.write("exit 17\x03")
       read_until(reader, "^C\r\n")
       read_until(reader, "rust> ")
@@ -85,38 +85,34 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
-  { kwsh: [], kward: ["shell"] }.each do |name, args|
-    define_method("test_#{name}_foreground_signals_and_resume") do
-      binary = File.expand_path("../target/debug/#{name}", __dir__)
-      probe = "#{Shellwords.escape(SPIKE)} --foreground-probe\n"
-      prompt = "jobs> "
-      env = { "PS1" => prompt, "PROMPT" => nil, "TERM" => "xterm" }
-      with_terminal(binary, *args, env: env, prompt: prompt) do |reader, writer, pid|
-        writer.write(probe)
-        read_until(reader, "foreground ready\r\n")
-        writer.write("\x03")
-        read_until(reader, prompt)
+  def test_foreground_signals_and_resume
+    probe = "#{Shellwords.escape(SPIKE)} --foreground-probe\n"
+    prompt = "jobs> "
+    env = { "PS1" => prompt, "PROMPT" => nil, "TERM" => "xterm" }
+    with_terminal(KWSH, env: env, prompt: prompt) do |reader, writer, pid|
+      writer.write(probe)
+      read_until(reader, "foreground ready\r\n")
+      writer.write("\x03")
+      read_until(reader, prompt)
 
-        writer.write(probe)
-        read_until(reader, "foreground ready\r\n")
-        writer.write("\x1a")
-        read_until(reader, "Stopped\r\n")
-        read_until(reader, prompt)
-        writer.write("fg\n")
-        read_until(reader, "fg\r\n")
-        writer.write("after resume\n")
-        read_until(reader, "foreground read: after resume\r\n")
-        read_until(reader, prompt)
-        exit_spike(reader, writer, pid)
-      end
+      writer.write(probe)
+      read_until(reader, "foreground ready\r\n")
+      writer.write("\x1a")
+      read_until(reader, "Stopped\r\n")
+      read_until(reader, prompt)
+      writer.write("fg\n")
+      read_until(reader, "fg\r\n")
+      writer.write("after resume\n")
+      read_until(reader, "foreground read: after resume\r\n")
+      read_until(reader, prompt)
+      exit_spike(reader, writer, pid)
     end
   end
 
   def test_pipeline_interrupts_and_resumes_as_one_foreground_job
-    binary = File.expand_path("../target/debug/kward", __dir__)
     probe = "#{Shellwords.escape(SPIKE)} --foreground-probe"
     prompt = "pipeline> "
-    with_terminal(binary, "shell", env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
+    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
       writer.write("#{probe} | /bin/cat\n")
       read_until(reader, "foreground ready\r\n")
       writer.write("\x03")
@@ -136,33 +132,27 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
-  def test_startup_and_prompt_profiles
-    { "kwsh" => [], "kward" => ["shell"] }.each do |name, args|
-      binary = File.expand_path("../target/debug/#{name}", __dir__)
-      env = { "ENV" => '$HOME/startup file', "PS1" => '$MARK! !!> ', "PROMPT" => nil, "TERM" => "xterm" }
-      with_terminal(binary, *args, env: env, prompt: "$ ", setup: ->(home) {
-        File.write(File.join(home, "startup file"), "printf 'startup:%s\\n' \"$RC\"\nMARK=env\n")
-        File.write(File.join(home, ".kwshrc"), "RC=kward\nENV=ignored\nPROMPT='%~ [%?] %%> '\n") if name == "kward"
-        File.write(File.join(home, "ignored"), "exit 42\n")
-      }, start: false) do |reader, writer, pid|
-        if name == "kward"
-          assert_includes read_until(reader, "~ [0] %> "), "startup:kward"
-          writer.write("cd moved; /usr/bin/false\n")
-          read_until(reader, "~/moved [1] %> ")
-          writer.write("cd ..\n")
-          read_until(reader, "~ [0] %> ")
-        else
-          assert_includes read_until(reader, "env1 !> "), "startup:\r\n"
-        end
-        exit_spike(reader, writer, pid)
-      end
+  def test_startup_and_prompt
+    env = { "ENV" => '$HOME/startup file', "PS1" => '$MARK! !!> ', "PROMPT" => nil, "TERM" => "xterm" }
+    with_terminal(KWSH, env: env, prompt: "~ [0] %> ", setup: ->(home) {
+      Dir.mkdir(File.join(home, ".kward"))
+      File.write(File.join(home, ".kward/kwshrc"), "RC=primary\n")
+      File.write(File.join(home, ".kwshrc"), "RC=\"$RC:personal\"\nENV=ignored\nPROMPT='%~ [%?] %%> '\n")
+      File.write(File.join(home, "startup file"), "printf 'startup:%s\\n' \"$RC\"\nMARK=env\n")
+      File.write(File.join(home, "ignored"), "exit 42\n")
+    }, start: false) do |reader, writer, pid|
+      assert_includes read_until(reader, "~ [0] %> "), "startup:primary:personal\r\n"
+      writer.write("cd moved; /usr/bin/false\n")
+      read_until(reader, "~/moved [1] %> ")
+      writer.write("unset PROMPT\n")
+      read_until(reader, "env3 !> ")
+      exit_spike(reader, writer, pid)
     end
   end
 
   def test_private_commands_are_not_persisted_or_recalled
-    binary = File.expand_path("../target/debug/kward", __dir__)
     env = { "PROMPT" => "hist> ", "HISTFILE" => "history.jsonl", "TERM" => "xterm" }
-    with_terminal(binary, "shell", env: env, prompt: "hist> ") do |reader, writer, pid, home|
+    with_terminal(KWSH, env: env, prompt: "hist> ") do |reader, writer, pid, home|
       writer.write("printf 'public-output\\n'\n")
       read_until(reader, "public-output\r\n")
       read_until(reader, "hist> ")
@@ -185,9 +175,8 @@ class TerminalSpikeTest < Minitest::Test
   end
 
   def test_tab_completion_and_word_deletion
-    binary = File.expand_path("../target/debug/kward", __dir__)
     env = { "PROMPT" => "edit> ", "TERM" => "xterm" }
-    with_terminal(binary, "shell", env: env, prompt: "edit> ", setup: ->(home) {
+    with_terminal(KWSH, env: env, prompt: "edit> ", setup: ->(home) {
       File.write(File.join(home, "file with space"), "completed-content\n")
     }) do |reader, writer, pid|
       writer.write("/bin/cat wrong\x17fi\t\n")
@@ -198,9 +187,8 @@ class TerminalSpikeTest < Minitest::Test
   end
 
   def test_assistant_changes_live_directory_but_does_not_execute_draft
-    binary = File.expand_path("../target/debug/kward", __dir__)
     env = { "PROMPT" => "%1~> ", "TERM" => "xterm" }
-    with_terminal(binary, "shell", env: env, prompt: "~> ", setup: ->(home) {
+    with_terminal(KWSH, env: env, prompt: "~> ", setup: ->(home) {
       provider = File.join(home, "provider")
       File.write(provider, <<~'SCRIPT')
         #!/bin/sh
