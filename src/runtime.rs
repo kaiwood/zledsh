@@ -1395,6 +1395,7 @@ impl<'a> Invocation<'a> {
         for part in &word.parts {
             match part {
                 Part::Literal(text) => field.push_str(text),
+                Part::Home => field.push_str(self.variable("HOME").as_deref().unwrap_or("~")),
                 Part::Name => field.push_str(self.name),
                 Part::Status => field.push_str(&self.status.to_string()),
                 Part::LastBackground => {

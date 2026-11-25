@@ -183,3 +183,26 @@ fn indexed_arrays_keep_sparse_indices_and_local_scope() {
         b"[two words]<first><><last><extra>:last:<first><two words><><last><extra>done"
     );
 }
+
+#[test]
+fn unquoted_home_prefix_expands_as_one_field() {
+    let scratch = tempfile::tempdir().unwrap();
+    let home = scratch.path().join("home with spaces");
+    std::fs::create_dir(&home).unwrap();
+    let output = run(
+        r#"
+        HOME="$1"
+        printf 'contents\n' > ~/.kwshrc
+        /bin/cat ~/.kwshrc
+        printf '<%s>\n' ~ "~/.kwshrc" \~/.kwshrc
+        "#,
+        &["fixture", home.to_str().unwrap()],
+    );
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        output.stdout,
+        format!("contents\n<{}>\n<~/.kwshrc>\n<~/.kwshrc>\n", home.display()).as_bytes()
+    );
+    assert_eq!(std::fs::read(home.join(".kwshrc")).unwrap(), b"contents\n");
+}

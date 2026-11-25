@@ -24,6 +24,7 @@ pub(crate) struct Word {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Part {
     Literal(String),
+    Home,
     Name,
     Status,
     LastBackground,
@@ -625,6 +626,9 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
             }
             '[' if !started && input.peek().is_none_or(|&ch| boundary(ch)) => {
                 literal(&mut word, ch)
+            }
+            '~' if !started && input.peek().is_none_or(|&ch| ch == '/' || boundary(ch)) => {
+                word.parts.push(Part::Home);
             }
             '(' if word.assignment => return Err("array literals are not supported".into()),
             '<' | '(' | '{' | '}' | '`' | '$' | '*' | '?' | '[' | '~' => {
