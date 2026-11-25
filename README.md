@@ -12,7 +12,17 @@ On macOS, run `target/debug/kwsh` without arguments for an interactive prompt. I
 
 Set `HISTFILE` before the first prompt to opt into persistent history. For example, put `export HISTFILE="$HOME/.kwsh_history"` in `~/.kwshrc`. History otherwise stays in memory; `HISTSIZE` defaults to 512. At the `kwsh` prompt, use Up and Down to recall commands, Tab to complete simple command names or paths, Ctrl+W to erase the last word, and Ctrl+U to clear the draft. Use `history pause` before entering a sensitive command, then `history resume` to start recording again. Pausing does not erase earlier history or hide your input from terminal scrollback. Unsafe files (including symlinks and files not owned by you with mode `0600`) are left untouched.
 
-The experimental `?` prompt is available in interactive `kwsh` with the line editor enabled. Set `KWSH_ASSISTANT_EXEC` to the absolute path of a trusted local provider executable. It receives a JSON object with `instruction` on stdin and returns a JSON object with optional `answer`, `directory`, and `draft` strings. It does not receive shell history or terminal input. The optional directory changes the live shell’s cwd; a draft is placed in the editor and only runs if you submit it. Ctrl+C cancels the turn, and private mode blocks requests. There is no built-in API provider yet.
+### Try ChatGPT subscription sign-in (macOS)
+
+Start `kwsh --chatgpt`, then continue in your browser with a ChatGPT account eligible for plan usage. Back at the `kwsh` prompt, try `? Say hello in one sentence`. No API key, Codex CLI, or local provider executable is needed. This uses [OpenAI’s Sign in with ChatGPT flow](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) and the [Responses API for ChatGPT plan usage](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
+
+By default `kwsh` selects the first listed model in the account’s catalog and prints its name at sign-in. To choose a different listed model, set `KWSH_CHATGPT_MODEL` to its slug before launch or in `~/.kwshrc`. `--chatgpt` takes precedence over `KWSH_ASSISTANT_EXEC` for that session.
+
+This preview sends only the text after `?`. It does not send history, read files, run tools, or stage commands. Private mode blocks requests. Ctrl+C discards a pending answer and returns to the prompt. Tokens stay in memory; the only sign-in data saved locally is the installation identifier in `~/.kwsh-chatgpt-host`. Sign in again after restarting or if the access token expires. Saved accounts, refresh, and sign-out are not yet implemented. To revoke the app’s grant, use your ChatGPT settings.
+
+### Use a local provider
+
+The experimental `?` prompt is available in interactive `kwsh` with the line editor enabled. Set `KWSH_ASSISTANT_EXEC` to the absolute path of a trusted local provider executable. It receives a JSON object with `instruction` on stdin and returns a JSON object with optional `answer`, `directory`, and `draft` strings. It does not receive shell history or terminal input. The optional directory changes the live shell’s cwd; a draft is placed in the editor and only runs if you submit it. Ctrl+C cancels the turn, and private mode blocks requests.
 
 ## Development
 

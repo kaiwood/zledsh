@@ -1,6 +1,8 @@
 #[cfg(target_os = "macos")]
 mod assistant;
 #[cfg(target_os = "macos")]
+mod chatgpt;
+#[cfg(target_os = "macos")]
 mod completion;
 #[cfg(target_os = "macos")]
 mod foreground;
@@ -79,22 +81,33 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
     let option = args.next();
     // The next bytes may belong to a child reading fd 0 directly.
     let mut input = BufReader::with_capacity(1, process::Stdin);
-    let Some(option) = option else {
+    if option.is_none() || option.as_deref().and_then(|option| option.to_str()) == Some("--chatgpt")
+    {
+        let chatgpt = option.is_some();
+        if chatgpt && args.next().is_some() {
+            return Err("--chatgpt does not take arguments".into());
+        }
         let mut invocation =
             runtime::Invocation::new(name.to_str().ok_or("command name must be UTF-8")?, &[]);
         #[cfg(target_os = "macos")]
         {
             use std::io::IsTerminal;
             if io::stdin().is_terminal() && io::stderr().is_terminal() {
-                return interactive::run(&mut invocation, &mut input)
+                return interactive::run(&mut invocation, &mut input, chatgpt)
                     .map_err(|error| error.to_string());
             }
         }
+        if chatgpt {
+            return Err("--chatgpt requires an interactive macOS terminal".into());
+        }
         return run_input(&mut invocation, &mut input);
-    };
+    }
+    let option = option.unwrap();
     match option.to_str() {
         Some("--help") => {
             println!("Usage: kwsh [-c command [name [args...]]]");
+            #[cfg(target_os = "macos")]
+            println!("       kwsh --chatgpt");
             return Ok(0);
         }
         Some("-c") => {}

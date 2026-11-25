@@ -1,0 +1,15 @@
+{
+  "jwt": "eyJraWQiOiAia3dzaC10ZXN0IiwgImFsZyI6ICJSUzI1NiJ9.eyJzdWIiOiAidGVzdC11c2VyIiwgImlzcyI6ICJodHRwczovL2F1dGgub3BlbmFpLmNvbSIsICJhdWQiOiAib2FpYXBwX3Rlc3QiLCAiZXhwIjogNDEwMjQ0NDgwMCwgIm5vbmNlIjogInRlc3Qtbm9uY2UifQ.Ip1J95oB24KtdfZBInUNVw7vQwrP_d8li-WJcdENZlJUg8kv-mgYqKy6r_1qk1dOzVTAt0oXSYyrtpwekcI44LI71Zjm9b5pgcOc64M0mJ9EU1PD2Ig9CyCNq5MwZhcu-5N6UpmqOSu_XMip4gtXM6V4ebS16YTsh9qvUliGrsPO09FLd1XBx1KEyYHpB8va2VnaZn3Dgo9Iaj-PraQ3jspaC0c5__0iyF7e7zNOaHT5VSwqrrvI4EyTNzWevAlDQZGnIzjTyo8VXjkZyOXuIzvN0ANDQzEnWu1m4b8X0nfTmFkP6mbjuz59APjtEtKt8WZ2nF3K8i4cwmOLit3tHw",
+  "jwks": {
+    "keys": [
+      {
+        "kid": "kwsh-test",
+        "kty": "RSA",
+        "alg": "RS256",
+        "use": "sig",
+        "n": "q2g10ancbxqckEfYy8FCaOAVfvWm2xETlx9P4aLZSK0dyqLUdUKJYvZa2mR4qZmcU5c9YZp4jP0HZUq2Cxd0e9iOBX3LA5N6w_hBQkyJaQJUpC1KlE2oDF4R7lOmZK3dXhiXu9fswhRFvCCyH3GP1OvgvRusfxDGzGEDkqshOitz19LMijkzXQwaPflqKkGvy0SpIoCHP_OC9tT46ZnHji7TOZZd5_dGU6k-JeWHwYkDxpiGQID-W2o5ghiXmXvI73eRk9tMPEUdcjIhsROnvGmabVW4L7wT1eteTHTDgnfyqIWhRrjrjE-Qq1rjbYUwXld432HPKSPoSQnw9jAzUw",
+        "e": "AQAB"
+      }
+    ]
+  }
+}

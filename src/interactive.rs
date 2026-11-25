@@ -1,16 +1,25 @@
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::{env, fs};
 
-use crate::foreground::Foreground;
 use crate::history::History;
 use crate::runtime::Invocation;
 use crate::syntax::{self, ParseError};
 use crate::terminal_modes::{
     TTY, attributes, editor_attributes, restore_attributes, set_attributes,
 };
+use crate::{chatgpt, foreground::Foreground};
 
-pub(crate) fn run(invocation: &mut Invocation<'_>, input: &mut impl BufRead) -> io::Result<u8> {
+pub(crate) fn run(
+    invocation: &mut Invocation<'_>,
+    input: &mut impl BufRead,
+    connect_chatgpt: bool,
+) -> io::Result<u8> {
     invocation.foreground = Some(Foreground::new()?);
     load_startup(invocation, input);
     if invocation.exited {
@@ -18,6 +27,40 @@ pub(crate) fn run(invocation: &mut Invocation<'_>, input: &mut impl BufRead) -> 
     }
     let editor = if invocation.variable("TERM").as_deref() != Some("dumb") {
         Some(EditorTerminal::new()?)
+    } else {
+        None
+    };
+    let chatgpt = if connect_chatgpt {
+        if !matching_identity() {
+            return Err(io::Error::other(
+                "ChatGPT sign-in is unavailable when real and effective IDs differ",
+            ));
+        }
+        let editor = editor.as_ref().ok_or_else(|| {
+            io::Error::other("--chatgpt requires the line editor (TERM must not be dumb)")
+        })?;
+        let home = env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .ok_or_else(|| io::Error::other("ChatGPT sign-in requires an absolute HOME"))?;
+        let model = invocation.variable("KWSH_CHATGPT_MODEL");
+        eprintln!("Continue with ChatGPT in your browser. Press Ctrl+C to cancel.");
+        match editor.chatgpt_task(input, move |cancelled| {
+            chatgpt::Session::connect(&home, model.as_deref(), cancelled)
+        })? {
+            Some(Ok(session)) => {
+                eprintln!(
+                    "Signed in to ChatGPT for this session (model: {}).",
+                    session.model
+                );
+                Some(Arc::new(session))
+            }
+            Some(Err(error)) => return Err(io::Error::other(error.to_string())),
+            None => {
+                eprintln!("^C\nChatGPT sign-in cancelled");
+                return Ok(130);
+            }
+        }
     } else {
         None
     };
@@ -60,6 +103,16 @@ pub(crate) fn run(invocation: &mut Invocation<'_>, input: &mut impl BufRead) -> 
                 );
             } else if instruction.trim().is_empty() {
                 eprintln!("Shell prompt instruction required after ?");
+            } else if let Some((editor, session)) = editor.as_ref().zip(chatgpt.as_ref()) {
+                let session = Arc::clone(session);
+                let question = instruction.trim().to_owned();
+                match editor
+                    .chatgpt_task(input, move |cancelled| session.answer(&question, cancelled))?
+                {
+                    Some(Ok(answer)) => show_answer(&answer),
+                    Some(Err(error)) => eprintln!("kwsh: ChatGPT: {error}"),
+                    None => eprintln!("^C\nturn cancelled"),
+                }
             } else if let Some((editor, program)) = editor
                 .as_ref()
                 .zip(invocation.variable("KWSH_ASSISTANT_EXEC"))
@@ -129,13 +182,7 @@ fn ask(
                 };
                 invocation.run(&[vec![command]], input);
             }
-            if !answer.is_empty() {
-                let safe: String = answer
-                    .chars()
-                    .filter(|ch| !ch.is_control() || *ch == '\n')
-                    .collect();
-                println!("{safe}");
-            }
+            show_answer(&answer);
             Ok(draft)
         }
         Ok(Turn::Cancelled) => {
@@ -149,9 +196,23 @@ fn ask(
     }
 }
 
+fn show_answer(answer: &str) {
+    if !answer.is_empty() {
+        let safe: String = answer
+            .chars()
+            .filter(|ch| !ch.is_control() || *ch == '\n')
+            .collect();
+        println!("{safe}");
+    }
+}
+
+fn matching_identity() -> bool {
+    unsafe { libc::getuid() == libc::geteuid() && libc::getgid() == libc::getegid() }
+}
+
 fn load_startup(invocation: &mut Invocation<'_>, input: &mut impl BufRead) {
     // Do not run user startup files if real and effective IDs differ.
-    if unsafe { libc::getuid() != libc::geteuid() || libc::getgid() != libc::getegid() } {
+    if !matching_identity() {
         return;
     }
     let startup = invocation.variable("ENV");
@@ -216,6 +277,17 @@ impl EditorTerminal {
         })
     }
 
+    fn chatgpt_task<T: Send + 'static>(
+        &self,
+        input: &mut impl BufRead,
+        task: impl FnOnce(&AtomicBool) -> Result<T, chatgpt::Error> + Send + 'static,
+    ) -> io::Result<Option<Result<T, chatgpt::Error>>> {
+        set_attributes(&self.editor)?;
+        let result = run_chatgpt_task(input, task);
+        set_attributes(&self.original)?;
+        result
+    }
+
     fn read_line(
         &self,
         input: &mut impl BufRead,
@@ -233,6 +305,59 @@ impl EditorTerminal {
         set_attributes(&self.original)?;
         line
     }
+}
+
+// A cancelled blocking HTTP request may still be unwinding. Do not start
+// another worker until it exits (HTTP requests have a global timeout).
+fn run_chatgpt_task<T: Send + 'static>(
+    input: &mut impl BufRead,
+    task: impl FnOnce(&AtomicBool) -> Result<T, chatgpt::Error> + Send + 'static,
+) -> io::Result<Option<Result<T, chatgpt::Error>>> {
+    static ACTIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let (tx, rx) = mpsc::sync_channel(1);
+    let (ready, started) = mpsc::sync_channel(0);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_flag = Arc::clone(&cancelled);
+    std::thread::Builder::new()
+        .name("kwsh-chatgpt".into())
+        .spawn(move || {
+            let guard = ACTIVE.try_lock();
+            if ready.send(guard.is_ok()).is_err() || guard.is_err() {
+                return;
+            }
+            let _ = tx.send(task(&worker_flag));
+        })?;
+    if !started.recv().unwrap_or(false) {
+        return Ok(Some(Err(chatgpt::Error(
+            "previous request is still ending; try again shortly",
+        ))));
+    }
+    let result = (|| loop {
+        let mut fd = libc::pollfd {
+            fd: TTY,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        if unsafe { libc::poll(&mut fd, 1, 50) } < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if fd.revents != 0 && matches!(read_key_byte(input)?, None | Some(3 | 4)) {
+            return Ok(None);
+        }
+        match rx.try_recv() {
+            Ok(value) => return Ok(Some(value)),
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(io::Error::other("ChatGPT worker stopped"));
+            }
+        }
+    })();
+    cancelled.store(true, Ordering::Relaxed);
+    result
 }
 
 impl Drop for EditorTerminal {

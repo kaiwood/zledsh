@@ -68,3 +68,16 @@ fn status_expands_and_unset_removes_inherited_environment() {
     assert_eq!(output.stdout, b"1\nmissing\n1\nlocal\n");
     assert!(output.stderr.is_empty());
 }
+
+#[test]
+fn chatgpt_login_requires_a_terminal() {
+    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+        .arg("--chatgpt")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("requires an interactive macOS terminal")
+    );
+}
