@@ -258,6 +258,36 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
+  def test_yank_restores_cuts_across_prompts_and_private_mode_clears_them
+    prompt = "yank> "
+    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
+      writer.write("/bin/echo first café\x17\x17\x19\n")
+      read_until(reader, "\r\nfirst café\r\n".b)
+      read_until(reader, prompt)
+      writer.write("/bin/echo via-u\x15\n")
+      read_until(reader, prompt)
+      writer.write("\x19\n")
+      read_until(reader, "\r\nvia-u\r\n")
+      read_until(reader, prompt)
+      writer.write("/bin/echo via-k\x01\x0b\n")
+      read_until(reader, prompt)
+      writer.write("\x19\n")
+      read_until(reader, "\r\nvia-k\r\n")
+      read_until(reader, prompt)
+      writer.write("history pause\n")
+      read_until(reader, "[private] #{prompt}")
+      writer.write("/bin/echo private \x19\n")
+      read_until(reader, "\r\nprivate\r\n")
+      read_until(reader, "[private] #{prompt}")
+      writer.write("private-draft\x15history resume\n")
+      read_until(reader, "\e[?2004h#{prompt}")
+      writer.write("/bin/echo resumed \x19\n")
+      read_until(reader, "\r\nresumed\r\n")
+      read_until(reader, prompt)
+      exit_spike(reader, writer, pid)
+    end
+  end
+
   def test_rbenv_bootstrap_loads_and_completes_subcommands_and_values
     prompt = "rbenv> "
     env = { "PROMPT" => prompt, "TERM" => "xterm", "ENV" => nil }

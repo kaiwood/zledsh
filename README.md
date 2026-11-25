@@ -30,7 +30,14 @@ Use the same syntax in your startup files, `kwsh -c`, redirected stdin, or at th
 
 The completion subset supports indexed array literals, `"${name[@]}"`, `"${name[index]}"`, and `unset 'name[0]'`. Register a trusted callback with `complete -F function command`. On simple unquoted drafts, it receives `COMP_WORDS` and `COMP_CWORD` as data and returns candidates in `COMPREPLY`. `compgen -W wordlist -- prefix` matches a whitespace-separated list. A callback can run local commands, but runs in a separate, time-limited shell so its changes to shell variables and cwd do not carry back to the prompt.
 
-Set `HISTFILE` before the first prompt to opt into persistent history. For example, put `export HISTFILE="$HOME/.kwsh_history"` in `~/.kwshrc`. History otherwise stays in memory; `HISTSIZE` defaults to 512. At the `kwsh` prompt, use Up and Down to recall commands, Tab to complete simple command names or paths, Ctrl+W to erase the last word, Ctrl+U to erase to the start of the draft, and Ctrl+K to erase from the cursor to the end of the current line. Left/Right, Home/End, and Ctrl+A/Ctrl+E move the cursor. Bracketed paste inserts text into the draft without running it; press Enter to submit. Use `history pause` before entering a sensitive command, then `history resume` to start recording again. Pausing does not erase earlier history or hide your input from terminal scrollback. Unsafe files (including symlinks and files not owned by you with mode `0600`) are left untouched.
+At the `kwsh` prompt:
+
+- Use **Ctrl+R** to search history by substring, **Ctrl+R** again for an older match, **Enter** to run the match, or **Ctrl+G** to return to your draft. Up and Down recall commands by prefix.
+- Use **Alt+B / Alt+F** to move by word, or Left/Right, Home/End, and **Ctrl+A / Ctrl+E** to move the cursor. **Ctrl+L** clears the screen without discarding the draft.
+- **Ctrl+W** cuts the previous word, **Ctrl+U** cuts to the start of the draft, and **Ctrl+K** cuts to the end of the current line. **Ctrl+Y** pastes the most recent cut. Consecutive cuts are combined in order.
+- **Tab** completes simple command names or paths. Bracketed paste inserts text into the draft without running it; press Enter to submit.
+
+History stays in memory unless you set `HISTFILE` before the first prompt, for example with `export HISTFILE="$HOME/.kwsh_history"` in `~/.kwshrc`. `HISTSIZE` defaults to 512. Unsafe history files are left untouched. Use `history pause` before entering sensitive text and `history resume` afterward. Pausing clears saved cuts and disables search, saving cuts, and yanking. It does not erase earlier history or hide input from terminal scrollback.
 
 ### Try ChatGPT subscription sign-in
 

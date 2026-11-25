@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -42,7 +43,7 @@ fn run_shell(
     if invocation.exited {
         return Ok(invocation.status);
     }
-    let editor = if invocation.variable("TERM").as_deref() != Some("dumb") {
+    let mut editor = if invocation.variable("TERM").as_deref() != Some("dumb") {
         Some(EditorTerminal::new()?)
     } else {
         None
@@ -92,7 +93,7 @@ fn run_shell(
         }
         let primary = source.is_empty();
         let mut input_pending = false;
-        if let Some(editor) = &editor {
+        if let Some(editor) = &mut editor {
             let (line, pending) = editor.read_line(
                 input,
                 &prompt,
@@ -171,6 +172,9 @@ fn run_shell(
             if history.paused {
                 last_command = None;
                 conversation.clear();
+                if let Some(editor) = &mut editor {
+                    editor.kills.clear();
+                }
             }
             source.clear();
             continue;
@@ -461,6 +465,7 @@ fn load_rc(path: &Path, invocation: &mut Invocation<'_>, input: &mut impl BufRea
 struct EditorTerminal {
     original: libc::termios,
     editor: libc::termios,
+    kills: KillRing,
 }
 
 impl EditorTerminal {
@@ -472,6 +477,7 @@ impl EditorTerminal {
         Ok(Self {
             original,
             editor: editor_attributes(original),
+            kills: KillRing::default(),
         })
     }
 
@@ -487,7 +493,7 @@ impl EditorTerminal {
     }
 
     fn read_line(
-        &self,
+        &mut self,
         input: &mut impl BufRead,
         prompt: &str,
         history: &mut History,
@@ -497,10 +503,21 @@ impl EditorTerminal {
     ) -> io::Result<(Line, bool)> {
         set_attributes(&self.editor)?;
         let mut stderr = io::stderr().lock();
+        let kills = (!history.paused).then_some(&mut self.kills);
         let line = stderr
             .write_all(b"\x1b[?2004h")
             .and_then(|()| write_prompt(&mut stderr, prompt))
-            .and_then(|()| read_keys(input, &mut stderr, prompt, history, primary, shell, draft));
+            .and_then(|()| {
+                read_keys(
+                    input,
+                    &mut stderr,
+                    prompt,
+                    primary.then_some(history),
+                    kills,
+                    shell,
+                    draft,
+                )
+            });
         stderr.write_all(b"\x1b[?2004l")?;
         match &line {
             Ok(Line::Submitted(_)) => stderr.write_all(b"\n")?,
@@ -587,15 +604,73 @@ fn write_prompt(output: &mut impl Write, prompt: &str) -> io::Result<()> {
     output.flush()
 }
 
+#[derive(Default)]
+struct KillRing {
+    entries: VecDeque<Vec<u8>>,
+}
+
+impl KillRing {
+    fn remember(&mut self, text: &[u8], consecutive: bool, backward: bool) -> bool {
+        const ENTRIES: usize = 8;
+        const ENTRY_BYTES: usize = 64 * 1024;
+        if text.len() > ENTRY_BYTES || std::str::from_utf8(text).is_err() {
+            return false;
+        }
+        if consecutive {
+            if let Some(last) = self
+                .entries
+                .front_mut()
+                .filter(|last| last.len() + text.len() <= ENTRY_BYTES)
+            {
+                if backward {
+                    last.splice(..0, text.iter().copied());
+                } else {
+                    last.extend_from_slice(text);
+                }
+                return true;
+            }
+        }
+        self.entries.push_front(text.to_vec());
+        self.entries.truncate(ENTRIES);
+        true
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    fn latest(&self) -> Option<&[u8]> {
+        self.entries.front().map(Vec::as_slice)
+    }
+}
+
+fn cut(
+    line: &mut Vec<u8>,
+    range: std::ops::Range<usize>,
+    kills: Option<&mut KillRing>,
+    consecutive: bool,
+    backward: bool,
+) -> bool {
+    if range.is_empty() {
+        return consecutive;
+    }
+    let remembered =
+        kills.is_some_and(|kills| kills.remember(&line[range.clone()], consecutive, backward));
+    line.drain(range);
+    remembered
+}
+
 fn read_keys(
     input: &mut impl BufRead,
     echo: &mut impl Write,
     prompt: &str,
-    history: &mut History,
-    primary: bool,
+    mut history: Option<&mut History>,
+    mut kills: Option<&mut KillRing>,
     shell: &mut Invocation<'_>,
     draft: String,
 ) -> io::Result<Line> {
+    let primary = history.is_some();
+    let mut consecutive_cut = false;
     let mut history_index = None;
     let mut saved_draft = (Vec::new(), 0);
     echo.write_all(draft.as_bytes())?;
@@ -603,7 +678,11 @@ fn read_keys(
     let mut line = draft.into_bytes();
     let mut cursor = line.len();
     while let Some(mut key) = read_key(input, shell)? {
-        if key == Key::Byte(18) && primary && !history.paused {
+        let previous_cut = std::mem::take(&mut consecutive_cut);
+        if key == Key::Byte(18) {
+            let Some(history) = history.as_deref_mut().filter(|history| !history.paused) else {
+                continue;
+            };
             history.refresh();
             let Some(result) = reverse_search(input, echo, history, shell)? else {
                 return Ok(Line::End);
@@ -640,11 +719,23 @@ fn read_keys(
                     .iter()
                     .position(|&byte| byte == b'\n')
                     .map_or(line.len(), |offset| cursor + offset.max(1));
-                line.drain(cursor..end);
+                consecutive_cut = cut(
+                    &mut line,
+                    cursor..end,
+                    kills.as_deref_mut(),
+                    previous_cut,
+                    false,
+                );
             }
             Key::Byte(12) => echo.write_all(b"\x1b[H\x1b[2J")?,
             Key::Byte(21) => {
-                line.drain(..cursor);
+                consecutive_cut = cut(
+                    &mut line,
+                    0..cursor,
+                    kills.as_deref_mut(),
+                    previous_cut,
+                    true,
+                );
                 cursor = 0;
             }
             Key::Byte(23) => {
@@ -655,7 +746,20 @@ fn read_keys(
                 while cursor > 0 && !line[cursor - 1].is_ascii_whitespace() {
                     cursor -= 1;
                 }
-                line.drain(cursor..end);
+                consecutive_cut = cut(
+                    &mut line,
+                    cursor..end,
+                    kills.as_deref_mut(),
+                    previous_cut,
+                    true,
+                );
+            }
+            Key::Byte(25) => {
+                let Some(text) = kills.as_deref().and_then(KillRing::latest) else {
+                    continue;
+                };
+                line.splice(cursor..cursor, text.iter().copied());
+                cursor += text.len();
             }
             Key::Byte(1) | Key::Home => cursor = 0,
             Key::Byte(5) | Key::End => cursor = line.len(),
@@ -694,7 +798,10 @@ fn read_keys(
                 line.splice(cursor..cursor, suffix.bytes());
                 cursor += suffix.len();
             }
-            Key::Up | Key::Down if primary && !history.paused => {
+            Key::Up | Key::Down => {
+                let Some(history) = history.as_deref_mut().filter(|history| !history.paused) else {
+                    continue;
+                };
                 if history_index.is_none() {
                     if key == Key::Down {
                         continue;
