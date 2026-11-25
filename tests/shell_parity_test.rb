@@ -197,6 +197,22 @@ class ShellParityTest < Minitest::Test
     end
   end
 
+  def test_boolean_lists_short_circuit_with_pipeline_status
+    script = <<~'SH'
+      false && printf wrong > skipped || printf fallback
+      true || printf wrong > skipped && printf ':left'
+      if ! printf hidden | false &&
+        true; then printf ':negated'; fi
+      ! true
+      printf ':%s' "$?"
+    SH
+    output, error, status = capture(*COMMAND, "-c", script)
+    assert status.success?, error
+    assert_equal "fallback:left:negated:1", output
+    assert_empty error
+    refute File.exist?(File.join(@work, "skipped"))
+  end
+
   def test_terminal
     executable, *args = COMMAND
     PTY.spawn(@env, [executable, executable], *args, **@spawn_options) do |reader, writer, pid|

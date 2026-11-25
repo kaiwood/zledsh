@@ -49,12 +49,21 @@ impl<'a> Invocation<'a> {
         Ok(commands)
     }
 
-    fn expand_aliases(&self, script: &mut Script) -> Result<(), ParseError> {
+    fn expand_aliases(&self, script: &mut [Statement]) -> Result<(), ParseError> {
         for statement in script {
             match statement {
                 Statement::Pipeline(stages) => {
                     for command in stages {
                         self.expand_alias(command)?;
+                    }
+                }
+                Statement::Negated(inner) => {
+                    self.expand_aliases(std::slice::from_mut(inner.as_mut()))?
+                }
+                Statement::AndOr { first, rest } => {
+                    self.expand_aliases(std::slice::from_mut(first.as_mut()))?;
+                    for (_, statement) in rest {
+                        self.expand_aliases(std::slice::from_mut(statement))?;
                     }
                 }
                 Statement::If {
@@ -144,6 +153,23 @@ impl<'a> Invocation<'a> {
             }
             match statement {
                 Statement::Pipeline(pipeline) => self.run_pipeline(pipeline, input),
+                Statement::Negated(inner) => {
+                    self.run(std::slice::from_ref(inner.as_ref()), input);
+                    if !self.exited {
+                        self.status = u8::from(self.status == 0);
+                    }
+                }
+                Statement::AndOr { first, rest } => {
+                    self.run(std::slice::from_ref(first.as_ref()), input);
+                    for (on_success, statement) in rest {
+                        if self.exited {
+                            break;
+                        }
+                        if (self.status == 0) == *on_success {
+                            self.run(std::slice::from_ref(statement), input);
+                        }
+                    }
+                }
                 Statement::If {
                     branches,
                     otherwise,
@@ -240,6 +266,8 @@ impl<'a> Invocation<'a> {
             return;
         }
         match name.as_str() {
+            ":" | "true" => self.status = 0,
+            "false" => self.status = 1,
             "exit" => {
                 self.exited = true;
                 self.status = match args {
@@ -764,7 +792,7 @@ impl<'a> Invocation<'a> {
 
 pub(crate) const BUILTINS: &[&str] = &[
     "exit", "cd", "pwd", "export", "unset", "read", "printf", "fg", "alias", "unalias", "jobs",
-    "bg", "wait", "command",
+    "bg", "wait", "command", ":", "true", "false",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {

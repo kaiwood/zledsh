@@ -60,6 +60,11 @@ pub(crate) type Script = Vec<Statement>;
 
 pub(crate) enum Statement {
     Pipeline(Vec<Command>),
+    Negated(Box<Statement>),
+    AndOr {
+        first: Box<Statement>,
+        rest: Vec<(bool, Statement)>,
+    },
     If {
         branches: Vec<(Script, Script)>,
         otherwise: Script,
@@ -104,21 +109,10 @@ fn list(input: &mut Source<'_>, stops: &[&str], depth: usize) -> ParseResult<Scr
         if stops.contains(&name.as_str()) {
             break;
         }
-        let mut statement = if name == "if" {
-            if depth >= 32 {
-                return Err("compound commands nested too deeply".into());
-            }
-            input.by_ref().take(2).count();
-            conditional(input, depth + 1)?
-        } else {
-            Statement::Pipeline(pipeline(input)?)
-        };
+        let mut statement = and_or(input, depth)?;
         skip_space(input);
         let separator = input.next();
         match separator {
-            Some('&') if input.peek() == Some(&'&') => {
-                return Err("logical AND is not supported".into());
-            }
             Some('&') => match &mut statement {
                 Statement::Pipeline(stages) => stages.last_mut().unwrap().background = true,
                 _ => return Err("background compound commands are not supported".into()),
@@ -132,6 +126,65 @@ fn list(input: &mut Source<'_>, stops: &[&str], depth: usize) -> ParseResult<Scr
         }
     }
     Ok(script)
+}
+
+fn and_or(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
+    let first = statement(input, depth)?;
+    let mut rest = Vec::new();
+    loop {
+        skip_space(input);
+        let mut ahead = input.clone();
+        let on_success = match (ahead.next(), ahead.next()) {
+            (Some('&'), Some('&')) => true,
+            (Some('|'), Some('|')) => false,
+            _ => break,
+        };
+        *input = ahead;
+        skip_newlines(input);
+        if input.peek().is_none() {
+            return Err(ParseError::Incomplete("expected a command after && or ||"));
+        }
+        rest.push((on_success, statement(input, depth)?));
+    }
+    Ok(if rest.is_empty() {
+        first
+    } else {
+        Statement::AndOr {
+            first: Box::new(first),
+            rest,
+        }
+    })
+}
+
+fn skip_newlines(input: &mut Source<'_>) {
+    loop {
+        skip_space(input);
+        if input.next_if_eq(&'\n').is_none() {
+            break;
+        }
+    }
+}
+
+fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
+    let negated = head(input) == "!";
+    if negated {
+        input.next();
+        skip_space(input);
+    }
+    let statement = if head(input) == "if" {
+        if depth >= 32 {
+            return Err("compound commands nested too deeply".into());
+        }
+        input.by_ref().take(2).count();
+        conditional(input, depth + 1)?
+    } else {
+        Statement::Pipeline(pipeline(input)?)
+    };
+    Ok(if negated {
+        Statement::Negated(Box::new(statement))
+    } else {
+        statement
+    })
 }
 
 fn expect_keyword(
@@ -254,18 +307,12 @@ fn pipeline(input: &mut Source<'_>) -> ParseResult<Vec<Command>> {
             };
         }
         stages.push(command);
-        if input.next_if_eq(&'|').is_none() {
+        let mut ahead = input.clone();
+        if ahead.next() != Some('|') || ahead.peek() == Some(&'|') {
             return Ok(stages);
         }
-        if input.peek() == Some(&'|') {
-            return Err("logical OR is not supported".into());
-        }
-        loop {
-            skip_space(input);
-            if input.next_if_eq(&'\n').is_none() {
-                break;
-            }
-        }
+        *input = ahead;
+        skip_newlines(input);
     }
 }
 
