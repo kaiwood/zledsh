@@ -239,3 +239,130 @@ fn unterminated_here_document_does_not_execute_its_command() {
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("missing here-document delimiter"));
 }
+
+// POSIX Shell Command Language 2.7.5–2.7.6: each duplication snapshots its source.
+#[test]
+fn descriptor_duplication_obeys_redirection_order_and_uses_the_pipeline() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+        .current_dir(dir.path())
+        .args([
+            "-c",
+            r#"/bin/sh -c 'printf out; printf err >&2' >both 2>&1
+/bin/sh -c 'printf out; printf err >&2' 2>&1 >only-out
+/bin/sh -c 'printf out; printf err >&2' 2>&1 >pipeline-out | /bin/cat
+printf '%s' built-in 3>via-three 1>&3 3>&-
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(output.stdout, b"errerr");
+    assert!(output.stderr.is_empty());
+    assert_eq!(fs::read(dir.path().join("both")).unwrap(), b"outerr");
+    assert_eq!(fs::read(dir.path().join("only-out")).unwrap(), b"out");
+    assert_eq!(fs::read(dir.path().join("pipeline-out")).unwrap(), b"out");
+    assert_eq!(fs::read(dir.path().join("via-three")).unwrap(), b"built-in");
+}
+
+#[test]
+fn a_function_shares_open_descriptors_with_builtins_and_children() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("input"), "first\nrest\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+        .current_dir(dir.path())
+        .args([
+            "-c",
+            r#"consume() { read -r first 0<&3; /bin/cat <&3; printf '<%s>\n' "$first" >&9; }
+consume 3<input 9>result
+printf 'after\n'
+/bin/cat 8<<'END' <&8
+via heredoc
+END
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(output.stdout, b"rest\nafter\nvia heredoc\n");
+    assert!(output.stderr.is_empty());
+    assert_eq!(fs::read(dir.path().join("result")).unwrap(), b"<first>\n");
+}
+
+#[test]
+fn closing_an_inherited_descriptor_is_local_to_one_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new("/bin/sh")
+        .current_dir(dir.path())
+        .args([
+            "-c",
+            "exec \"$1\" -c \"$2\" 9>inherited",
+            "fixture",
+            env!("CARGO_BIN_EXE_kwsh"),
+            r#"printf before >&9
+/bin/sh -c 'if ( : >&9 ) 2>/dev/null; then exit 77; fi' 9>&-
+printf 'child=%s\n' "$?"
+printf wrong 9>&- >&9
+printf 'bad-dup=%s\n' "$?"
+printf after >&9
+: 9>&- 9>&-
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(output.stdout, b"child=0\nbad-dup=1\n");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("9: bad file descriptor"));
+    assert_eq!(
+        fs::read(dir.path().join("inherited")).unwrap(),
+        b"beforeafter"
+    );
+}
+
+#[test]
+fn a_builtin_with_closed_standard_descriptors_fails_without_leaking_the_close() {
+    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+        .args([
+            "-c",
+            r#"true | printf wrong >&-
+printf 'write=%s\n' "$?"
+read -r value <&-
+printf 'read=%s\n' "$?"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"write=1\nread=1\n");
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(errors.contains("kwsh: printf:"));
+    assert!(errors.contains("kwsh: read:"));
+}
+
+#[test]
+fn shell_private_descriptors_are_not_available_as_duplication_sources() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("private.kwsh");
+    fs::write(
+        &script,
+        "printf wrong 9>first-out >&3\nprintf 'first=%s\\n' \"$?\"\nprintf wrong >&9\nprintf 'second=%s\\n' \"$?\"\n",
+    )
+    .unwrap();
+    let output = Command::new("/bin/sh")
+        .current_dir(dir.path())
+        .args([
+            "-c",
+            "exec \"$1\" \"$2\" 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-",
+            "fixture",
+            env!("CARGO_BIN_EXE_kwsh"),
+        ])
+        .arg(script)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"first=1\nsecond=1\n");
+    assert!(fs::read(dir.path().join("first-out")).unwrap().is_empty());
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(errors.contains("3: bad file descriptor"));
+    assert!(errors.contains("9: bad file descriptor"));
+}

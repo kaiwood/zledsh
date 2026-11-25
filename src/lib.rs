@@ -30,6 +30,7 @@ use std::{
     process::ExitCode,
 };
 
+const SHELL_FDS: usize = 10;
 const SUBSTITUTION: &str = "--kwsh-substitution";
 const PIPELINE_BUILTIN: &str = "--kwsh-pipeline-builtin";
 
@@ -62,7 +63,10 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
     else {
         return 2.into();
     };
-    let Some(name) = args.first() else {
+    let [closed, name, ..] = args.as_slice() else {
+        return 2.into();
+    };
+    let Ok(closed @ 0..=7) = closed.parse::<u8>() else {
         return 2.into();
     };
     if !runtime::is_builtin(name) {
@@ -75,6 +79,7 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
     let command = syntax::Command {
         words: args
             .into_iter()
+            .skip(1)
             .map(|arg| syntax::Word {
                 parts: vec![syntax::Part::Literal(arg)],
                 assignment: false,
@@ -86,7 +91,7 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
     };
     let mut input = BufReader::with_capacity(1, process::Stdin);
     let mut invocation = runtime::Invocation::new("kwsh", &[]);
-    invocation.run_pipeline(&[command], &mut input);
+    invocation.run_pipeline_builtin(&command, &mut input, closed);
     invocation.status.into()
 }
 

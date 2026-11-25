@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, Write};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::process::Stdio;
 use std::rc::Rc;
 
@@ -177,24 +177,20 @@ impl<'a> Invocation<'a> {
     }
 
     pub fn run_source(&mut self, source: &str, input: &mut impl BufRead) -> Result<(), String> {
-        self.run_source_with_output(
-            source,
-            &mut Input::Inherited(input),
-            &[Output::Stdout, Output::Stderr],
-        )
+        self.run_source_with_descriptors(source, input, &inherited_descriptors())
     }
 
-    fn run_source_with_output(
+    fn run_source_with_descriptors(
         &mut self,
         source: &str,
-        input: &mut Input<'_>,
-        output: &[Output; 2],
+        input: &mut dyn BufRead,
+        descriptors: &Descriptors,
     ) -> Result<(), String> {
         let mut pending = String::new();
         for line in source.split_inclusive('\n') {
             pending.push_str(line);
             match self.parse(&pending) {
-                Ok(commands) => self.run_with_output(&commands, input, output),
+                Ok(commands) => self.run_with_descriptors(&commands, input, descriptors),
                 Err(ParseError::Incomplete(_)) => continue,
                 Err(error) => return Err(error.message().to_owned()),
             }
@@ -233,18 +229,14 @@ impl<'a> Invocation<'a> {
     }
 
     pub fn run(&mut self, script: &[Statement], input: &mut impl BufRead) {
-        self.run_with_output(
-            script,
-            &mut Input::Inherited(input),
-            &[Output::Stdout, Output::Stderr],
-        );
+        self.run_with_descriptors(script, input, &inherited_descriptors());
     }
 
-    fn run_with_output(
+    fn run_with_descriptors(
         &mut self,
         script: &[Statement],
-        input: &mut Input<'_>,
-        output: &[Output; 2],
+        input: &mut dyn BufRead,
+        descriptors: &Descriptors,
     ) {
         for statement in script {
             if self.interrupted() {
@@ -252,22 +244,34 @@ impl<'a> Invocation<'a> {
             }
             match statement {
                 Statement::Pipeline(pipeline) => {
-                    self.run_pipeline_with_output(pipeline, input, output)
+                    self.run_pipeline_with_descriptors(pipeline, input, descriptors)
                 }
                 Statement::Negated(inner) => {
-                    self.run_with_output(std::slice::from_ref(inner.as_ref()), input, output);
+                    self.run_with_descriptors(
+                        std::slice::from_ref(inner.as_ref()),
+                        input,
+                        descriptors,
+                    );
                     if !self.interrupted() {
                         self.status = u8::from(self.status == 0);
                     }
                 }
                 Statement::AndOr { first, rest } => {
-                    self.run_with_output(std::slice::from_ref(first.as_ref()), input, output);
+                    self.run_with_descriptors(
+                        std::slice::from_ref(first.as_ref()),
+                        input,
+                        descriptors,
+                    );
                     for (on_success, statement) in rest {
                         if self.interrupted() {
                             break;
                         }
                         if (self.status == 0) == *on_success {
-                            self.run_with_output(std::slice::from_ref(statement), input, output);
+                            self.run_with_descriptors(
+                                std::slice::from_ref(statement),
+                                input,
+                                descriptors,
+                            );
                         }
                     }
                 }
@@ -275,7 +279,7 @@ impl<'a> Invocation<'a> {
                     self.status = match self.assign_array(name, words, *local) {
                         Ok(status) => status,
                         Err(error) => {
-                            report(&output[1], &error);
+                            report(&descriptors[2], &error);
                             2
                         }
                     };
@@ -289,7 +293,7 @@ impl<'a> Invocation<'a> {
                         Some(words) => match self.expand_words(words, &mut None) {
                             Ok(items) => items,
                             Err(error) => {
-                                report(&output[1], &error);
+                                report(&descriptors[2], &error);
                                 self.status = 2;
                                 continue;
                             }
@@ -300,7 +304,7 @@ impl<'a> Invocation<'a> {
                     self.loop_depth += 1;
                     for item in items {
                         self.assign(&format!("{name}={item}"));
-                        self.run_with_output(body, input, output);
+                        self.run_with_descriptors(body, input, descriptors);
                         if !self.next_iteration() {
                             break;
                         }
@@ -315,7 +319,7 @@ impl<'a> Invocation<'a> {
                     let mut last = 0;
                     self.loop_depth += 1;
                     loop {
-                        self.run_with_output(condition, input, output);
+                        self.run_with_descriptors(condition, input, descriptors);
                         if self.interrupted() {
                             last = self.status;
                             if self.next_iteration() {
@@ -326,7 +330,7 @@ impl<'a> Invocation<'a> {
                         if (self.status != 0) != *until {
                             break;
                         }
-                        self.run_with_output(body, input, output);
+                        self.run_with_descriptors(body, input, descriptors);
                         last = self.status;
                         if !self.next_iteration() {
                             break;
@@ -336,10 +340,12 @@ impl<'a> Invocation<'a> {
                     self.status = last;
                 }
                 Statement::Case { word, clauses } => match self.select_case(word, clauses) {
-                    Ok(Some(body)) if !body.is_empty() => self.run_with_output(body, input, output),
+                    Ok(Some(body)) if !body.is_empty() => {
+                        self.run_with_descriptors(body, input, descriptors)
+                    }
                     Ok(_) => self.status = 0,
                     Err(error) => {
-                        report(&output[1], &error);
+                        report(&descriptors[2], &error);
                         self.status = 2;
                     }
                 },
@@ -349,7 +355,7 @@ impl<'a> Invocation<'a> {
                 } => {
                     let mut selected = otherwise;
                     for (condition, body) in branches {
-                        self.run_with_output(condition, input, output);
+                        self.run_with_descriptors(condition, input, descriptors);
                         if self.interrupted() {
                             return;
                         }
@@ -361,7 +367,7 @@ impl<'a> Invocation<'a> {
                     if selected.is_empty() {
                         self.status = 0;
                     } else {
-                        self.run_with_output(selected, input, output);
+                        self.run_with_descriptors(selected, input, descriptors);
                     }
                 }
             }
@@ -412,54 +418,60 @@ impl<'a> Invocation<'a> {
     }
 
     pub fn run_pipeline(&mut self, pipeline: &[Command], input: &mut impl BufRead) {
-        self.run_pipeline_with_output(
-            pipeline,
-            &mut Input::Inherited(input),
-            &[Output::Stdout, Output::Stderr],
-        );
+        self.run_pipeline_with_descriptors(pipeline, input, &inherited_descriptors());
     }
 
-    fn run_pipeline_with_output(
+    pub fn run_pipeline_builtin(
+        &mut self,
+        command: &Command,
+        input: &mut impl BufRead,
+        closed: u8,
+    ) {
+        let mut descriptors = inherited_descriptors();
+        for (fd, stream) in descriptors[..3].iter_mut().enumerate() {
+            if closed & (1 << fd) != 0 {
+                *stream = Descriptor::Closed;
+            }
+        }
+        self.run_pipeline_with_descriptors(std::slice::from_ref(command), input, &descriptors);
+    }
+
+    fn run_pipeline_with_descriptors(
         &mut self,
         pipeline: &[Command],
-        input: &mut Input<'_>,
-        original: &[Output; 2],
+        input: &mut dyn BufRead,
+        original: &Descriptors,
     ) {
         let background = pipeline.last().is_some_and(|command| command.background);
         if background || pipeline.len() != 1 {
-            self.status = match self.pipeline(pipeline, background, input, original) {
+            self.status = match self.pipeline(pipeline, background, original) {
                 Ok(status) => status,
                 Err(error) => {
-                    report(&original[1], &format!("pipeline: {error}"));
+                    report(&original[2], &format!("pipeline: {error}"));
                     1
                 }
             };
             return;
         }
         let command = &pipeline[0];
-        let mut output = original.clone();
+        let mut descriptors = original.clone();
         let mut substitution_status = None;
-        let mut redirected = None;
         if let Err(error) = self.redirect(
             &command.redirects,
-            &mut redirected,
-            &mut output,
+            &mut descriptors,
             &mut substitution_status,
         ) {
-            report(&output[1], &error);
+            report(&descriptors[2], &error);
             self.status = 1;
             return;
         }
-        // A builtin must leave unread bytes available to nested external commands.
-        let mut redirected = redirected.map(|file| Input::File(BufReader::with_capacity(1, file)));
-        let input = redirected.as_mut().unwrap_or(input);
         if !command.words.is_empty() && command.words.iter().all(|word| word.assignment) {
             for word in &command.words {
                 match self.expand(word, &mut substitution_status) {
                     Ok(fields) if fields.len() == 1 => self.assign(&fields[0]),
                     result => {
                         report(
-                            &output[1],
+                            &descriptors[2],
                             &result
                                 .err()
                                 .unwrap_or_else(|| "assignment must expand to one value".into()),
@@ -475,7 +487,7 @@ impl<'a> Invocation<'a> {
         let argv = match self.expand_words(&command.words, &mut substitution_status) {
             Ok(argv) => argv,
             Err(error) => {
-                report(&output[1], &error);
+                report(&descriptors[2], &error);
                 self.status = 2;
                 return;
             }
@@ -489,11 +501,11 @@ impl<'a> Invocation<'a> {
             bypass_functions = true;
             match rest {
                 [flag, names @ ..] if flag == "-v" => {
-                    self.status = self.describe_commands(names, &output);
+                    self.status = self.describe_commands(names, &descriptors);
                     return;
                 }
                 [flag, ..] if flag.starts_with('-') && flag != "--" => {
-                    report(&output[1], "command: expected -v or a command name");
+                    report(&descriptors[2], "command: expected -v or a command name");
                     self.status = 2;
                     return;
                 }
@@ -511,16 +523,22 @@ impl<'a> Invocation<'a> {
                 "exit" | "fg" | "bg" | "wait" | "eval" | "." | "source" | "complete"
             )
         {
-            report(&output[1], &format!("{name} must be submitted by the user"));
+            report(
+                &descriptors[2],
+                &format!("{name} must be submitted by the user"),
+            );
             self.status = 2;
             return;
         }
         if !bypass_functions && self.functions.contains_key(name) {
             if self.agent_command() {
-                report(&output[1], "shell functions must be submitted by the user");
+                report(
+                    &descriptors[2],
+                    "shell functions must be submitted by the user",
+                );
                 self.status = 2;
             } else {
-                self.call_function(name, args, input, &output);
+                self.call_function(name, args, input, &descriptors);
             }
             return;
         }
@@ -542,14 +560,14 @@ impl<'a> Invocation<'a> {
                     self.status = 0;
                 } else {
                     report(
-                        &output[1],
+                        &descriptors[2],
                         &format!("{name}: expected a valid enclosing loop level"),
                     );
                     self.status = 2;
                 }
             }
             "local" => {
-                self.status = self.set_locals(args, &output[1]);
+                self.status = self.set_locals(args, &descriptors[2]);
             }
             "shift" => {
                 let count = match args {
@@ -561,7 +579,7 @@ impl<'a> Invocation<'a> {
                     self.args.drain(..count);
                     self.status = 0;
                 } else {
-                    report(&output[1], "shift: expected a valid argument count");
+                    report(&descriptors[2], "shift: expected a valid argument count");
                     self.status = 1;
                 }
             }
@@ -576,16 +594,16 @@ impl<'a> Invocation<'a> {
                     self.returned = true;
                 } else {
                     report(
-                        &output[1],
+                        &descriptors[2],
                         "return: expected a function and an optional numeric status",
                     );
                     self.status = 2;
                 }
             }
-            "eval" => self.run_nested(name, &args.join(" "), input, &output),
+            "eval" => self.run_nested(name, &args.join(" "), input, &descriptors),
             "." | "source" => {
                 let Some((path, args)) = args.split_first() else {
-                    report(&output[1], &format!("{name}: expected a file"));
+                    report(&descriptors[2], &format!("{name}: expected a file"));
                     self.status = 2;
                     return;
                 };
@@ -605,14 +623,17 @@ impl<'a> Invocation<'a> {
                             &format!("{name}: {}", path.display()),
                             &source,
                             input,
-                            &output,
+                            &descriptors,
                         );
                         if let Some(saved) = saved {
                             self.args = saved;
                         }
                     }
                     Err(error) => {
-                        report(&output[1], &format!("{name}: {}: {error}", path.display()));
+                        report(
+                            &descriptors[2],
+                            &format!("{name}: {}: {error}", path.display()),
+                        );
                         self.status = 1;
                     }
                 }
@@ -624,22 +645,22 @@ impl<'a> Invocation<'a> {
                     [arg] => match arg.parse::<i64>() {
                         Ok(value) => value as u8,
                         Err(_) => {
-                            report(&output[1], "exit: expected numeric status");
+                            report(&descriptors[2], "exit: expected numeric status");
                             2
                         }
                     },
                     _ => {
-                        report(&output[1], "exit: too many arguments");
+                        report(&descriptors[2], "exit: too many arguments");
                         2
                     }
                 };
             }
             "cd" | "pwd" => {
                 let result = if name == "cd" {
-                    self.change_directory(args, &output[0])
+                    self.change_directory(args, &descriptors[1])
                 } else if args.is_empty() {
                     std::env::current_dir()
-                        .and_then(|path| output[0].write(&format!("{}\n", path.display())))
+                        .and_then(|path| descriptors[1].write(&format!("{}\n", path.display())))
                         .map_err(|error| error.to_string())
                 } else {
                     Err("arguments are not supported".into())
@@ -647,7 +668,7 @@ impl<'a> Invocation<'a> {
                 self.status = match result {
                     Ok(()) => 0,
                     Err(error) => {
-                        report(&output[1], &format!("{name}: {error}"));
+                        report(&descriptors[2], &format!("{name}: {error}"));
                         1
                     }
                 };
@@ -657,7 +678,10 @@ impl<'a> Invocation<'a> {
                 for arg in args {
                     let name = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
                     if !valid_name(name) {
-                        report(&output[1], "export: expected a variable name or assignment");
+                        report(
+                            &descriptors[2],
+                            "export: expected a variable name or assignment",
+                        );
                         self.status = 2;
                         break;
                     }
@@ -679,7 +703,7 @@ impl<'a> Invocation<'a> {
                         }
                     }
                     if !valid_name(name) {
-                        report(&output[1], "unset: expected a variable name");
+                        report(&descriptors[2], "unset: expected a variable name");
                         self.status = 2;
                         break;
                     }
@@ -700,7 +724,10 @@ impl<'a> Invocation<'a> {
                         0
                     }
                     _ => {
-                        report(&output[1], "complete: expected -F function command ...");
+                        report(
+                            &descriptors[2],
+                            "complete: expected -F function command ...",
+                        );
                         2
                     }
                 };
@@ -716,7 +743,7 @@ impl<'a> Invocation<'a> {
                             .filter(|word| word.starts_with(prefix))
                         {
                             matched = true;
-                            result = output[0].write(&format!("{word}\n"));
+                            result = descriptors[1].write(&format!("{word}\n"));
                             if result.is_err() {
                                 break;
                             }
@@ -724,35 +751,36 @@ impl<'a> Invocation<'a> {
                         u8::from(result.is_err() || !matched)
                     }
                     _ => {
-                        report(&output[1], "compgen: expected -W wordlist -- prefix");
+                        report(&descriptors[2], "compgen: expected -W wordlist -- prefix");
                         2
                     }
                 };
             }
             "alias" | "unalias" => {
-                if let Err(error) = self.update_aliases(name, args, &output[0]) {
-                    report(&output[1], &format!("{name}: {error}"));
+                if let Err(error) = self.update_aliases(name, args, &descriptors[1]) {
+                    report(&descriptors[2], &format!("{name}: {error}"));
                     self.status = 1;
                 } else {
                     self.status = 0;
                 }
             }
             "read" => {
-                self.status = match self.read(args, input.reader()) {
-                    Ok(complete) => u8::from(!complete),
-                    Err(error) => {
-                        report(&output[1], &format!("read: {error}"));
-                        1
-                    }
-                };
+                self.status =
+                    match read_from(&descriptors[0], input, |reader| self.read(args, reader)) {
+                        Ok(complete) => u8::from(!complete),
+                        Err(error) => {
+                            report(&descriptors[2], &format!("read: {error}"));
+                            1
+                        }
+                    };
             }
             "printf" => {
                 self.status = match printf(args)
-                    .and_then(|text| output[0].write(&text).map_err(|e| e.to_string()))
+                    .and_then(|text| descriptors[1].write(&text).map_err(|e| e.to_string()))
                 {
                     Ok(()) => 0,
                     Err(error) => {
-                        report(&output[1], &format!("printf: {error}"));
+                        report(&descriptors[2], &format!("printf: {error}"));
                         1
                     }
                 };
@@ -772,16 +800,16 @@ impl<'a> Invocation<'a> {
                         "wait" => jobs.wait_background(selector),
                         _ => jobs
                             .listing()
-                            .and_then(|text| output[0].write(&text))
+                            .and_then(|text| descriptors[1].write(&text))
                             .map(|()| 0),
                     }
                 };
                 self.status = result.unwrap_or_else(|error| {
-                    report(&output[1], &format!("{name}: {error}"));
+                    report(&descriptors[2], &format!("{name}: {error}"));
                     if name == "wait" { 127 } else { 1 }
                 });
             }
-            _ => self.status = self.external(argv, input, &output),
+            _ => self.status = self.external(argv, descriptors),
         }
     }
 
@@ -789,11 +817,11 @@ impl<'a> Invocation<'a> {
         &mut self,
         name: &str,
         args: &[String],
-        input: &mut Input<'_>,
-        output: &[Output; 2],
+        input: &mut dyn BufRead,
+        descriptors: &Descriptors,
     ) {
         if self.script_depth >= 32 {
-            report(&output[1], &format!("{name}: nesting too deep"));
+            report(&descriptors[2], &format!("{name}: nesting too deep"));
             self.status = 2;
             return;
         }
@@ -801,7 +829,7 @@ impl<'a> Invocation<'a> {
         let previous = std::mem::replace(&mut self.args, args.to_vec());
         self.locals.push(HashMap::new());
         self.script_depth += 1;
-        self.run_with_output(&body, input, output);
+        self.run_with_descriptors(&body, input, descriptors);
         self.script_depth -= 1;
         for (name, saved) in self.locals.pop().unwrap() {
             if let Some(value) = saved.value {
@@ -856,7 +884,7 @@ impl<'a> Invocation<'a> {
         Ok(())
     }
 
-    fn set_locals(&mut self, args: &[String], output: &Output) -> u8 {
+    fn set_locals(&mut self, args: &[String], output: &Descriptor) -> u8 {
         if self.locals.is_empty() {
             report(output, "local: only available in a function");
             return 2;
@@ -879,18 +907,18 @@ impl<'a> Invocation<'a> {
         &mut self,
         name: &str,
         source: &str,
-        input: &mut Input<'_>,
-        output: &[Output; 2],
+        input: &mut dyn BufRead,
+        descriptors: &Descriptors,
     ) {
         if self.script_depth >= 32 {
-            report(&output[1], &format!("{name}: nesting too deep"));
+            report(&descriptors[2], &format!("{name}: nesting too deep"));
             self.status = 2;
             return;
         }
         self.script_depth += 1;
         self.status = 0;
-        if let Err(error) = self.run_source_with_output(source, input, output) {
-            report(&output[1], &format!("{name}: {error}"));
+        if let Err(error) = self.run_source_with_descriptors(source, input, descriptors) {
+            report(&descriptors[2], &format!("{name}: {error}"));
             self.status = 2;
         }
         self.script_depth -= 1;
@@ -900,7 +928,7 @@ impl<'a> Invocation<'a> {
         &mut self,
         builtin: &str,
         args: &[String],
-        output: &Output,
+        output: &Descriptor,
     ) -> Result<(), String> {
         if builtin == "unalias" {
             if args == ["-a"] {
@@ -951,7 +979,7 @@ impl<'a> Invocation<'a> {
         Ok(())
     }
 
-    fn change_directory(&mut self, args: &[String], output: &Output) -> Result<(), String> {
+    fn change_directory(&mut self, args: &[String], output: &Descriptor) -> Result<(), String> {
         let destination = match args {
             [] => self.variable("HOME").ok_or("HOME is not set")?,
             [path] if path == "-" => self.variable("OLDPWD").ok_or("OLDPWD is not set")?,
@@ -975,7 +1003,7 @@ impl<'a> Invocation<'a> {
         Ok(())
     }
 
-    fn describe_commands(&self, names: &[String], output: &[Output; 2]) -> u8 {
+    fn describe_commands(&self, names: &[String], descriptors: &Descriptors) -> u8 {
         let path = self.command_path();
         let mut status = u8::from(names.is_empty());
         for name in names {
@@ -989,8 +1017,8 @@ impl<'a> Invocation<'a> {
                 status = 1;
                 continue;
             };
-            if let Err(error) = output[0].write(&format!("{description}\n")) {
-                report(&output[1], &format!("command: {error}"));
+            if let Err(error) = descriptors[1].write(&format!("{description}\n")) {
+                report(&descriptors[2], &format!("command: {error}"));
                 return 1;
             }
         }
@@ -1019,8 +1047,7 @@ impl<'a> Invocation<'a> {
         &mut self,
         commands: &[Command],
         background: bool,
-        input: &Input<'_>,
-        original: &[Output; 2],
+        original: &Descriptors,
     ) -> io::Result<u8> {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         if background {
@@ -1038,9 +1065,9 @@ impl<'a> Invocation<'a> {
         }
         let (path, env) = self.execution_environment();
         let mut stdin = if background || self.agent_command() {
-            File::open("/dev/null")?.into()
+            Descriptor::File(Rc::new(File::open("/dev/null")?))
         } else {
-            input.descriptor()?
+            original[0].clone()
         };
         let mut stages = Vec::new();
         for (index, command) in commands.iter().enumerate() {
@@ -1050,25 +1077,23 @@ impl<'a> Invocation<'a> {
                 Some(process::pipe()?)
             };
             let (stdout, next_input) = match next {
-                Some((read, write)) => (Output::File(Rc::new(File::from(write))), Some(read)),
-                None => (original[0].clone(), None),
+                Some((read, write)) => (Descriptor::File(Rc::new(File::from(write))), Some(read)),
+                None => (original[1].clone(), None),
             };
-            let mut output = [stdout, original[1].clone()];
+            let mut descriptors = original.clone();
+            descriptors[0] = stdin;
+            descriptors[1] = stdout;
             let mut status = None;
-            let mut redirected = None;
             let argv = match self.expand_words(&command.words, &mut status) {
                 Err(error) => {
-                    report(&output[1], &error);
+                    report(&descriptors[2], &error);
                     vec!["exit".into(), "2".into()]
                 }
                 Ok(argv) => {
-                    if let Err(error) = self.redirect(
-                        &command.redirects,
-                        &mut redirected,
-                        &mut output,
-                        &mut status,
-                    ) {
-                        report(&output[1], &error);
+                    if let Err(error) =
+                        self.redirect(&command.redirects, &mut descriptors, &mut status)
+                    {
+                        report(&descriptors[2], &error);
                         vec!["exit".into(), "1".into()]
                     } else if argv.is_empty() || command.words.iter().all(|word| word.assignment) {
                         vec!["exit".into(), status.unwrap_or(0).to_string()]
@@ -1101,6 +1126,8 @@ impl<'a> Invocation<'a> {
                         .ok_or_else(|| io::Error::other("shell path must be UTF-8"))?
                         .to_owned(),
                     crate::PIPELINE_BUILTIN.into(),
+                    // Some runtimes reopen closed standard descriptors at startup.
+                    closed_stdio(&descriptors).to_string(),
                 ];
                 args.extend(argv);
                 let mut local_env = env.clone();
@@ -1113,21 +1140,16 @@ impl<'a> Invocation<'a> {
             } else {
                 process::Exec::new(&argv, &path, env.clone())?
             };
-            stages.push(process::Stage {
-                exec,
-                streams: [
-                    redirected.map(OwnedFd::from).unwrap_or(stdin),
-                    output[0].descriptor()?,
-                    output[1].descriptor()?,
-                ],
-                missing: format!("kwsh: {name}: command not found\n").into_bytes(),
-                failed: format!("kwsh: {name}: cannot execute\n").into_bytes(),
-            });
+            stages.push(stage(exec, &name, &descriptors)?);
             match next_input {
-                Some(read) => stdin = read,
+                Some(read) => stdin = Descriptor::File(Rc::new(File::from(read))),
                 None => break,
             }
         }
+        self.start_stages(stages, background)
+    }
+
+    fn start_stages(&mut self, stages: Vec<process::Stage>, background: bool) -> io::Result<u8> {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             if background {
@@ -1148,60 +1170,37 @@ impl<'a> Invocation<'a> {
         }
     }
 
-    fn external(&mut self, argv: &[String], input: &Input<'_>, output: &[Output; 2]) -> u8 {
+    fn external(&mut self, argv: &[String], mut descriptors: Descriptors) -> u8 {
         let (path, env) = self.execution_environment();
-        let streams = output[0]
-            .descriptor()
-            .and_then(|stdout| Ok((Stdio::from(stdout), Stdio::from(output[1].descriptor()?))));
-        let (stdout, stderr) = match streams {
-            Ok(streams) => streams,
+        let name = &argv[0];
+        let exec = match process::Exec::new(argv, &path, env) {
+            Ok(exec) => exec,
             Err(error) => {
-                report(&output[1], &format!("{}: {error}", argv[0]));
+                report(&descriptors[2], &format!("{name}: {error}"));
+                return 126;
+            }
+        };
+        if self.agent_command() {
+            match File::open("/dev/null") {
+                Ok(file) => descriptors[0] = Descriptor::File(Rc::new(file)),
+                Err(error) => {
+                    report(&descriptors[2], &format!("{name}: {error}"));
+                    return 1;
+                }
+            }
+        }
+        let child = match stage(exec, name, &descriptors) {
+            Ok(child) => child,
+            Err(error) => {
+                report(&descriptors[2], &format!("{name}: {error}"));
                 return 1;
             }
         };
-        let stdin = match input {
-            Input::File(file) => match file.get_ref().try_clone() {
-                Ok(file) => Stdio::from(file),
-                Err(error) => {
-                    report(&output[1], &format!("{}: {error}", argv[0]));
-                    return 1;
-                }
-            },
-            Input::Inherited(_) if self.agent_command() => Stdio::null(),
-            Input::Inherited(_) => Stdio::inherit(),
-        };
-        let launch = |enter| process::spawn(argv, &path, env, [stdin, stdout, stderr], enter);
-        #[cfg(any(target_os = "macos", target_os = "linux"))]
-        let result = match self.foreground.as_mut().filter(|tty| tty.has_terminal()) {
-            Some(tty) => tty.run(self.agent_deadline, || {
-                use std::os::fd::AsRawFd;
-
-                // pre_exec runs after stdio is installed, so fd 0 may be
-                // /dev/null. Keep the original tty open just until exec.
-                let terminal = process::duplicate(crate::terminal_modes::TTY)?;
-                launch(Some(move || {
-                    crate::terminal_modes::enter_child(terminal.as_raw_fd())
-                }))
-            }),
-            None => launch(None).and_then(|mut child| child.wait().map(process::status_code)),
-        };
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        let result = launch(None::<fn() -> io::Result<()>>)
-            .and_then(|mut child| child.wait().map(process::status_code));
-        match result {
-            Ok(status) => status,
-            Err(error) => {
-                let missing = error.raw_os_error() == Some(libc::ENOENT);
-                let message = if missing {
-                    "command not found".to_owned()
-                } else {
-                    error.to_string()
-                };
-                report(&output[1], &format!("{}: {message}", argv[0]));
-                if missing { 127 } else { 126 }
-            }
-        }
+        self.start_stages(vec![child], false)
+            .unwrap_or_else(|error| {
+                report(&descriptors[2], &format!("{name}: {error}"));
+                126
+            })
     }
 
     fn read(&mut self, args: &[String], input: &mut dyn BufRead) -> Result<bool, String> {
@@ -1322,18 +1321,16 @@ impl<'a> Invocation<'a> {
         self.variables
             .insert("COMP_CWORD".into(), index.to_string());
         self.arrays.remove("COMP_CWORD");
-        let null = Output::File(Rc::new(
+        let null = Descriptor::File(Rc::new(
             File::options()
                 .write(true)
                 .open("/dev/null")
                 .map_err(|error| error.to_string())?,
         ));
-        self.call_function(
-            function,
-            &args,
-            &mut Input::Inherited(&mut io::empty()),
-            &[null.clone(), null],
-        );
+        let mut descriptors = inherited_descriptors();
+        descriptors[1] = null.clone();
+        descriptors[2] = null;
+        self.call_function(function, &args, &mut io::empty(), &descriptors);
         let candidates: Vec<_> = self
             .arrays
             .get("COMPREPLY")
@@ -1553,14 +1550,13 @@ impl<'a> Invocation<'a> {
     fn redirect(
         &self,
         redirects: &[Redirect],
-        input: &mut Option<File>,
-        output: &mut [Output; 2],
+        descriptors: &mut Descriptors,
         status: &mut Option<u8>,
     ) -> Result<(), String> {
         for redirect in redirects {
             let (fd, target, kind) = match redirect {
                 Redirect::File { fd, target, kind } => (*fd, target, *kind),
-                Redirect::Here(document) => {
+                Redirect::Here { fd, document } => {
                     if self.agent_command() {
                         return Err("here-documents must be submitted by the user".into());
                     }
@@ -1577,55 +1573,63 @@ impl<'a> Invocation<'a> {
                     file.write_all(text.as_bytes())
                         .map_err(here_document_error)?;
                     file.rewind().map_err(here_document_error)?;
-                    *input = Some(file);
+                    descriptors[*fd] = Descriptor::File(Rc::new(file));
                     continue;
                 }
             };
-            if self.agent_command() && matches!(kind, RedirectKind::Read | RedirectKind::ReadWrite)
+            if self.agent_command()
+                && (!matches!(fd, 1 | 2)
+                    || matches!(
+                        kind,
+                        RedirectKind::Read | RedirectKind::ReadWrite | RedirectKind::DuplicateInput
+                    ))
             {
-                return Err("input redirection must be submitted by the user".into());
+                return Err(
+                    "this file descriptor redirection must be submitted by the user".into(),
+                );
             }
             let targets = self.expand(target, status)?;
             let [target] = targets.as_slice() else {
                 return Err("ambiguous redirection".into());
             };
-            match kind {
-                RedirectKind::Read => {
-                    *input =
-                        Some(File::open(target).map_err(|error| format!("{target}: {error}"))?);
-                }
-                RedirectKind::ReadWrite => {
-                    let file = OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .truncate(false)
-                        .open(target)
-                        .map_err(|error| format!("{target}: {error}"))?;
-                    if fd == 0 {
-                        *input = Some(file);
+            descriptors[fd] = match kind {
+                RedirectKind::DuplicateInput | RedirectKind::DuplicateOutput => {
+                    if self.agent_command() && !matches!(target.as_str(), "1" | "2") {
+                        return Err(
+                            "this file descriptor redirection must be submitted by the user".into(),
+                        );
+                    }
+                    if target == "-" {
+                        Descriptor::Closed
                     } else {
-                        output[fd - 1] = Output::File(Rc::new(file));
+                        let from = syntax::descriptor_number(target).ok_or_else(|| {
+                            format!("{target}: expected descriptor 0 through 9 or -")
+                        })?;
+                        let source = &descriptors[from];
+                        if !source.is_open() {
+                            return Err(format!("{from}: bad file descriptor"));
+                        }
+                        source.clone()
                     }
                 }
-                RedirectKind::Write | RedirectKind::ForceWrite | RedirectKind::Append => {
+                _ => {
                     let file = match kind {
+                        RedirectKind::Read => File::open(target),
+                        RedirectKind::ReadWrite => OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .create(true)
+                            .truncate(false)
+                            .open(target),
                         RedirectKind::Append => {
                             OpenOptions::new().append(true).create(true).open(target)
                         }
                         _ => File::create(target),
                     }
                     .map_err(|error| format!("{target}: {error}"))?;
-                    output[fd - 1] = Output::File(Rc::new(file));
+                    Descriptor::File(Rc::new(file))
                 }
-                RedirectKind::Duplicate => {
-                    output[fd - 1] = match target.as_str() {
-                        "1" => output[0].clone(),
-                        "2" => output[1].clone(),
-                        _ => return Err("only output descriptors 1 and 2 are supported".into()),
-                    };
-                }
-            }
+            };
         }
         Ok(())
     }
@@ -1683,57 +1687,94 @@ fn valid_name(name: &str) -> bool {
         && chars.all(|ch| ch == b'_' || ch.is_ascii_alphanumeric())
 }
 
-enum Input<'a> {
-    Inherited(&'a mut dyn BufRead),
-    File(BufReader<File>),
+type Descriptors = [Descriptor; crate::SHELL_FDS];
+
+fn inherited_descriptors() -> Descriptors {
+    std::array::from_fn(|fd| Descriptor::Inherited(fd as RawFd))
 }
 
-impl Input<'_> {
-    fn reader(&mut self) -> &mut dyn BufRead {
-        match self {
-            Self::Inherited(reader) => *reader,
-            Self::File(reader) => reader,
-        }
-    }
+fn closed_stdio(streams: &Descriptors) -> u8 {
+    streams[..3]
+        .iter()
+        .enumerate()
+        .fold(0, |mask, (fd, stream)| {
+            mask | if matches!(stream, Descriptor::Closed) {
+                1 << fd
+            } else {
+                0
+            }
+        })
+}
 
-    fn descriptor(&self) -> io::Result<OwnedFd> {
-        match self {
-            Self::Inherited(_) => process::duplicate(libc::STDIN_FILENO),
-            Self::File(reader) => reader.get_ref().try_clone().map(OwnedFd::from),
-        }
+fn stage(exec: process::Exec, name: &str, descriptors: &Descriptors) -> io::Result<process::Stage> {
+    let mut streams = std::array::from_fn(|_| process::FdAction::Keep);
+    for (fd, descriptor) in descriptors.iter().enumerate() {
+        streams[fd] = match descriptor {
+            Descriptor::Inherited(source) if *source == fd as RawFd => process::FdAction::Keep,
+            Descriptor::Closed => process::FdAction::Close,
+            _ => process::FdAction::Set(descriptor.duplicate()?),
+        };
     }
+    Ok(process::Stage {
+        exec,
+        streams,
+        missing: format!("kwsh: {name}: command not found\n").into_bytes(),
+        failed: format!("kwsh: {name}: cannot execute\n").into_bytes(),
+    })
 }
 
 #[derive(Clone)]
-enum Output {
-    Stdout,
-    Stderr,
+enum Descriptor {
+    Inherited(RawFd),
     File(Rc<File>),
+    Closed,
 }
 
-impl Output {
-    fn descriptor(&self) -> io::Result<OwnedFd> {
+impl Descriptor {
+    fn is_open(&self) -> bool {
         match self {
-            Self::Stdout => process::duplicate(libc::STDOUT_FILENO),
-            Self::Stderr => process::duplicate(libc::STDERR_FILENO),
-            Self::File(file) => file.try_clone().map(OwnedFd::from),
+            Self::Inherited(fd) => process::inherited_descriptor(*fd),
+            Self::File(_) => true,
+            Self::Closed => false,
+        }
+    }
+
+    fn duplicate(&self) -> io::Result<OwnedFd> {
+        match self {
+            Self::Inherited(fd) => process::duplicate(*fd),
+            Self::File(file) => process::duplicate(file.as_raw_fd()),
+            Self::Closed => Err(io::Error::from_raw_os_error(libc::EBADF)),
         }
     }
 
     fn write(&self, text: &str) -> io::Result<()> {
         match self {
-            Self::Stdout => {
+            Self::Inherited(1) => {
                 let mut output = io::stdout().lock();
                 output.write_all(text.as_bytes())?;
                 output.flush()
             }
-            Self::Stderr => io::stderr().lock().write_all(text.as_bytes()),
+            Self::Inherited(2) => io::stderr().lock().write_all(text.as_bytes()),
             Self::File(file) => file.as_ref().write_all(text.as_bytes()),
+            _ => File::from(self.duplicate()?).write_all(text.as_bytes()),
         }
     }
 }
 
-fn report(output: &Output, message: &str) {
+fn read_from<T>(
+    stream: &Descriptor,
+    stdin: &mut dyn BufRead,
+    read: impl FnOnce(&mut dyn BufRead) -> Result<T, String>,
+) -> Result<T, String> {
+    if matches!(stream, Descriptor::Inherited(0)) {
+        return read(stdin);
+    }
+    let fd = stream.duplicate().map_err(|error| error.to_string())?;
+    // Preserve unread bytes for the next builtin or external command.
+    read(&mut BufReader::with_capacity(1, File::from(fd)))
+}
+
+fn report(output: &Descriptor, message: &str) {
     let _ = output.write(&format!("kwsh: {message}\n"));
 }
 

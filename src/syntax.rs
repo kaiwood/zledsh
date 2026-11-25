@@ -14,7 +14,10 @@ pub(crate) enum Redirect {
         target: Word,
         kind: RedirectKind,
     },
-    Here(HereDocument),
+    Here {
+        fd: usize,
+        document: HereDocument,
+    },
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -37,7 +40,8 @@ pub(crate) enum RedirectKind {
     Write,
     ForceWrite,
     Append,
-    Duplicate,
+    DuplicateInput,
+    DuplicateOutput,
 }
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -665,53 +669,44 @@ fn redirect(input: &mut Source<'_>) -> ParseResult<Option<Redirect>> {
     while let Some(digit) = ahead.next_if(char::is_ascii_digit) {
         digits.push(digit);
     }
-    let (fd, kind) = match ahead.next() {
-        Some('<') if ahead.next_if_eq(&'>').is_some() => {
-            let fd = match digits.as_str() {
-                "" | "0" => 0,
-                "1" => 1,
-                "2" => 2,
-                _ => return Err("only descriptors 0, 1 and 2 are supported".into()),
-            };
-            (fd, RedirectKind::ReadWrite)
-        }
-        Some('<') => {
-            if !matches!(digits.as_str(), "" | "0") {
-                return Err("only input descriptor 0 is supported".into());
-            }
-            if ahead.next_if_eq(&'<').is_some() {
-                let strip_tabs = ahead.next_if_eq(&'-').is_some();
-                while ahead.next_if(|ch| matches!(ch, ' ' | '\t')).is_some() {}
-                let (delimiter, expand) = here_delimiter(&mut ahead)?;
-                let document = HereDocument {
-                    text: Rc::default(),
-                    expand,
-                };
-                ahead.pending_here.push(PendingHere {
-                    delimiter,
-                    strip_tabs,
-                    document: document.clone(),
-                });
-                *input = ahead;
-                return Ok(Some(Redirect::Here(document)));
-            }
-            (0, RedirectKind::Read)
-        }
-        Some('>') => {
-            let fd = match digits.as_str() {
-                "" | "1" => 1,
-                "2" => 2,
-                _ => return Err("only output descriptors 1 and 2 are supported".into()),
-            };
-            let kind = match ahead.next_if(|ch| matches!(ch, '&' | '>' | '|')) {
-                Some('&') => RedirectKind::Duplicate,
-                Some('>') => RedirectKind::Append,
-                Some('|') => RedirectKind::ForceWrite,
-                _ => RedirectKind::Write,
-            };
-            (fd, kind)
-        }
+    let operator = match ahead.next() {
+        Some(operator @ ('<' | '>')) => operator,
         _ => return Ok(None),
+    };
+    let fd = if digits.is_empty() {
+        usize::from(operator == '>')
+    } else {
+        descriptor_number(&digits).ok_or("only descriptors 0 through 9 are supported")?
+    };
+    let kind = if operator == '<' {
+        if ahead.next_if_eq(&'<').is_some() {
+            let strip_tabs = ahead.next_if_eq(&'-').is_some();
+            while ahead.next_if(|ch| matches!(ch, ' ' | '\t')).is_some() {}
+            let (delimiter, expand) = here_delimiter(&mut ahead)?;
+            let document = HereDocument {
+                text: Rc::default(),
+                expand,
+            };
+            ahead.pending_here.push(PendingHere {
+                delimiter,
+                strip_tabs,
+                document: document.clone(),
+            });
+            *input = ahead;
+            return Ok(Some(Redirect::Here { fd, document }));
+        }
+        match ahead.next_if(|ch| matches!(ch, '>' | '&')) {
+            Some('>') => RedirectKind::ReadWrite,
+            Some('&') => RedirectKind::DuplicateInput,
+            _ => RedirectKind::Read,
+        }
+    } else {
+        match ahead.next_if(|ch| matches!(ch, '&' | '>' | '|')) {
+            Some('&') => RedirectKind::DuplicateOutput,
+            Some('>') => RedirectKind::Append,
+            Some('|') => RedirectKind::ForceWrite,
+            _ => RedirectKind::Write,
+        }
     };
     while ahead.next_if(|ch| matches!(ch, ' ' | '\t')).is_some() {}
     if matches!(ahead.peek(), None | Some('#')) {
@@ -725,6 +720,13 @@ fn redirect(input: &mut Source<'_>) -> ParseResult<Option<Redirect>> {
     }
     *input = ahead;
     Ok(Some(Redirect::File { fd, target, kind }))
+}
+
+pub(crate) fn descriptor_number(text: &str) -> Option<usize> {
+    if !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok().filter(|&fd| fd < crate::SHELL_FDS)
 }
 
 // Parse the delimiter literally: quote removal, but no word expansion.

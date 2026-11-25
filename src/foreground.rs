@@ -1,5 +1,4 @@
 use std::io;
-use std::process::Child;
 use std::time::Instant;
 
 use crate::process::{Outcome, Pipeline, Stage};
@@ -173,16 +172,6 @@ impl Foreground {
             self.shell_group
                 .ok_or_else(|| io::Error::other("no controlling terminal"))?,
         )
-    }
-
-    pub fn run(
-        &mut self,
-        deadline: Option<Instant>,
-        spawn: impl FnOnce() -> io::Result<Child>,
-    ) -> io::Result<u8> {
-        let terminal = self.terminal()?;
-        let child = spawn()?;
-        self.wait(Pipeline::from_foreground_child(child), terminal, deadline)
     }
 
     pub fn capture(

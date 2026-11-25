@@ -2,9 +2,9 @@ use std::ffi::{CString, OsStr, OsString, c_char};
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus};
 
 pub(crate) struct Stdin;
 
@@ -29,38 +29,18 @@ pub(crate) fn null_stdin() -> io::Result<()> {
 }
 
 pub(crate) fn duplicate(fd: RawFd) -> io::Result<OwnedFd> {
-    let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+    let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, crate::SHELL_FDS as RawFd) };
     if copy < 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(unsafe { OwnedFd::from_raw_fd(copy) })
 }
 
-pub(crate) fn spawn(
-    argv: &[String],
-    path: &OsStr,
-    environment: impl IntoIterator<Item = (OsString, OsString)>,
-    [stdin, stdout, stderr]: [Stdio; 3],
-    foreground: Option<impl Fn() -> io::Result<()> + Send + Sync + 'static>,
-) -> io::Result<Child> {
-    let exec = Exec::new(argv, path, environment)?;
-
-    // Let std wire the descriptors and reap spawn failures. The hook always
-    // execs or returns an error, so std's own execvp path is never reached.
-    let mut command = Command::new("/");
-    command.stdin(stdin).stdout(stdout).stderr(stderr);
-    if foreground.is_some() {
-        command.process_group(0);
-    }
-    unsafe {
-        command.pre_exec(move || {
-            if let Some(enter) = &foreground {
-                enter()?;
-            }
-            Err(exec.invoke())
-        });
-    }
-    command.spawn()
+pub(crate) fn inherited_descriptor(fd: RawFd) -> bool {
+    // Private descriptors can temporarily occupy unused public numbers, but
+    // must never be made available as redirection sources.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    flags >= 0 && flags & libc::FD_CLOEXEC == 0
 }
 
 fn candidates(name: &str, path: &OsStr) -> impl Iterator<Item = PathBuf> {
@@ -138,14 +118,20 @@ pub(crate) fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
         return Err(io::Error::last_os_error());
     }
     let [read, write] = fds.map(|fd| unsafe { OwnedFd::from_raw_fd(fd) });
-    // Duplicate above stdio and set CLOEXEC; only explicitly mapped ends
-    // survive exec, so readers see EOF once all actual writers exit.
+    // Keep pipe and launch-gate ends above the public range. Only explicitly
+    // mapped ends survive exec, so readers see EOF when the last writer exits.
     Ok((duplicate(read.as_raw_fd())?, duplicate(write.as_raw_fd())?))
+}
+
+pub(crate) enum FdAction {
+    Keep,
+    Set(OwnedFd),
+    Close,
 }
 
 pub(crate) struct Stage {
     pub exec: Exec,
-    pub streams: [OwnedFd; 3],
+    pub streams: [FdAction; crate::SHELL_FDS],
     pub missing: Vec<u8>,
     pub failed: Vec<u8>,
 }
@@ -179,9 +165,18 @@ pub(crate) fn fork_stage(
         ] {
             libc::signal(signal, libc::SIG_DFL);
         }
-        for (fd, source) in stage.streams.iter().enumerate() {
-            if libc::dup2(source.as_raw_fd(), fd as libc::c_int) < 0 {
-                libc::_exit(126);
+        for (fd, action) in stage.streams.iter().enumerate() {
+            let fd = fd as RawFd;
+            match action {
+                FdAction::Set(source) => {
+                    if libc::dup2(source.as_raw_fd(), fd) < 0 {
+                        libc::_exit(126);
+                    }
+                }
+                FdAction::Close => {
+                    libc::close(fd);
+                }
+                FdAction::Keep => {}
             }
         }
         let mut byte = 0u8;
