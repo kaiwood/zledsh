@@ -208,6 +208,25 @@ impl<'a> Invocation<'a> {
             .iter()
             .flat_map(|word| self.expand(word))
             .collect();
+        let mut argv = argv.as_slice();
+        while let [prefix, rest @ ..] = argv {
+            if prefix != "command" {
+                break;
+            }
+            match rest {
+                [flag, names @ ..] if flag == "-v" => {
+                    self.status = self.describe_commands(names, &output);
+                    return;
+                }
+                [flag, ..] if flag.starts_with('-') && flag != "--" => {
+                    report(&output[1], "command: expected -v or a command name");
+                    self.status = 2;
+                    return;
+                }
+                [flag, rest @ ..] if flag == "--" => argv = rest,
+                _ => argv = rest,
+            }
+        }
         let Some((name, args)) = argv.split_first() else {
             self.status = 0;
             return;
@@ -334,7 +353,7 @@ impl<'a> Invocation<'a> {
                     if name == "wait" { 127 } else { 1 }
                 });
             }
-            _ => self.status = self.external(&argv, &output),
+            _ => self.status = self.external(argv, &output),
         }
     }
 
@@ -417,10 +436,35 @@ impl<'a> Invocation<'a> {
         Ok(())
     }
 
+    fn describe_commands(&self, names: &[String], output: &[Output; 2]) -> u8 {
+        let path = self.command_path();
+        let mut status = u8::from(names.is_empty());
+        for name in names {
+            let description = if let Some(alias) = self.aliases.get(name) {
+                format!("alias {name}='{}'", alias.replace("'", "'\\''"))
+            } else if is_builtin(name) {
+                name.clone()
+            } else if let Some(path) = process::find_executable(name, &path) {
+                path.to_string_lossy().into_owned()
+            } else {
+                status = 1;
+                continue;
+            };
+            if let Err(error) = output[0].write(&format!("{description}\n")) {
+                report(&output[1], &format!("command: {error}"));
+                return 1;
+            }
+        }
+        status
+    }
+
+    fn command_path(&self) -> OsString {
+        self.variable_os("PATH")
+            .unwrap_or_else(|| OsString::from("/usr/bin:/bin"))
+    }
+
     fn execution_environment(&self) -> (OsString, HashMap<OsString, OsString>) {
-        let path = self
-            .variable_os("PATH")
-            .unwrap_or_else(|| OsString::from("/usr/bin:/bin"));
+        let path = self.command_path();
         let mut env: HashMap<OsString, OsString> = std::env::vars_os()
             .filter(|(name, _)| !name.to_str().is_some_and(|name| self.unset.contains(name)))
             .collect();
@@ -720,7 +764,7 @@ impl<'a> Invocation<'a> {
 
 pub(crate) const BUILTINS: &[&str] = &[
     "exit", "cd", "pwd", "export", "unset", "read", "printf", "fg", "alias", "unalias", "jobs",
-    "bg", "wait",
+    "bg", "wait", "command",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {

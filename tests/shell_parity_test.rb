@@ -165,6 +165,38 @@ class ShellParityTest < Minitest::Test
     end
   end
 
+  def test_startup_can_guard_rbenv_shims_with_command_lookup
+    bin = File.join(@scratch, "bin")
+    FileUtils.mkdir_p(bin)
+    rbenv = File.join(bin, "rbenv")
+    File.write(rbenv, "#!/bin/sh\nexit 0\n")
+    @env["PATH"] = "#{bin}:/usr/bin:/bin"
+    File.open(File.join(@home, ".kwshrc"), "a") do |rc|
+      rc.puts <<~'SH'
+        if command -v rbenv >/dev/null 2>&1; then
+          export PATH="${RBENV_ROOT:-$HOME/.rbenv}/shims:$PATH"
+        fi
+      SH
+    end
+    [[0o644, @env.fetch("PATH")], [0o755, "#{@home}/.rbenv/shims:#{@env.fetch("PATH")}"]].each do |mode, path|
+      File.chmod(mode, rbenv)
+      executable, *args = COMMAND
+      PTY.spawn(@env, [executable, executable], *args, **@spawn_options) do |reader, writer, pid|
+        read_until(reader, RC_PROMPT)
+        writer.write("printf '%s\\n' \"$PATH\"\n")
+        read_until(reader, "\r\n#{path}\r\n")
+        read_until(reader, RC_PROMPT)
+        writer.write("exit 0\n")
+        drain_terminal(reader)
+        assert wait_for_exit(pid).success?
+      ensure
+        reader.close
+        writer.close
+        cleanup_child(pid)
+      end
+    end
+  end
+
   def test_terminal
     executable, *args = COMMAND
     PTY.spawn(@env, [executable, executable], *args, **@spawn_options) do |reader, writer, pid|
