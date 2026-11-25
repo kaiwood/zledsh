@@ -12,13 +12,13 @@ use crate::syntax::{self, Command, ParseError, Part, Redirect, Script, Statement
 
 pub(crate) struct Invocation<'a> {
     name: &'a str,
-    args: &'a [String],
+    args: Vec<String>,
     variables: HashMap<String, String>,
     aliases: HashMap<String, String>,
     exported: HashSet<String>,
     unset: HashSet<String>,
     substitution_depth: u8,
-    eval_depth: u8,
+    script_depth: u8,
     loop_depth: usize,
     loop_control: Option<LoopControl>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -49,16 +49,16 @@ struct Substitution {
 }
 
 impl<'a> Invocation<'a> {
-    pub fn new(name: &'a str, args: &'a [String]) -> Self {
+    pub fn new(name: &'a str, args: &[String]) -> Self {
         Self {
             name,
-            args,
+            args: args.to_vec(),
             variables: HashMap::new(),
             aliases: HashMap::new(),
             exported: HashSet::new(),
             unset: HashSet::new(),
             substitution_depth: 0,
-            eval_depth: 0,
+            script_depth: 0,
             loop_depth: 0,
             loop_control: None,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -234,7 +234,7 @@ impl<'a> Invocation<'a> {
                                 continue;
                             }
                         },
-                        None => self.args.to_vec(),
+                        None => self.args.clone(),
                     };
                     self.status = 0;
                     self.loop_depth += 1;
@@ -402,7 +402,12 @@ impl<'a> Invocation<'a> {
             self.status = substitution_status.unwrap_or(0);
             return;
         };
-        if self.agent_command() && matches!(name.as_str(), "exit" | "fg" | "bg" | "wait" | "eval") {
+        if self.agent_command()
+            && matches!(
+                name.as_str(),
+                "exit" | "fg" | "bg" | "wait" | "eval" | "." | "source"
+            )
+        {
             report(&output[1], &format!("{name} must be submitted by the user"));
             self.status = 2;
             return;
@@ -431,20 +436,35 @@ impl<'a> Invocation<'a> {
                     self.status = 2;
                 }
             }
-            "eval" => {
-                if self.eval_depth >= 32 {
-                    report(&output[1], "eval: nesting too deep");
+            "eval" => self.run_nested(name, &args.join(" "), input, &output),
+            "." | "source" => {
+                let Some((path, args)) = args.split_first() else {
+                    report(&output[1], &format!("{name}: expected a file"));
                     self.status = 2;
                     return;
+                };
+                let path = if path.contains('/') {
+                    std::path::PathBuf::from(path)
+                } else {
+                    std::env::split_paths(&self.command_path())
+                        .map(|dir| dir.join(path))
+                        .find(|path| path.is_file())
+                        .unwrap_or_else(|| path.into())
+                };
+                match std::fs::read_to_string(&path) {
+                    Ok(source) => {
+                        let saved = (!args.is_empty())
+                            .then(|| std::mem::replace(&mut self.args, args.to_vec()));
+                        self.run_nested(name, &source, input, &output);
+                        if let Some(saved) = saved {
+                            self.args = saved;
+                        }
+                    }
+                    Err(error) => {
+                        report(&output[1], &format!("{name}: {}: {error}", path.display()));
+                        self.status = 1;
+                    }
                 }
-                let source = args.join(" ");
-                self.eval_depth += 1;
-                self.status = 0;
-                if let Err(error) = self.run_source_with_output(&source, input, &output) {
-                    report(&output[1], &format!("eval: {error}"));
-                    self.status = 2;
-                }
-                self.eval_depth -= 1;
             }
             "exit" => {
                 self.exited = true;
@@ -561,6 +581,27 @@ impl<'a> Invocation<'a> {
             }
             _ => self.status = self.external(argv, &output),
         }
+    }
+
+    fn run_nested(
+        &mut self,
+        name: &str,
+        source: &str,
+        input: &mut impl BufRead,
+        output: &[Output; 2],
+    ) {
+        if self.script_depth >= 32 {
+            report(&output[1], &format!("{name}: nesting too deep"));
+            self.status = 2;
+            return;
+        }
+        self.script_depth += 1;
+        self.status = 0;
+        if let Err(error) = self.run_source_with_output(source, input, output) {
+            report(&output[1], &format!("{name}: {error}"));
+            self.status = 2;
+        }
+        self.script_depth -= 1;
     }
 
     fn update_aliases(
@@ -738,8 +779,10 @@ impl<'a> Invocation<'a> {
                     }
                 }
             };
-            if self.agent_command() && direct_name(&argv) == Some("eval") {
-                return Err(io::Error::other("eval must be submitted by the user"));
+            if self.agent_command() && matches!(direct_name(&argv), Some("eval" | "." | "source")) {
+                return Err(io::Error::other(
+                    "eval and source must be submitted by the user",
+                ));
             }
             let name = argv[0].clone();
             let exec = if is_builtin(&name) {
@@ -949,7 +992,7 @@ impl<'a> Invocation<'a> {
         let saved = Substitution {
             source: source.into(),
             name: self.name.into(),
-            args: self.args.to_vec(),
+            args: self.args.clone(),
             variables: self.variables.clone(),
             aliases: self.aliases.clone(),
             exported: self.exported.clone(),
@@ -1102,7 +1145,7 @@ impl<'a> Invocation<'a> {
 
 pub(crate) const BUILTINS: &[&str] = &[
     "exit", "cd", "pwd", "export", "unset", "read", "printf", "fg", "alias", "unalias", "jobs",
-    "bg", "wait", "command", ":", "true", "false", "eval", "break", "continue",
+    "bg", "wait", "command", ":", "true", "false", "eval", "break", "continue", ".", "source",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {

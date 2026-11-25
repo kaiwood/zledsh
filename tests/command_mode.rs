@@ -111,6 +111,29 @@ fn eval_runs_native_code_with_current_state_and_redirects() {
 }
 
 #[test]
+fn source_uses_native_state_and_its_own_arguments() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("startup"),
+        "value=loaded; printf '<%s>' \"$@\"\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+        .current_dir(dir.path())
+        .args([
+            "-c",
+            r#". ./startup 'from source'; printf ':%s:' "$value"; printf '<%s>' "$@""#,
+            "fixture",
+            "from caller",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"<from source>:loaded:<from caller>");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn status_expands_and_unset_removes_inherited_environment() {
     let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
         .env("KWSH_TEST_UNSET", "inherited")
