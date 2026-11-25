@@ -233,6 +233,25 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
+  def test_history_arrows_search_the_draft_prefix
+    prompt = "prefix> "
+    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
+      %w[match-first match-second unrelated].each do |word|
+        writer.write("/bin/echo #{word}\n")
+        read_until(reader, "\r\n#{word}\r\n")
+        read_until(reader, prompt)
+      end
+      writer.write("/bin/echo match\e[A")
+      read_until(reader, "#{prompt}/bin/echo match-second")
+      writer.write("\e[A")
+      read_until(reader, "#{prompt}/bin/echo match-first")
+      writer.write("\e[B\e[B\n")
+      read_until(reader, "\r\nmatch\r\n")
+      read_until(reader, prompt)
+      exit_spike(reader, writer, pid)
+    end
+  end
+
   def test_assistant_changes_live_directory_but_does_not_execute_draft
     env = { "PROMPT" => "%1~> ", "TERM" => "xterm" }
     with_terminal(KWSH, env: env, prompt: "~> ", setup: ->(home) {

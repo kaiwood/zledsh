@@ -647,33 +647,54 @@ fn read_keys(
                 Paste::Rejected => echo.write_all(b"\x07")?,
                 Paste::End => return Ok(Line::End),
             },
-            Key::Byte(b'\t') if primary && cursor == line.len() => {
-                if let Some(suffix) = std::str::from_utf8(&line)
+            Key::Byte(b'\t')
+                if primary && (cursor == line.len() || line[cursor].is_ascii_whitespace()) =>
+            {
+                let Some(mut suffix) = std::str::from_utf8(&line[..cursor])
                     .ok()
-                    .and_then(|line| crate::completion::suffix(line, shell))
-                {
+                    .and_then(|prefix| crate::completion::suffix(prefix, shell))
+                else {
+                    continue;
+                };
+                if cursor == line.len() {
                     line.extend_from_slice(suffix.as_bytes());
                     cursor = line.len();
                     echo.write_all(suffix.as_bytes())?;
                     echo.flush()?;
+                    continue;
                 }
-                continue;
+                if suffix.ends_with(' ') {
+                    suffix.pop();
+                }
+                line.splice(cursor..cursor, suffix.bytes());
+                cursor += suffix.len();
             }
             Key::Up | Key::Down if primary && !history.paused => {
-                if key == Key::Up && history_index.is_none() {
+                if history_index.is_none() {
+                    if key == Key::Down {
+                        continue;
+                    }
                     history.refresh();
                     saved_draft = (line.clone(), cursor);
                 }
-                let size = history.entries().len();
+                let matches_prefix =
+                    |text: &str| text.as_bytes().starts_with(&saved_draft.0[..saved_draft.1]);
                 if key == Key::Up {
-                    history_index = history_index
-                        .unwrap_or(size)
-                        .checked_sub(1)
+                    let bound = history_index.unwrap_or_else(|| history.entries().len());
+                    history_index = history
+                        .entries()
+                        .take(bound)
+                        .rposition(matches_prefix)
                         .or(history_index);
+                    if history_index.is_none() {
+                        continue;
+                    }
                 } else if let Some(index) = history_index {
-                    history_index = (index + 1 < size).then_some(index + 1);
-                } else {
-                    continue;
+                    history_index = history
+                        .entries()
+                        .enumerate()
+                        .skip(index + 1)
+                        .find_map(|(index, text)| matches_prefix(text).then_some(index));
                 }
                 (line, cursor) = history_index
                     .and_then(|index| history.entries().nth(index))
