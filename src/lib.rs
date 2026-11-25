@@ -1,5 +1,9 @@
+#[cfg(target_os = "macos")]
+mod interactive;
 mod runtime;
 mod syntax;
+#[cfg(target_os = "macos")]
+mod terminal_modes;
 
 use std::{
     env,
@@ -47,6 +51,14 @@ fn run_command(
     let Some(option) = option else {
         let mut invocation =
             runtime::Invocation::new(name.to_str().ok_or("command name must be UTF-8")?, &[]);
+        #[cfg(target_os = "macos")]
+        {
+            use std::io::IsTerminal;
+            if input.is_terminal() && io::stderr().is_terminal() {
+                return interactive::run(&mut invocation, &mut input, program == "kward shell")
+                    .map_err(|error| error.to_string());
+            }
+        }
         return run_input(&mut invocation, &mut input);
     };
     match option.to_str() {

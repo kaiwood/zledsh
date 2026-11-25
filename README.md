@@ -6,7 +6,9 @@
 cargo run --locked -- -c 'printf "<%s>\n" "$0" "$@"' demo 'two words'
 ```
 
-This slice supports `exit` and a limited `printf` (`%s` and `%%`), quoted positional arguments and simple environment substitutions, sequential commands, and output redirection for fd 1 and 2. With redirected stdin, the shell reads commands from that stream; `read [-r] name` consumes data from the same stream and sets a session variable. External commands and interactive mode are not implemented yet. Unsupported syntax is not passed to another shell.
+This slice supports `exit` and a limited `printf` (`%s` and `%%`), quoted positional arguments and simple environment substitutions, sequential commands, and output redirection for fd 1 and 2. With redirected stdin, the shell reads commands from that stream; `read [-r] name` consumes data from the same stream and sets a session variable. External commands are not implemented yet. Unsupported syntax is not passed to another shell.
+
+On macOS, run `target/debug/kwsh` or `target/debug/kward shell` without arguments for an interactive prompt. Both use `PS1` and `PS2`; `kward shell` also accepts a literal `PROMPT`, provides basic line editing, and runs supported commands and assignments from `.kward/kwshrc` and `.kwshrc` under your home directory. Plain `kwsh` skips those files. Prompt formatting, `ENV` startup, job control, and the `?` assistant are not wired into the interactive binaries yet.
 
 ## Development
 
@@ -28,23 +30,23 @@ ruby tests/shell_parity_test.rb
 
 Set `KWSH_REFERENCE` to use a checkout in a different location. Each case runs with a temporary home and working directory. The suite checks both `kward shell` and plain `kwsh`: `-c` arguments, exit status, output and a redirected file, input redirected into the shell, and interactive startup, command output and exit in a PTY. The PTY checks also verify that `kward shell` loads `~/.kwshrc` and plain `kwsh` does not.
 
-To run the same cases against another build, set **both** `KWSH_KWARD_CMD` and `KWSH_PLAIN_CMD` to the corresponding launch commands. They are split into arguments, not evaluated by a shell. Use absolute paths for any path arguments after the executable, since the tests run from a temporary directory. To check the implemented noninteractive behavior against the same fixtures:
+To run the same cases against another build, set **both** `KWSH_KWARD_CMD` and `KWSH_PLAIN_CMD` to the corresponding launch commands. They are split into arguments, not evaluated by a shell. Use absolute paths for any path arguments after the executable, since the tests run from a temporary directory. To check the Rust binaries against the same fixtures:
 
 ```sh
 KWSH_KWARD_CMD='./target/debug/kward shell' \
 KWSH_PLAIN_CMD='./target/debug/kwsh' \
-ruby tests/shell_parity_test.rb --name '/_(command|redirected_input)$/'
+ruby tests/shell_parity_test.rb
 ```
 
-The PTY parity cases still target unimplemented Rust behavior. Linux validation is deferred.
+Linux validation is deferred.
 
 ### Terminal and process spike (macOS)
 
 ```sh
-cargo build --locked --example terminal_spike
+cargo build --locked --bins --example terminal_spike
 ruby tests/terminal_spike_test.rb
 ```
 
-The PTY suite exercises Ctrl+Z and `fg`, restoration of the stopped job’s terminal settings and the original settings on exit, and inheritance of fd 9. It also tests a fake `?` turn over private pipes: the interpreter changes its own working directory, the provider’s draft is editable without executing, and Ctrl+C cancels and reaps a waiting provider without ending the session.
+The PTY suite exercises Ctrl+Z and `fg`, restoration of the stopped job’s terminal settings and the original settings on exit, and inheritance of fd 9. It also tests a fake `?` turn over private pipes: the interpreter changes its own working directory, the provider’s draft is editable without executing, and Ctrl+C cancels and reaps a waiting provider without ending the session. A separate check runs the real Rust `kward shell`, cancels an unsubmitted line, and compares terminal settings before and after exit.
 
 The example recognizes only fixed test commands. It does not parse shell syntax, run arbitrary commands, contact a provider, or change either invocation profile. Ruby runs the test harness, not the Rust example.

@@ -70,9 +70,26 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
+  def test_real_interpreter_cancels_draft_and_restores_terminal
+    kward = File.expand_path("../target/debug/kward", __dir__)
+    with_terminal(kward, "shell", env: { "PROMPT" => "rust> ", "TERM" => "xterm" }, prompt: "rust> ") do |reader, writer, pid|
+      writer.write("exit 17\x03")
+      read_until(reader, "^C\r\n")
+      read_until(reader, "rust> ")
+      writer.write("printf '%s-%s\\n' still here\n")
+      read_until(reader, "\r\nstill-here\r\n")
+      read_until(reader, "rust> ")
+      exit_spike(reader, writer, pid)
+    end
+  end
+
   private
 
-  def with_spike
+  def with_spike(&block)
+    with_terminal(SPIKE, env: {}, prompt: PROMPT, &block)
+  end
+
+  def with_terminal(executable, *args, env:, prompt:)
     Dir.mktmpdir("kwsh-terminal-") do |work|
       Dir.mkdir(File.join(work, "moved"))
       # Keep the session leader alive: macOS revokes the tty when it exits.
@@ -84,17 +101,18 @@ class TerminalSpikeTest < Minitest::Test
         end
 
         before = tty_modes
-        spike = ARGV.fetch(0)
-        success = system([spike, spike], 9 => 9)
+        program, *args = ARGV
+        success = system([program, program], *args, 9 => 9)
         after = tty_modes
         abort "tty modes changed: #{before} -> #{after}" unless before == after
         puts "tty restored"
         exit success ? 0 : 1
       RUBY
       File.open(File.join(work, "fd9"), "w") do |descriptor|
-        PTY.spawn(RbConfig.ruby, "-e", bootstrap, SPIKE, chdir: work, 9 => descriptor) do |reader, writer, pid|
+        PTY.spawn({ "HOME" => work, "KWARD_CONFIG_PATH" => nil }.merge(env), RbConfig.ruby, "-e", bootstrap, executable, *args,
+                  chdir: work, 9 => descriptor) do |reader, writer, pid|
           reader.winsize = [24, 80]
-          read_until(reader, PROMPT)
+          read_until(reader, prompt)
           yield reader, writer, pid, work
         ensure
           reader.close

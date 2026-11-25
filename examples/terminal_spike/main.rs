@@ -2,6 +2,9 @@
 mod provider;
 #[cfg(target_os = "macos")]
 mod terminal;
+#[cfg(target_os = "macos")]
+#[path = "../../src/terminal_modes.rs"]
+mod terminal_modes;
 
 #[cfg(target_os = "macos")]
 fn main() -> std::process::ExitCode {

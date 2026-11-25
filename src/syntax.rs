@@ -13,7 +13,10 @@ pub(crate) struct Redirect {
 }
 
 #[derive(Default)]
-pub(crate) struct Word(pub Vec<Part>);
+pub(crate) struct Word {
+    pub parts: Vec<Part>,
+    pub assignment: bool,
+}
 
 pub(crate) enum Part {
     Literal(String),
@@ -113,7 +116,12 @@ fn redirect_fd(input: &Source<'_>) -> ParseResult<Option<usize>> {
 }
 
 fn word(input: &mut Source<'_>) -> ParseResult<Word> {
-    let mut word = Word::default();
+    let mut ahead = input.clone();
+    let assignment = variable_name(&mut ahead).is_some() && ahead.next_if_eq(&'=').is_some();
+    let mut word = Word {
+        assignment,
+        ..Word::default()
+    };
     let mut started = false;
     while let Some(&ch) = input.peek() {
         if matches!(ch, ' ' | '\t' | '\n' | ';' | '>') {
@@ -121,7 +129,7 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
         }
         input.next();
         match ch {
-            '\'' => word.0.push(Part::Literal(single_quoted(input)?)),
+            '\'' => word.parts.push(Part::Literal(single_quoted(input)?)),
             '"' => double_quoted(input, &mut word)?,
             '\\' => match input.next() {
                 Some('\n') => continue,
@@ -137,7 +145,7 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
         }
         started = true;
     }
-    if !started && word.0.is_empty() {
+    if !started && word.parts.is_empty() {
         return Err("expected a word".into());
     }
     Ok(word)
@@ -157,7 +165,7 @@ fn single_quoted(input: &mut Source<'_>) -> ParseResult<String> {
 fn double_quoted(input: &mut Source<'_>, word: &mut Word) -> ParseResult<()> {
     // Keep even an empty quoted word, but not an empty "$@".
     if input.next_if_eq(&'"').is_some() {
-        word.0.push(Part::Literal(String::new()));
+        word.parts.push(Part::Literal(String::new()));
         return Ok(());
     }
     while let Some(ch) = input.next() {
@@ -218,7 +226,7 @@ fn parameter(input: &mut Source<'_>, word: &mut Word) -> ParseResult<()> {
             return Ok(());
         }
     };
-    word.0.push(part);
+    word.parts.push(part);
     Ok(())
 }
 
@@ -232,9 +240,9 @@ fn variable_name(input: &mut Source<'_>) -> Option<String> {
 }
 
 fn literal(word: &mut Word, ch: char) {
-    if let Some(Part::Literal(text)) = word.0.last_mut() {
+    if let Some(Part::Literal(text)) = word.parts.last_mut() {
         text.push(ch);
     } else {
-        word.0.push(Part::Literal(String::from(ch)));
+        word.parts.push(Part::Literal(String::from(ch)));
     }
 }

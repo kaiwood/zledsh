@@ -1,10 +1,11 @@
 use std::io::{self, BufRead, Write};
-use std::mem::MaybeUninit;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
 
-const TTY: libc::c_int = libc::STDIN_FILENO;
+use crate::terminal_modes::{
+    TTY, attributes, editor_attributes, restore_attributes, set_attributes,
+};
 
 pub struct Terminal {
     shell: libc::pid_t,
@@ -20,9 +21,7 @@ impl Terminal {
             return Err(io::Error::other("spike must be in the foreground"));
         }
         let original = attributes()?;
-        let mut editor = original;
-        unsafe { libc::cfmakeraw(&mut editor) };
-        editor.c_oflag = original.c_oflag;
+        let editor = editor_attributes(original);
         // tcsetpgrp must also work while the shell is in the background.
         let old_ttou = unsafe { libc::signal(libc::SIGTTOU, libc::SIG_IGN) };
         if old_ttou == libc::SIG_ERR {
@@ -99,8 +98,7 @@ impl Terminal {
 impl Drop for Terminal {
     fn drop(&mut self) {
         unsafe { libc::tcsetpgrp(TTY, self.shell) };
-        // Discard editor typeahead instead of marking it pending in cooked mode.
-        let _ = retry(|| unsafe { libc::tcsetattr(TTY, libc::TCSAFLUSH, &self.original) });
+        restore_attributes(&self.original);
         unsafe { libc::signal(libc::SIGTTOU, self.old_ttou) };
     }
 }
@@ -187,16 +185,6 @@ pub fn fd_probe() -> io::Result<()> {
             "short fd probe write",
         ))
     }
-}
-
-fn attributes() -> io::Result<libc::termios> {
-    let mut modes = MaybeUninit::uninit();
-    cvt(unsafe { libc::tcgetattr(TTY, modes.as_mut_ptr()) })?;
-    Ok(unsafe { modes.assume_init() })
-}
-
-fn set_attributes(modes: &libc::termios) -> io::Result<()> {
-    retry(|| unsafe { libc::tcsetattr(TTY, libc::TCSANOW, modes) }).map(|_| ())
 }
 
 pub fn retry(mut call: impl FnMut() -> libc::c_int) -> io::Result<libc::c_int> {

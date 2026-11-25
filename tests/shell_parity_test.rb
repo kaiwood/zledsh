@@ -94,6 +94,7 @@ class ShellParityTest < Minitest::Test
         read_until(reader, "\r\nparity-output\r\n")
         read_until(reader, prompt)
         writer.write("exit 0\n")
+        drain_terminal(reader)
         assert wait_for_exit(pid).success?
       ensure
         reader.close
@@ -125,6 +126,15 @@ class ShellParityTest < Minitest::Test
     end
   rescue Timeout::Error, EOFError, Errno::EIO
     flunk "terminal did not produce #{expected.inspect}; last output: #{tail.inspect}"
+  end
+
+  def drain_terminal(reader)
+    # The shell may drain tty output before restoring its settings on exit.
+    Timeout.timeout(TIMEOUT) { loop { reader.readpartial(4096) } }
+  rescue EOFError, Errno::EIO
+    nil
+  rescue Timeout::Error
+    flunk "terminal did not close after exit"
   end
 
   def wait_for_exit(pid)

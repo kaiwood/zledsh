@@ -33,6 +33,20 @@ impl<'a> Invocation<'a> {
                 self.status = 1;
                 continue;
             }
+            if !command.words.is_empty() && command.words.iter().all(|word| word.assignment) {
+                self.status = 0;
+                for word in &command.words {
+                    let fields = self.expand(word);
+                    if let [field] = fields.as_slice() {
+                        self.assign(field);
+                    } else {
+                        report(&output[1], "assignment must expand to one value");
+                        self.status = 2;
+                        break;
+                    }
+                }
+                continue;
+            }
             let argv: Vec<_> = command
                 .words
                 .iter()
@@ -60,6 +74,21 @@ impl<'a> Invocation<'a> {
                         }
                     };
                     return;
+                }
+                "export" => {
+                    self.status = 0;
+                    for arg in args {
+                        if arg
+                            .split_once('=')
+                            .is_some_and(|(name, _)| valid_name(name))
+                        {
+                            self.assign(arg);
+                        } else if !valid_name(arg) {
+                            report(&output[1], "export: expected a variable name or assignment");
+                            self.status = 2;
+                            break;
+                        }
+                    }
                 }
                 "read" => {
                     self.status = match self.read(args, input) {
@@ -135,11 +164,25 @@ impl<'a> Invocation<'a> {
         Ok(complete)
     }
 
+    fn assign(&mut self, assignment: &str) {
+        if let Some((name, value)) = assignment.split_once('=') {
+            self.variables.insert(name.to_owned(), value.to_owned());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn variable(&self, name: &str) -> Option<String> {
+        self.variables
+            .get(name)
+            .cloned()
+            .or_else(|| std::env::var(name).ok())
+    }
+
     fn expand(&self, word: &Word) -> Vec<String> {
         let mut fields = Vec::new();
         let mut field = String::new();
         let mut present = false;
-        for part in &word.0 {
+        for part in &word.parts {
             match part {
                 Part::Literal(text) => field.push_str(text),
                 Part::Name => field.push_str(self.name),
