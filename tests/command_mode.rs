@@ -155,3 +155,31 @@ fn chatgpt_login_requires_a_terminal() {
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("requires an interactive terminal"));
 }
+
+#[test]
+fn indexed_arrays_keep_sparse_indices_and_local_scope() {
+    let output = run(
+        r#"
+        words=(first 'two words' "" $(printf 'last extra'))
+        f() {
+            local words=("${words[@]}")
+            index=1
+            printf '[%s]' "${words[index]}"
+            unset "words[$index]"
+            printf '<%s>' "${words[@]}"
+            printf ':%s:' "${words[3]}"
+        }
+        f
+        printf '<%s>' "${words[@]}"
+        words=()
+        printf '%s' "${words[@]}" done
+        "#,
+        &[],
+    );
+    assert!(output.status.success());
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        output.stdout,
+        b"[two words]<first><><last><extra>:last:<first><two words><><last><extra>done"
+    );
+}

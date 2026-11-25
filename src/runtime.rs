@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io::{self, BufRead, Read, Seek, Write};
@@ -9,13 +9,14 @@ use std::rc::Rc;
 use crate::process;
 
 use crate::syntax::{
-    self, CasePattern, Command, ParseError, Part, Redirect, Script, Statement, Word,
+    self, ArrayIndex, CasePattern, Command, ParseError, Part, Redirect, Script, Statement, Word,
 };
 
 pub(crate) struct Invocation<'a> {
     name: &'a str,
     args: Vec<String>,
     variables: HashMap<String, String>,
+    arrays: HashMap<String, BTreeMap<usize, String>>,
     aliases: HashMap<String, String>,
     functions: HashMap<String, Script>,
     exported: HashSet<String>,
@@ -36,6 +37,7 @@ pub(crate) struct Invocation<'a> {
 
 struct SavedVariable {
     value: Option<String>,
+    array: Option<BTreeMap<usize, String>>,
     exported: bool,
     unset: bool,
 }
@@ -52,6 +54,7 @@ struct Substitution {
     name: String,
     args: Vec<String>,
     variables: HashMap<String, String>,
+    arrays: HashMap<String, BTreeMap<usize, String>>,
     aliases: HashMap<String, String>,
     functions: HashMap<String, Script>,
     exported: HashSet<String>,
@@ -66,6 +69,7 @@ impl<'a> Invocation<'a> {
             name,
             args: args.to_vec(),
             variables: HashMap::new(),
+            arrays: HashMap::new(),
             aliases: HashMap::new(),
             functions: HashMap::new(),
             exported: HashSet::new(),
@@ -94,6 +98,7 @@ impl<'a> Invocation<'a> {
     fn expand_aliases(&self, script: &mut [Statement]) -> Result<(), ParseError> {
         for statement in script {
             match statement {
+                Statement::Array { .. } => {}
                 Statement::Pipeline(stages) => {
                     for command in stages {
                         self.expand_alias(command)?;
@@ -245,6 +250,15 @@ impl<'a> Invocation<'a> {
                             self.run_with_output(std::slice::from_ref(statement), input, output);
                         }
                     }
+                }
+                Statement::Array { name, words, local } => {
+                    self.status = match self.assign_array(name, words, *local) {
+                        Ok(status) => status,
+                        Err(error) => {
+                            report(&output[1], &error);
+                            2
+                        }
+                    };
                 }
                 Statement::Function { name, body } => {
                     self.functions.insert(name.clone(), body.clone());
@@ -622,11 +636,22 @@ impl<'a> Invocation<'a> {
             "unset" => {
                 self.status = 0;
                 for name in args.strip_prefix(&[String::from("-v")]).unwrap_or(args) {
+                    if let Some((array, index)) =
+                        name.strip_suffix(']').and_then(|name| name.split_once('['))
+                    {
+                        if let Ok(index) = index.parse::<usize>() {
+                            if let Some(values) = self.arrays.get_mut(array) {
+                                values.remove(&index);
+                            }
+                            continue;
+                        }
+                    }
                     if !valid_name(name) {
                         report(&output[1], "unset: expected a variable name");
                         self.status = 2;
                         break;
                     }
+                    self.arrays.remove(name);
                     self.variables.remove(name);
                     self.exported.remove(name);
                     self.unset.insert(name.clone());
@@ -712,6 +737,11 @@ impl<'a> Invocation<'a> {
             } else {
                 self.variables.remove(&name);
             }
+            if let Some(array) = saved.array {
+                self.arrays.insert(name.clone(), array);
+            } else {
+                self.arrays.remove(&name);
+            }
             if saved.unset {
                 self.unset.insert(name.clone());
             } else {
@@ -727,6 +757,33 @@ impl<'a> Invocation<'a> {
         self.args = previous;
     }
 
+    fn assign_array(&mut self, name: &str, words: &[Word], local: bool) -> Result<u8, String> {
+        let mut status = None;
+        let values = self.expand_words(words, &mut status)?;
+        if local {
+            self.save_local(name)?;
+        }
+        self.variables.remove(name);
+        self.unset.insert(name.into());
+        self.arrays
+            .insert(name.into(), values.into_iter().enumerate().collect());
+        Ok(status.unwrap_or(0))
+    }
+
+    fn save_local(&mut self, name: &str) -> Result<(), String> {
+        let frame = self
+            .locals
+            .last_mut()
+            .ok_or("local: only available in a function")?;
+        frame.entry(name.into()).or_insert_with(|| SavedVariable {
+            value: self.variables.get(name).cloned(),
+            array: self.arrays.get(name).cloned(),
+            exported: self.exported.contains(name),
+            unset: self.unset.contains(name),
+        });
+        Ok(())
+    }
+
     fn set_locals(&mut self, args: &[String], output: &Output) -> u8 {
         if self.locals.is_empty() {
             report(output, "local: only available in a function");
@@ -738,16 +795,8 @@ impl<'a> Invocation<'a> {
                 report(output, "local: expected a variable name or assignment");
                 return 2;
             }
-            let saved = SavedVariable {
-                value: self.variables.get(name).cloned(),
-                exported: self.exported.contains(name),
-                unset: self.unset.contains(name),
-            };
-            self.locals
-                .last_mut()
-                .unwrap()
-                .entry(name.into())
-                .or_insert(saved);
+            self.save_local(name).expect("local frame checked above");
+            self.arrays.remove(name);
             self.variables.insert(name.into(), value.into());
             self.unset.remove(name);
         }
@@ -1147,6 +1196,7 @@ impl<'a> Invocation<'a> {
             .map_err(|_| "invalid command substitution state")?;
         let mut shell = Invocation::new(&saved.name, &saved.args);
         shell.variables = saved.variables;
+        shell.arrays = saved.arrays;
         shell.aliases = saved.aliases;
         shell.functions = saved.functions;
         shell.exported = saved.exported;
@@ -1171,6 +1221,7 @@ impl<'a> Invocation<'a> {
             name: self.name.into(),
             args: self.args.clone(),
             variables: self.variables.clone(),
+            arrays: self.arrays.clone(),
             aliases: self.aliases.clone(),
             functions: self.functions.clone(),
             exported: self.exported.clone(),
@@ -1250,6 +1301,42 @@ impl<'a> Invocation<'a> {
                     for arg in rest {
                         fields.push(std::mem::take(&mut field));
                         field.push_str(arg);
+                    }
+                }
+                Part::Array { name, index } => {
+                    let array = self.arrays.get(name);
+                    match index {
+                        ArrayIndex::All => {
+                            if let Some(array) = array {
+                                let mut values = array.values();
+                                let Some(first) = values.next() else { continue };
+                                field.push_str(first);
+                                for value in values {
+                                    fields.push(std::mem::take(&mut field));
+                                    field.push_str(value);
+                                }
+                            } else if let Some(value) = self.variable(name) {
+                                field.push_str(&value);
+                            } else {
+                                continue;
+                            }
+                        }
+                        _ => {
+                            let index = match index {
+                                ArrayIndex::Number(index) => Some(*index),
+                                ArrayIndex::Variable(name) => {
+                                    self.variable(name).and_then(|value| value.parse().ok())
+                                }
+                                ArrayIndex::All => unreachable!(),
+                            };
+                            if let Some(index) = index {
+                                if let Some(value) = array.and_then(|array| array.get(&index)) {
+                                    field.push_str(value);
+                                } else if index == 0 && array.is_none() {
+                                    field.push_str(&self.variable(name).unwrap_or_default());
+                                }
+                            }
+                        }
                     }
                 }
                 Part::Substitution { source, split } => {

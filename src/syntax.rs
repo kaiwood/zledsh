@@ -28,6 +28,10 @@ pub(crate) enum Part {
     Status,
     LastBackground,
     Arguments,
+    Array {
+        name: String,
+        index: ArrayIndex,
+    },
     Substitution {
         source: String,
         split: bool,
@@ -38,6 +42,13 @@ pub(crate) enum Part {
         if_empty: bool,
         alternate: bool,
     },
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) enum ArrayIndex {
+    All,
+    Number(usize),
+    Variable(String),
 }
 
 #[derive(Clone)]
@@ -107,6 +118,11 @@ pub(crate) type Script = Vec<Statement>;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Statement {
     Pipeline(Vec<Command>),
+    Array {
+        name: String,
+        words: Vec<Word>,
+        local: bool,
+    },
     Function {
         name: String,
         body: Script,
@@ -266,6 +282,20 @@ fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
             "case" => case_statement(input, depth + 1)?,
             _ => while_loop(input, depth + 1, name == "until")?,
         }
+    } else if let Some((name, local)) = array_header(input) {
+        let mut words = Vec::new();
+        loop {
+            skip_newlines(input);
+            match input.peek() {
+                Some(')') => {
+                    input.next();
+                    break;
+                }
+                None => return Err(ParseError::Incomplete("unclosed array literal")),
+                _ => words.push(word(input)?),
+            }
+        }
+        Statement::Array { name, words, local }
     } else if let Some(name) = function_header(input) {
         if depth >= 32 {
             return Err("compound commands nested too deeply".into());
@@ -286,6 +316,20 @@ fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
     } else {
         statement
     })
+}
+
+fn array_header(input: &mut Source<'_>) -> Option<(String, bool)> {
+    let mut ahead = input.clone();
+    let mut name = variable_name(&mut ahead)?;
+    let local = name == "local" && ahead.peek().is_some_and(|ch| matches!(ch, ' ' | '\t'));
+    if local {
+        skip_space(&mut ahead);
+        name = variable_name(&mut ahead)?;
+    }
+    ahead.next_if_eq(&'=')?;
+    ahead.next_if_eq(&'(')?;
+    *input = ahead;
+    Some((name, local))
 }
 
 fn function_header(input: &mut Source<'_>) -> Option<String> {
@@ -692,6 +736,29 @@ fn parameter_at(input: &mut Source<'_>, word: &mut Word, depth: usize) -> ParseR
             } else {
                 variable_name(input).ok_or("unsupported braced parameter")?
             };
+            if input.next_if_eq(&'[').is_some() {
+                let index = if input.next_if_eq(&'@').is_some() {
+                    ArrayIndex::All
+                } else if input.peek().is_some_and(char::is_ascii_digit) {
+                    let digits: String =
+                        std::iter::from_fn(|| input.next_if(char::is_ascii_digit)).collect();
+                    ArrayIndex::Number(
+                        digits
+                            .parse()
+                            .map_err(|_| ParseError::from("array index is too large"))?,
+                    )
+                } else {
+                    ArrayIndex::Variable(variable_name(input).ok_or("expected an array index")?)
+                };
+                input
+                    .next_if_eq(&']')
+                    .ok_or("expected ] after array index")?;
+                input
+                    .next_if_eq(&'}')
+                    .ok_or("expected } after array index")?;
+                word.parts.push(Part::Array { name, index });
+                return Ok(());
+            }
             let if_empty = input.next_if_eq(&':').is_some();
             let operator = input.next_if(|ch| matches!(ch, '-' | '+'));
             let default = if operator.is_some() {
