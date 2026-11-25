@@ -7,8 +7,10 @@ use crate::process::{Outcome, Pipeline, Stage};
 use crate::terminal_modes::{TTY, attributes, give_terminal, set_attributes};
 
 pub(crate) struct Foreground {
-    shell_group: libc::pid_t,
-    stopped: Vec<StoppedJob>,
+    shell_group: Option<libc::pid_t>,
+    jobs: Vec<Job>,
+    next: usize,
+    pub last_background: Option<libc::pid_t>,
 }
 
 impl Foreground {
@@ -18,9 +20,159 @@ impl Foreground {
             return Err(io::Error::other("shell must be in the foreground"));
         }
         Ok(Self {
-            shell_group,
-            stopped: Vec::new(),
+            shell_group: Some(shell_group),
+            ..Self::noninteractive()
         })
+    }
+
+    pub fn noninteractive() -> Self {
+        Self {
+            shell_group: None,
+            jobs: Vec::new(),
+            next: 1,
+            last_background: None,
+        }
+    }
+
+    pub fn has_terminal(&self) -> bool {
+        self.shell_group.is_some()
+    }
+
+    pub fn has_live_jobs(&self) -> bool {
+        self.jobs.iter().any(|job| job.done.is_none())
+    }
+
+    pub fn refresh(&mut self) -> io::Result<()> {
+        for job in &mut self.jobs {
+            if job.done.is_none() {
+                match job.pipeline.poll()? {
+                    Some(Outcome::Exited { code, .. }) => {
+                        job.done = Some(code);
+                        job.stopped = false;
+                    }
+                    Some(Outcome::Stopped(_)) => job.stopped = true,
+                    _ => {}
+                }
+            }
+        }
+        // Preserve a bounded set of completed statuses for a later wait.
+        while self.jobs.iter().filter(|job| job.done.is_some()).count() > 128 {
+            let first_done = self.jobs.iter().position(|job| job.done.is_some()).unwrap();
+            self.jobs.remove(first_done);
+        }
+        Ok(())
+    }
+
+    pub fn run_background(&mut self, stages: Vec<Stage>) -> io::Result<u8> {
+        self.refresh()?;
+        let (pipeline, gate) = Pipeline::start(stages, true)?;
+        let pid = pipeline.last_pid();
+        let id = self.add(pipeline, None);
+        self.last_background = Some(pid);
+        if self.has_terminal() {
+            eprintln!("[{id}] {pid}");
+        }
+        drop(gate);
+        Ok(0)
+    }
+
+    fn add(&mut self, pipeline: Pipeline, modes: Option<libc::termios>) -> usize {
+        let id = self.next;
+        self.next += 1;
+        self.jobs.push(Job {
+            id,
+            pipeline,
+            stopped: modes.is_some(),
+            done: None,
+            modes,
+        });
+        id
+    }
+
+    pub fn listing(&mut self) -> io::Result<String> {
+        self.refresh()?;
+        let mut output = String::new();
+        for job in &self.jobs {
+            let state = if job.done.is_some() {
+                "Done"
+            } else if job.stopped {
+                "Stopped"
+            } else {
+                "Running"
+            };
+            output.push_str(&format!(
+                "[{}] {state} {}\n",
+                job.id,
+                job.pipeline.last_pid()
+            ));
+        }
+        Ok(output)
+    }
+
+    fn select(&self, selector: Option<&str>, include_done: bool) -> io::Result<usize> {
+        self.jobs
+            .iter()
+            .rposition(|job| {
+                (include_done || job.done.is_none())
+                    && match selector {
+                        None | Some("%+") => true,
+                        Some(value) if value.starts_with('%') => {
+                            value[1..].parse::<usize>() == Ok(job.id)
+                        }
+                        Some(value) => value.parse::<libc::pid_t>() == Ok(job.pipeline.last_pid()),
+                    }
+            })
+            .ok_or_else(|| io::Error::other("no matching job"))
+    }
+
+    pub fn background(&mut self, selector: Option<&str>) -> io::Result<u8> {
+        self.refresh()?;
+        let index = self.select(selector, false)?;
+        let job = &mut self.jobs[index];
+        if job.stopped {
+            job.resume()?;
+        }
+        Ok(0)
+    }
+
+    pub fn wait_background(&mut self, selector: Option<&str>) -> io::Result<u8> {
+        self.refresh()?;
+        if selector.is_some() {
+            let index = self.select(selector, true)?;
+            return self.wait_job(index);
+        }
+        for index in (0..self.jobs.len()).rev() {
+            if !self.jobs[index].stopped {
+                self.wait_job(index)?;
+            }
+        }
+        Ok(0)
+    }
+
+    fn wait_job(&mut self, index: usize) -> io::Result<u8> {
+        let job = &mut self.jobs[index];
+        if let Some(code) = job.done {
+            self.jobs.remove(index);
+            return Ok(code);
+        }
+        match job.pipeline.wait(None)? {
+            Outcome::Exited { code, .. } => {
+                self.jobs.remove(index);
+                Ok(code)
+            }
+            Outcome::Stopped(code) => {
+                job.stopped = true;
+                Ok(code)
+            }
+            Outcome::TimedOut => unreachable!(),
+        }
+    }
+
+    fn terminal(&self) -> io::Result<ShellTerminal> {
+        ShellTerminal::save(
+            self.shell_group
+                .ok_or_else(|| io::Error::other("no controlling terminal"))?,
+        )
     }
 
     pub fn run(
@@ -28,7 +180,7 @@ impl Foreground {
         deadline: Option<Instant>,
         spawn: impl FnOnce() -> io::Result<Child>,
     ) -> io::Result<u8> {
-        let terminal = ShellTerminal::save(self.shell_group)?;
+        let terminal = self.terminal()?;
         let child = spawn()?;
         self.wait(Pipeline::from_foreground_child(child), terminal, deadline)
     }
@@ -38,7 +190,7 @@ impl Foreground {
         stages: Vec<Stage>,
         deadline: Option<Instant>,
     ) -> io::Result<u8> {
-        let terminal = ShellTerminal::save(self.shell_group)?;
+        let terminal = self.terminal()?;
         let (job, gate) = Pipeline::start(stages, true)?;
         if let Err(error) = give_terminal(job.group.unwrap()) {
             drop(job);
@@ -48,18 +200,19 @@ impl Foreground {
         self.wait(job, terminal, deadline)
     }
 
-    pub fn resume(&mut self) -> io::Result<u8> {
-        let terminal = ShellTerminal::save(self.shell_group)?;
-        let StoppedJob { mut job, modes } = self
-            .stopped
-            .pop()
-            .ok_or_else(|| io::Error::other("no stopped job"))?;
-        set_attributes(&modes)?;
-        let group = job.group.unwrap();
-        give_terminal(group)?;
-        cvt(unsafe { libc::kill(-group, libc::SIGCONT) })?;
-        job.resumed();
-        self.wait(job, terminal, None)
+    pub fn resume(&mut self, selector: Option<&str>) -> io::Result<u8> {
+        self.refresh()?;
+        let terminal = self.terminal()?;
+        let index = self.select(selector, false)?;
+        let mut job = self.jobs.remove(index);
+        if let Some(modes) = job.modes {
+            set_attributes(&modes)?;
+        }
+        give_terminal(job.pipeline.group.unwrap())?;
+        if job.stopped {
+            job.resume()?;
+        }
+        self.wait(job.pipeline, terminal, None)
     }
 
     fn wait(
@@ -84,7 +237,7 @@ impl Foreground {
             Outcome::Stopped(code) => {
                 let modes = attributes()?;
                 terminal.restore()?;
-                self.stopped.push(StoppedJob { job, modes });
+                self.add(job, Some(modes));
                 eprintln!("\nStopped");
                 Ok(code)
             }
@@ -130,9 +283,21 @@ impl Drop for ShellTerminal {
     }
 }
 
-struct StoppedJob {
-    job: Pipeline,
-    modes: libc::termios,
+struct Job {
+    id: usize,
+    pipeline: Pipeline,
+    modes: Option<libc::termios>,
+    stopped: bool,
+    done: Option<u8>,
+}
+
+impl Job {
+    fn resume(&mut self) -> io::Result<()> {
+        cvt(unsafe { libc::kill(-self.pipeline.group.unwrap(), libc::SIGCONT) })?;
+        self.pipeline.resumed();
+        self.stopped = false;
+        Ok(())
+    }
 }
 
 fn cvt(result: libc::c_int) -> io::Result<libc::c_int> {

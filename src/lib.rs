@@ -61,8 +61,8 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
     if !runtime::is_builtin(name) {
         return 2.into();
     }
-    if name == "fg" {
-        eprintln!("kwsh: fg: not available in a pipeline stage");
+    if matches!(name.as_str(), "fg" | "bg" | "jobs" | "wait") {
+        eprintln!("kwsh: {name}: not available in a pipeline stage");
         return 1.into();
     }
     let command = syntax::Command {
@@ -75,6 +75,7 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
             })
             .collect(),
         redirects: Vec::new(),
+        background: false,
     };
     let mut input = BufReader::with_capacity(1, process::Stdin);
     let mut invocation = runtime::Invocation::new("kwsh", &[]);

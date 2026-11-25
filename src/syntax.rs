@@ -3,6 +3,7 @@ use std::{iter::Peekable, str::Chars};
 #[derive(Default)]
 pub(crate) struct Command {
     pub words: Vec<Word>,
+    pub background: bool,
     pub redirects: Vec<Redirect>,
 }
 
@@ -23,6 +24,7 @@ pub(crate) enum Part {
     Literal(String),
     Name,
     Status,
+    LastBackground,
     Arguments,
     Variable {
         name: String,
@@ -79,13 +81,17 @@ pub(crate) fn parse(source: &str) -> ParseResult<Vec<Vec<Command>>> {
                 }
                 stages.push(std::mem::take(&mut command));
             }
-            '\n' | ';' => {
+            '\n' | ';' | '&' => {
                 input.next();
+                if next == '&' && input.peek() == Some(&'&') {
+                    return Err("logical AND is not supported".into());
+                }
                 if !command.words.is_empty() || !command.redirects.is_empty() {
+                    command.background = next == '&';
                     stages.push(std::mem::take(&mut command));
                     commands.push(std::mem::take(&mut stages));
-                } else if next == ';' {
-                    return Err("unexpected ';'".into());
+                } else if next != '\n' {
+                    return Err("unexpected command separator".into());
                 }
             }
             _ => {
@@ -106,7 +112,9 @@ pub(crate) fn parse(source: &str) -> ParseResult<Vec<Vec<Command>>> {
                     if command.words.is_empty() {
                         let head: String = input
                             .clone()
-                            .take_while(|ch| !matches!(ch, ' ' | '\t' | '\n' | ';' | '>' | '|'))
+                            .take_while(|ch| {
+                                !matches!(ch, ' ' | '\t' | '\n' | ';' | '>' | '|' | '&')
+                            })
                             .collect();
                         if matches!(
                             head.as_str(),
@@ -173,7 +181,7 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
     };
     let mut started = false;
     while let Some(&ch) = input.peek() {
-        if matches!(ch, ' ' | '\t' | '\n' | ';' | '>' | '|') {
+        if matches!(ch, ' ' | '\t' | '\n' | ';' | '>' | '|' | '&') {
             break;
         }
         input.next();
@@ -186,7 +194,7 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
                 Some(ch) => literal(&mut word, ch),
                 None => return Err("trailing backslash".into()),
             },
-            '&' | '<' | '(' | ')' | '{' | '}' | '`' | '$' | '*' | '?' | '[' | '~' => {
+            '<' | '(' | ')' | '{' | '}' | '`' | '$' | '*' | '?' | '[' | '~' => {
                 return Err(ParseError::Invalid(format!(
                     "unsupported unquoted syntax: {ch}"
                 )));
@@ -265,6 +273,10 @@ fn parameter_at(input: &mut Source<'_>, word: &mut Word, depth: usize) -> ParseR
         return Err("parameter expansion nested too deeply".into());
     }
     let part = match input.peek() {
+        Some('!') => {
+            input.next();
+            Part::LastBackground
+        }
         Some('?') => {
             input.next();
             Part::Status

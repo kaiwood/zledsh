@@ -106,6 +106,20 @@ class ShellParityTest < Minitest::Test
     assert_empty error
   end
 
+  def test_background_pipeline_waits_for_its_last_status
+    script = <<~'SH'
+      /usr/bin/true | /usr/bin/false &
+      saved="$!"
+      printf '%s\n' launched
+      wait "$saved"
+      printf '%s\n' "$?"
+    SH
+    output, error, status = capture(*COMMAND, "-c", script)
+    assert status.success?, error
+    assert_equal "launched\n1\n", output
+    assert_empty error
+  end
+
   def test_terminal
     executable, *args = COMMAND
     PTY.spawn(@env, [executable, executable], *args, **@spawn_options) do |reader, writer, pid|

@@ -114,8 +114,9 @@ impl<'a> Invocation<'a> {
     pub fn run(&mut self, commands: &[Vec<Command>], input: &mut impl BufRead) {
         let original = [Output::Stdout, Output::Stderr];
         for pipeline in commands {
-            let [command] = pipeline.as_slice() else {
-                self.status = match self.pipeline(pipeline) {
+            let background = pipeline.last().is_some_and(|command| command.background);
+            if background || pipeline.len() != 1 {
+                self.status = match self.pipeline(pipeline, background) {
                     Ok(status) => status,
                     Err(error) => {
                         report(&original[1], &format!("pipeline: {error}"));
@@ -123,7 +124,8 @@ impl<'a> Invocation<'a> {
                     }
                 };
                 continue;
-            };
+            }
+            let command = &pipeline[0];
             let mut output = original.clone();
             if let Err(error) = self.redirect(&command.redirects, &mut output) {
                 report(&output[1], &error);
@@ -153,8 +155,11 @@ impl<'a> Invocation<'a> {
                 self.status = 0;
                 continue;
             };
-            if self.agent_command() && matches!(name.as_str(), "exit" | "fg") {
-                report(&output[1], "exit and fg must be submitted by the user");
+            if self.agent_command() && matches!(name.as_str(), "exit" | "fg" | "bg" | "wait") {
+                report(
+                    &output[1],
+                    "exit, fg, bg and wait must be submitted by the user",
+                );
                 self.status = 2;
                 continue;
             }
@@ -250,19 +255,28 @@ impl<'a> Invocation<'a> {
                     };
                 }
                 #[cfg(target_os = "macos")]
-                "fg" if self.foreground.is_some() => {
-                    self.status = if args.is_empty() {
-                        match self.foreground.as_mut().unwrap().resume() {
-                            Ok(status) => status,
-                            Err(error) => {
-                                report(&output[1], &format!("fg: {error}"));
-                                1
-                            }
-                        }
+                "fg" | "bg" | "jobs" | "wait" => {
+                    let jobs = self
+                        .foreground
+                        .get_or_insert_with(crate::foreground::Foreground::noninteractive);
+                    let selector = args.first().map(String::as_str);
+                    let result = if args.len() > 1 || (name == "jobs" && selector.is_some()) {
+                        Err(io::Error::other("unexpected job arguments"))
                     } else {
-                        report(&output[1], "fg: job arguments are not supported");
-                        2
+                        match name.as_str() {
+                            "fg" => jobs.resume(selector),
+                            "bg" => jobs.background(selector),
+                            "wait" => jobs.wait_background(selector),
+                            _ => jobs
+                                .listing()
+                                .and_then(|text| output[0].write(&text))
+                                .map(|()| 0),
+                        }
                     };
+                    self.status = result.unwrap_or_else(|error| {
+                        report(&output[1], &format!("{name}: {error}"));
+                        if name == "wait" { 127 } else { 1 }
+                    });
                 }
                 _ => self.status = self.external(&argv, &output),
             }
@@ -363,9 +377,18 @@ impl<'a> Invocation<'a> {
         (path, env)
     }
 
-    fn pipeline(&mut self, commands: &[Command]) -> io::Result<u8> {
+    fn pipeline(&mut self, commands: &[Command], background: bool) -> io::Result<u8> {
+        #[cfg(not(target_os = "macos"))]
+        if background {
+            return Err(io::Error::other(
+                "background jobs are not supported on this platform",
+            ));
+        }
+        if background && self.agent_command() {
+            return Err(io::Error::other("agent cannot start background jobs"));
+        }
         let (path, env) = self.execution_environment();
-        let mut stdin = if self.agent_command() {
+        let mut stdin = if background || self.agent_command() {
             File::open("/dev/null")?.into()
         } else {
             process::duplicate(libc::STDIN_FILENO)?
@@ -426,8 +449,16 @@ impl<'a> Invocation<'a> {
             }
         }
         #[cfg(target_os = "macos")]
-        if let Some(tty) = &mut self.foreground {
-            return tty.run_pipeline(stages, self.agent_deadline);
+        {
+            if background {
+                return self
+                    .foreground
+                    .get_or_insert_with(crate::foreground::Foreground::noninteractive)
+                    .run_background(stages);
+            }
+            if let Some(tty) = self.foreground.as_mut().filter(|tty| tty.has_terminal()) {
+                return tty.run_pipeline(stages, self.agent_deadline);
+            }
         }
         let (mut job, gate) = process::Pipeline::start(stages, false)?;
         drop(gate);
@@ -456,7 +487,7 @@ impl<'a> Invocation<'a> {
         };
         let launch = |enter| process::spawn(argv, &path, env, [stdin, stdout, stderr], enter);
         #[cfg(target_os = "macos")]
-        let result = match &mut self.foreground {
+        let result = match self.foreground.as_mut().filter(|tty| tty.has_terminal()) {
             Some(tty) => tty.run(self.agent_deadline, || {
                 use std::os::fd::AsRawFd;
 
@@ -567,6 +598,16 @@ impl<'a> Invocation<'a> {
                 Part::Literal(text) => field.push_str(text),
                 Part::Name => field.push_str(self.name),
                 Part::Status => field.push_str(&self.status.to_string()),
+                Part::LastBackground => {
+                    #[cfg(target_os = "macos")]
+                    if let Some(pid) = self
+                        .foreground
+                        .as_ref()
+                        .and_then(|jobs| jobs.last_background)
+                    {
+                        field.push_str(&pid.to_string());
+                    }
+                }
                 Part::Arguments => {
                     let Some((first, rest)) = self.args.split_first() else {
                         continue;
@@ -623,7 +664,8 @@ impl<'a> Invocation<'a> {
 }
 
 pub(crate) const BUILTINS: &[&str] = &[
-    "exit", "cd", "pwd", "export", "unset", "read", "printf", "fg", "alias", "unalias",
+    "exit", "cd", "pwd", "export", "unset", "read", "printf", "fg", "alias", "unalias", "jobs",
+    "bg", "wait",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {

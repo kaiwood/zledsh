@@ -254,7 +254,7 @@ pub(crate) struct Pipeline {
 
 enum Member {
     Running,
-    Stopped,
+    Stopped(u8),
     Done,
 }
 
@@ -306,51 +306,66 @@ impl Pipeline {
 
     pub fn resumed(&mut self) {
         for (_, member) in &mut self.children {
-            if matches!(member, Member::Stopped) {
+            if matches!(member, Member::Stopped(_)) {
                 *member = Member::Running;
             }
         }
     }
 
     pub fn wait(&mut self, deadline: Option<std::time::Instant>) -> io::Result<Outcome> {
-        let mut stop_signal = 0;
         loop {
-            let running = self
+            if let Some(outcome) = self.collect(deadline.is_some())? {
+                return Ok(outcome);
+            }
+            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                return Ok(Outcome::TimedOut);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn poll(&mut self) -> io::Result<Option<Outcome>> {
+        self.collect(true)
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn last_pid(&self) -> libc::pid_t {
+        self.children.last().unwrap().0
+    }
+
+    fn collect(&mut self, nonblocking: bool) -> io::Result<Option<Outcome>> {
+        loop {
+            let Some(&(pid, _)) = self
                 .children
                 .iter()
-                .find(|(_, state)| matches!(state, Member::Running));
-            let Some(&(pid, _)) = running else {
-                if self
-                    .children
-                    .iter()
-                    .any(|(_, state)| matches!(state, Member::Stopped))
-                {
-                    return Ok(Outcome::Stopped(128 + stop_signal));
+                .find(|(_, state)| matches!(state, Member::Running))
+            else {
+                if let Some(stop_signal) = self.children.iter().find_map(|(_, state)| match state {
+                    Member::Stopped(signal) => Some(*signal),
+                    _ => None,
+                }) {
+                    return Ok(Some(Outcome::Stopped(128 + stop_signal)));
                 }
                 let status = ExitStatus::from_raw(self.last.unwrap_or(0));
-                return Ok(Outcome::Exited {
+                return Ok(Some(Outcome::Exited {
                     code: status_code(status),
                     signaled: status.signal().is_some(),
-                });
+                }));
             };
-            let polling = if deadline.is_some() { libc::WNOHANG } else { 0 };
+            let polling = if nonblocking { libc::WNOHANG } else { 0 };
             let (pid, status) = if let Some(group) = self.group {
                 wait_pid(-group, libc::WUNTRACED | polling)?
             } else {
                 wait_pid(pid, polling)?
             };
             if pid == 0 {
-                if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-                    return Ok(Outcome::TimedOut);
-                }
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                continue;
+                return Ok(None);
             }
             let last_pid = self.children.last().unwrap().0;
             if let Some((_, member)) = self.children.iter_mut().find(|(child, _)| *child == pid) {
                 if libc::WIFSTOPPED(status) {
-                    *member = Member::Stopped;
-                    stop_signal = libc::WSTOPSIG(status) as u8;
+                    *member = Member::Stopped(libc::WSTOPSIG(status) as u8);
                 } else {
                     *member = Member::Done;
                     if pid == last_pid {

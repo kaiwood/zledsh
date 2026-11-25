@@ -84,6 +84,7 @@ fn run_shell(
     let mut pending_draft = String::new();
     let mut last_command = None;
     while !invocation.exited {
+        invocation.foreground.as_mut().unwrap().refresh()?;
         let mut prompt = crate::prompt::render(invocation, !source.is_empty(), history.next);
         if history.paused {
             prompt.insert_str(0, "[private] ");
@@ -372,6 +373,7 @@ fn ask(
                         })
                         .collect(),
                     redirects: Vec::new(),
+                    background: false,
                 };
                 invocation.run(&[vec![command]], input);
             }
@@ -485,7 +487,7 @@ impl EditorTerminal {
         prompt: &str,
         history: &mut History,
         primary: bool,
-        shell: &Invocation<'_>,
+        shell: &mut Invocation<'_>,
         draft: String,
     ) -> io::Result<(Line, bool)> {
         set_attributes(&self.editor)?;
@@ -586,7 +588,7 @@ fn read_keys(
     prompt: &str,
     history: &mut History,
     primary: bool,
-    shell: &Invocation<'_>,
+    shell: &mut Invocation<'_>,
     draft: String,
 ) -> io::Result<Line> {
     let mut history_index = None;
@@ -595,7 +597,7 @@ fn read_keys(
     echo.flush()?;
     let mut line = draft.into_bytes();
     let mut cursor = line.len();
-    while let Some(byte) = read_key_byte(input)? {
+    while let Some(byte) = read_editor_byte(input, shell)? {
         let key = if byte == 27 {
             read_escape(input)?
         } else {
@@ -820,6 +822,28 @@ fn redraw(echo: &mut impl Write, prompt: &str, line: &[u8], cursor: usize) -> io
         write!(echo, "\r{prompt}{before}")?;
     }
     Ok(())
+}
+
+fn read_editor_byte(
+    input: &mut impl BufRead,
+    shell: &mut Invocation<'_>,
+) -> io::Result<Option<u8>> {
+    if let Some(jobs) = &mut shell.foreground {
+        while jobs.has_live_jobs() {
+            let mut fd = libc::pollfd {
+                fd: TTY,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            match unsafe { libc::poll(&mut fd, 1, 100) } {
+                0 => jobs.refresh()?,
+                -1 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => continue,
+                -1 => return Err(io::Error::last_os_error()),
+                _ => break,
+            }
+        }
+    }
+    read_key_byte(input)
 }
 
 fn read_key_byte(input: &mut impl BufRead) -> io::Result<Option<u8>> {

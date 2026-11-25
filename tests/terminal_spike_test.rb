@@ -132,6 +132,36 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
+  def test_stopped_job_can_run_in_background_and_return_to_foreground
+    prompt = "job> "
+    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
+      writer.write("/bin/sleep 30\n")
+      read_until(reader, "/bin/sleep 30\e[?2004l\r\n")
+      # The foreground command must own the terminal before it receives Ctrl+Z.
+      sleep 0.1
+      writer.write("\x1a")
+      read_until(reader, "Stopped\r\n")
+      read_until(reader, prompt)
+      writer.write("jobs\n")
+      read_until(reader, /\[1\] Stopped (\d+)\r\n\z/)
+      read_until(reader, prompt)
+      writer.write("bg %1\n")
+      read_until(reader, prompt)
+      writer.write("jobs\n")
+      read_until(reader, /\[1\] Running \d+\r\n\z/)
+      read_until(reader, prompt)
+      writer.write("fg %1\n")
+      read_until(reader, "fg %1\e[?2004l\r\n")
+      sleep 0.1
+      writer.write("\x03")
+      read_until(reader, prompt)
+      writer.write("printf '%s\\n' \"$?\"\n")
+      read_until(reader, "\r\n130\r\n")
+      read_until(reader, prompt)
+      exit_spike(reader, writer, pid)
+    end
+  end
+
   def test_startup_and_prompt
     env = { "ENV" => '$HOME/startup file', "PS1" => '$MARK! !!> ', "PROMPT" => nil, "TERM" => "xterm" }
     with_terminal(KWSH, env: env, prompt: "~ [0] %> ", setup: ->(home) {
