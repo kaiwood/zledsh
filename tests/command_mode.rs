@@ -56,3 +56,15 @@ fn unsupported_syntax_is_rejected_before_execution() {
         assert!(!output.stderr.is_empty(), "{script}");
     }
 }
+
+#[test]
+fn status_expands_and_unset_removes_inherited_environment() {
+    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+        .env("KWSH_TEST_UNSET", "inherited")
+        .args(["-c", r#"/usr/bin/false; printf '%s\n' "$?"; unset -v KWSH_TEST_UNSET; printf '%s\n' "${KWSH_TEST_UNSET-missing}"; KWSH_TEST_UNSET=local; /usr/bin/printenv KWSH_TEST_UNSET; printf '%s\n' "$?"; export KWSH_TEST_UNSET; /usr/bin/printenv KWSH_TEST_UNSET"#])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"1\nmissing\n1\nlocal\n");
+    assert!(output.stderr.is_empty());
+}

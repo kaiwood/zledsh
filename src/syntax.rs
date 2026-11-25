@@ -21,6 +21,7 @@ pub(crate) struct Word {
 pub(crate) enum Part {
     Literal(String),
     Name,
+    Status,
     Arguments,
     Variable {
         name: String,
@@ -253,6 +254,10 @@ pub(crate) fn parameter_text(value: &str) -> Result<Word, String> {
 
 fn parameter(input: &mut Source<'_>, word: &mut Word) -> ParseResult<()> {
     let part = match input.peek() {
+        Some('?') => {
+            input.next();
+            Part::Status
+        }
         Some('0') => {
             input.next();
             Part::Name

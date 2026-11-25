@@ -15,6 +15,7 @@ pub(crate) struct Invocation<'a> {
     args: &'a [String],
     variables: HashMap<String, String>,
     exported: HashSet<String>,
+    unset: HashSet<String>,
     #[cfg(target_os = "macos")]
     pub foreground: Option<crate::foreground::Foreground>,
     pub status: u8,
@@ -28,6 +29,7 @@ impl<'a> Invocation<'a> {
             args,
             variables: HashMap::new(),
             exported: HashSet::new(),
+            unset: HashSet::new(),
             #[cfg(target_os = "macos")]
             foreground: None,
             status: 0,
@@ -127,6 +129,19 @@ impl<'a> Invocation<'a> {
                         self.assign(arg);
                     }
                 }
+                "unset" => {
+                    self.status = 0;
+                    for name in args.strip_prefix(&[String::from("-v")]).unwrap_or(args) {
+                        if !valid_name(name) {
+                            report(&output[1], "unset: expected a variable name");
+                            self.status = 2;
+                            break;
+                        }
+                        self.variables.remove(name);
+                        self.exported.remove(name);
+                        self.unset.insert(name.clone());
+                    }
+                }
                 "read" => {
                     self.status = match self.read(args, input) {
                         Ok(complete) => u8::from(!complete),
@@ -193,12 +208,11 @@ impl<'a> Invocation<'a> {
 
     fn execution_environment(&self) -> (OsString, HashMap<OsString, OsString>) {
         let path = self
-            .variables
-            .get("PATH")
-            .map(OsString::from)
-            .or_else(|| std::env::var_os("PATH"))
+            .variable_os("PATH")
             .unwrap_or_else(|| OsString::from("/usr/bin:/bin"));
-        let mut env: HashMap<OsString, OsString> = std::env::vars_os().collect();
+        let mut env: HashMap<OsString, OsString> = std::env::vars_os()
+            .filter(|(name, _)| !name.to_str().is_some_and(|name| self.unset.contains(name)))
+            .collect();
         for (name, value) in &self.variables {
             if self.exported.contains(name) || env.contains_key(OsStr::new(name)) {
                 env.insert(name.into(), value.into());
@@ -362,11 +376,19 @@ impl<'a> Invocation<'a> {
         }
     }
 
+    fn variable_os(&self, name: &str) -> Option<OsString> {
+        self.variables.get(name).map(OsString::from).or_else(|| {
+            if self.unset.contains(name) {
+                None
+            } else {
+                std::env::var_os(name)
+            }
+        })
+    }
+
     pub fn variable(&self, name: &str) -> Option<String> {
-        self.variables
-            .get(name)
-            .cloned()
-            .or_else(|| std::env::var(name).ok())
+        self.variable_os(name)
+            .and_then(|value| value.into_string().ok())
     }
 
     #[cfg(target_os = "macos")]
@@ -382,6 +404,7 @@ impl<'a> Invocation<'a> {
             match part {
                 Part::Literal(text) => field.push_str(text),
                 Part::Name => field.push_str(self.name),
+                Part::Status => field.push_str(&self.status.to_string()),
                 Part::Arguments => {
                     let Some((first, rest)) = self.args.split_first() else {
                         continue;
@@ -393,9 +416,7 @@ impl<'a> Invocation<'a> {
                     }
                 }
                 Part::Variable { name, default } => {
-                    if let Some(value) = self.variables.get(name) {
-                        field.push_str(value);
-                    } else if let Some(value) = std::env::var_os(name) {
+                    if let Some(value) = self.variable_os(name) {
                         field.push_str(&value.to_string_lossy());
                     } else if let Some(value) = default {
                         field.push_str(value);
@@ -432,7 +453,9 @@ impl<'a> Invocation<'a> {
     }
 }
 
-pub(crate) const BUILTINS: &[&str] = &["exit", "cd", "pwd", "export", "read", "printf", "fg"];
+pub(crate) const BUILTINS: &[&str] = &[
+    "exit", "cd", "pwd", "export", "unset", "read", "printf", "fg",
+];
 
 pub(crate) fn is_builtin(name: &str) -> bool {
     BUILTINS.contains(&name)
