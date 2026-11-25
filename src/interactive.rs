@@ -490,8 +490,17 @@ impl EditorTerminal {
     ) -> io::Result<(Line, bool)> {
         set_attributes(&self.editor)?;
         let mut stderr = io::stderr().lock();
-        let line = write_prompt(&mut stderr, prompt)
+        let line = stderr
+            .write_all(b"\x1b[?2004h")
+            .and_then(|()| write_prompt(&mut stderr, prompt))
             .and_then(|()| read_keys(input, &mut stderr, prompt, history, primary, shell, draft));
+        stderr.write_all(b"\x1b[?2004l")?;
+        match &line {
+            Ok(Line::Submitted(_)) => stderr.write_all(b"\n")?,
+            Ok(Line::Cancelled) => stderr.write_all(b"^C\n")?,
+            _ => {}
+        }
+        stderr.flush()?;
         let pending = transcript::input_pending();
         // Builtins such as `read` run with the user's cooked settings.
         set_attributes(&self.original)?;
@@ -580,106 +589,235 @@ fn read_keys(
     shell: &Invocation<'_>,
     draft: String,
 ) -> io::Result<Line> {
-    let mut cursor = None;
-    let mut saved_draft = Vec::new();
+    let mut history_index = None;
+    let mut saved_draft = (Vec::new(), 0);
     echo.write_all(draft.as_bytes())?;
     echo.flush()?;
     let mut line = draft.into_bytes();
-    let mut byte = [0];
-    loop {
-        match input.read(&mut byte) {
-            Ok(0) => return Ok(Line::End),
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        }
-        match byte[0] {
-            b'\n' | b'\r' => {
-                echo.write_all(b"\n")?;
-                echo.flush()?;
+    let mut cursor = line.len();
+    while let Some(byte) = read_key_byte(input)? {
+        let key = if byte == 27 {
+            read_escape(input)?
+        } else {
+            Key::Byte(byte)
+        };
+        match key {
+            Key::Byte(b'\n' | b'\r') => {
                 line.push(b'\n');
                 return String::from_utf8(line)
                     .map(Line::Submitted)
                     .map_err(io::Error::other);
             }
-            3 => {
-                echo.write_all(b"^C\n")?;
-                echo.flush()?;
-                return Ok(Line::Cancelled);
+            Key::Byte(3) => return Ok(Line::Cancelled),
+            Key::Byte(4) if line.is_empty() => return Ok(Line::End),
+            Key::Byte(4) if cursor < line.len() => {
+                line.drain(cursor..next_char(&line, cursor));
             }
-            4 if line.is_empty() => return Ok(Line::End),
-            8 | 127 if !line.is_empty() => {
-                while line.pop().is_some_and(|ch| ch & 0b1100_0000 == 0b1000_0000) {}
-                redraw(echo, prompt, &line)?;
+            Key::Byte(8 | 127) if cursor > 0 => {
+                let start = previous_char(&line, cursor);
+                line.drain(start..cursor);
+                cursor = start;
             }
-            21 => {
-                line.clear();
-                redraw(echo, prompt, &line)?;
+            Key::Byte(21) => {
+                line.drain(..cursor);
+                cursor = 0;
             }
-            23 => {
-                while line.last().is_some_and(u8::is_ascii_whitespace) {
-                    line.pop();
+            Key::Byte(23) => {
+                let end = cursor;
+                while cursor > 0 && line[cursor - 1].is_ascii_whitespace() {
+                    cursor -= 1;
                 }
-                while line.last().is_some_and(|ch| !ch.is_ascii_whitespace()) {
-                    line.pop();
+                while cursor > 0 && !line[cursor - 1].is_ascii_whitespace() {
+                    cursor -= 1;
                 }
-                redraw(echo, prompt, &line)?;
+                line.drain(cursor..end);
             }
-            b'\t' if primary => {
+            Key::Byte(1) | Key::Home => cursor = 0,
+            Key::Byte(5) | Key::End => cursor = line.len(),
+            Key::Byte(2) | Key::Left => cursor = previous_char(&line, cursor),
+            Key::Byte(6) | Key::Right => cursor = next_char(&line, cursor),
+            Key::Paste => match read_paste(input)? {
+                Paste::Text(bytes) => {
+                    let len = bytes.len();
+                    line.splice(cursor..cursor, bytes);
+                    cursor += len;
+                }
+                Paste::Rejected => echo.write_all(b"\x07")?,
+                Paste::End => return Ok(Line::End),
+            },
+            Key::Byte(b'\t') if primary && cursor == line.len() => {
                 if let Some(suffix) = std::str::from_utf8(&line)
                     .ok()
                     .and_then(|line| crate::completion::suffix(line, shell))
                 {
                     line.extend_from_slice(suffix.as_bytes());
+                    cursor = line.len();
                     echo.write_all(suffix.as_bytes())?;
+                    echo.flush()?;
                 }
+                continue;
             }
-            27 => {
-                if !read_key_byte(input)?.is_some_and(|byte| byte == b'[' || byte == b'O') {
-                    continue;
-                }
-                let Some(direction) = read_key_byte(input)? else {
-                    continue;
-                };
-                if !matches!(direction, b'A' | b'B') || !primary || history.paused {
-                    continue;
-                }
-                if direction == b'A' && cursor.is_none() {
+            Key::Up | Key::Down if primary && !history.paused => {
+                if key == Key::Up && history_index.is_none() {
                     history.refresh();
-                    saved_draft.clone_from(&line);
+                    saved_draft = (line.clone(), cursor);
                 }
                 let size = history.entries().len();
-                if direction == b'A' {
-                    cursor = cursor.unwrap_or(size).checked_sub(1).or(cursor);
-                } else if let Some(index) = cursor {
-                    cursor = (index + 1 < size).then_some(index + 1);
+                if key == Key::Up {
+                    history_index = history_index
+                        .unwrap_or(size)
+                        .checked_sub(1)
+                        .or(history_index);
+                } else if let Some(index) = history_index {
+                    history_index = (index + 1 < size).then_some(index + 1);
                 } else {
                     continue;
                 }
-                line = cursor
+                (line, cursor) = history_index
                     .and_then(|index| history.entries().nth(index))
-                    .map_or_else(|| saved_draft.clone(), |text| text.as_bytes().to_vec());
-                redraw(echo, prompt, &line)?;
+                    .map_or_else(
+                        || saved_draft.clone(),
+                        |text| (text.as_bytes().to_vec(), text.len()),
+                    );
             }
-            b' '..=b'~' | 128..=255 | b'\t' => {
-                line.push(byte[0]);
-                echo.write_all(&byte)?;
+            Key::Byte(byte @ (b' '..=b'~' | 128..=255 | b'\t')) => {
+                if cursor == line.len() {
+                    line.push(byte);
+                    cursor += 1;
+                    echo.write_all(&[byte])?;
+                    echo.flush()?;
+                    continue;
+                }
+                line.insert(cursor, byte);
+                cursor += 1;
             }
-            _ => {}
+            _ => continue,
         }
+        redraw(echo, prompt, &line, cursor)?;
         echo.flush()?;
     }
+    Ok(Line::End)
 }
 
-fn redraw(echo: &mut impl Write, prompt: &str, line: &[u8]) -> io::Result<()> {
-    echo.write_all(b"\r\x1b[2K")?;
-    echo.write_all(prompt.as_bytes())?;
-    for ch in String::from_utf8_lossy(line).chars() {
-        if ch.is_control() {
-            write!(echo, "{}", ch.escape_default())?;
-        } else {
-            write!(echo, "{ch}")?;
+#[derive(PartialEq, Eq)]
+enum Key {
+    Byte(u8),
+    Up,
+    Down,
+    Left,
+    Right,
+    Home,
+    End,
+    Paste,
+    Ignored,
+}
+
+fn read_escape(input: &mut impl BufRead) -> io::Result<Key> {
+    if !matches!(read_key_byte(input)?, Some(b'[' | b'O')) {
+        return Ok(Key::Ignored);
+    }
+    let mut sequence = [0; 16];
+    for index in 0..sequence.len() {
+        let Some(byte) = read_key_byte(input)? else {
+            return Ok(Key::Ignored);
+        };
+        sequence[index] = byte;
+        if (0x40..=0x7e).contains(&byte) {
+            return Ok(match &sequence[..=index] {
+                b"A" => Key::Up,
+                b"B" => Key::Down,
+                b"C" => Key::Right,
+                b"D" => Key::Left,
+                b"H" | b"1~" => Key::Home,
+                b"F" | b"4~" => Key::End,
+                b"200~" => Key::Paste,
+                _ => Key::Ignored,
+            });
         }
+    }
+    Ok(Key::Ignored)
+}
+
+enum Paste {
+    Text(Vec<u8>),
+    Rejected,
+    End,
+}
+
+fn read_paste(input: &mut impl BufRead) -> io::Result<Paste> {
+    const END: &[u8] = b"\x1b[201~";
+    const LIMIT: usize = 64 * 1024;
+    let mut bytes = Vec::new();
+    let mut matched = 0;
+    let mut rejected = false;
+    while let Some(byte) = read_key_byte(input)? {
+        if !rejected {
+            if bytes.len() == LIMIT + END.len() {
+                rejected = true;
+            } else {
+                bytes.push(byte);
+            }
+        }
+        if byte == END[matched] {
+            matched += 1;
+        } else {
+            matched = usize::from(byte == END[0]);
+        }
+        if matched == END.len() {
+            if rejected {
+                return Ok(Paste::Rejected);
+            }
+            bytes.truncate(bytes.len() - END.len());
+            let Ok(text) = String::from_utf8(bytes) else {
+                return Ok(Paste::Rejected);
+            };
+            if text
+                .chars()
+                .any(|ch| ch.is_control() && !matches!(ch, '\r' | '\n' | '\t'))
+            {
+                return Ok(Paste::Rejected);
+            }
+            return Ok(Paste::Text(
+                text.replace("\r\n", "\n").replace('\r', "\n").into_bytes(),
+            ));
+        }
+    }
+    Ok(Paste::End)
+}
+
+fn previous_char(line: &[u8], cursor: usize) -> usize {
+    let mut index = cursor.saturating_sub(1);
+    while index > 0 && line[index] & 0xc0 == 0x80 {
+        index -= 1;
+    }
+    index
+}
+
+fn next_char(line: &[u8], cursor: usize) -> usize {
+    let mut index = (cursor + 1).min(line.len());
+    while index < line.len() && line[index] & 0xc0 == 0x80 {
+        index += 1;
+    }
+    index
+}
+
+fn redraw(echo: &mut impl Write, prompt: &str, line: &[u8], cursor: usize) -> io::Result<()> {
+    fn display(bytes: &[u8]) -> String {
+        let mut visible = String::new();
+        for ch in String::from_utf8_lossy(bytes).chars() {
+            if ch.is_control() {
+                visible.extend(ch.escape_default());
+            } else {
+                visible.push(ch);
+            }
+        }
+        visible
+    }
+    let before = display(&line[..cursor]);
+    let after = display(&line[cursor..]);
+    write!(echo, "\r\x1b[2K{prompt}{before}{after}")?;
+    if !after.is_empty() {
+        write!(echo, "\r{prompt}{before}")?;
     }
     Ok(())
 }

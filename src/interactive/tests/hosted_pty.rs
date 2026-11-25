@@ -119,6 +119,11 @@ fn wait_for(
         let mut byte = [0];
         reader.read_exact(&mut byte)?;
         output.push(byte[0]);
+        for mode in [b"\x1b[?2004h", b"\x1b[?2004l"] {
+            if output.ends_with(mode) {
+                output.truncate(output.len() - mode.len());
+            }
+        }
     }
     Ok(())
 }

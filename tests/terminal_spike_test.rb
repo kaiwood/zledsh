@@ -101,7 +101,7 @@ class TerminalSpikeTest < Minitest::Test
       read_until(reader, "Stopped\r\n")
       read_until(reader, prompt)
       writer.write("fg\n")
-      read_until(reader, "fg\r\n")
+      read_until(reader, "fg\e[?2004l\r\n")
       writer.write("after resume\n")
       read_until(reader, "foreground read: after resume\r\n")
       read_until(reader, prompt)
@@ -124,7 +124,7 @@ class TerminalSpikeTest < Minitest::Test
       read_until(reader, "Stopped\r\n")
       read_until(reader, prompt)
       writer.write("fg\n")
-      read_until(reader, "fg\r\n")
+      read_until(reader, "fg\e[?2004l\r\n")
       writer.write("pipeline input\n")
       read_until(reader, "foreground read: pipeline input\r\n")
       read_until(reader, prompt)
@@ -171,6 +171,23 @@ class TerminalSpikeTest < Minitest::Test
       assert_equal 0o600, File.stat(path).mode & 0o777
       assert_equal ["printf 'public-output\\n'", "printf 'public-output\\n'", "exit"],
         File.readlines(path).map { |line| JSON.parse(line).last }
+    end
+  end
+
+  def test_bracketed_paste_is_an_editable_draft_until_enter
+    with_terminal(KWSH, env: { "TERM" => "xterm", "PROMPT" => "paste> " }, prompt: "paste> ") do |reader, writer, pid, home|
+      writer.write("\e[200~printf first > one\n" + "printf bad > two\e[201~")
+      read_until(reader, "printf bad > two")
+      refute_path_exists File.join(home, "one")
+      refute_path_exists File.join(home, "two")
+      writer.write("\e[D" * 6 + "\x7f" * 3 + "good\n")
+      read_until(reader, "\e[?2004hpaste> ")
+      assert_equal "first", File.read(File.join(home, "one"))
+      assert_equal "good", File.read(File.join(home, "two"))
+      writer.write("\e[200~printf unsafe > three\n\x00\e[201~")
+      read_until(reader, "\a")
+      refute_path_exists File.join(home, "three")
+      exit_spike(reader, writer, pid)
     end
   end
 
