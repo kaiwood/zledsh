@@ -268,10 +268,7 @@ fn load_rc(path: &Path, invocation: &mut Invocation<'_>, input: &mut impl BufRea
     match fs::read_to_string(path) {
         Ok(source) => match syntax::parse(&source) {
             Ok(commands) => invocation.run(&commands, input),
-            Err(_) => eprintln!(
-                "kwsh: {}: invalid or unsupported startup syntax",
-                path.display()
-            ),
+            Err(error) => eprintln!("kwsh: {}: {}", path.display(), error.message()),
         },
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => eprintln!("kwsh: {}: {error}", path.display()),

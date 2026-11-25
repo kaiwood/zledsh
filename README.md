@@ -16,7 +16,16 @@ Set `HISTFILE` before the first prompt to opt into persistent history. For examp
 
 The first time, start `kwsh --chatgpt`, then continue in your browser with a ChatGPT account eligible for plan usage. Back at the `kwsh` prompt, try `? Say hello in one sentence`. No API key, Codex CLI, or local provider executable is needed. This uses [OpenAI’s Sign in with ChatGPT flow](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) and the [Responses API for ChatGPT plan usage](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).
 
-By default `kwsh` selects the first listed model in the account’s catalog and prints its name at sign-in. To choose a different listed model, set `KWSH_CHATGPT_MODEL` to its slug before launch or in `~/.kwshrc`. `--chatgpt` takes precedence over `KWSH_ASSISTANT_EXEC` for that session.
+By default `kwsh` selects the first listed model in the account’s catalog and uses that model’s default reasoning effort. To override either, add `~/.kwsh/chatgpt.json` and restart `kwsh`:
+
+```json
+{
+  "model": "your-model-slug",
+  "reasoning_effort": "medium"
+}
+```
+
+Use a model slug listed for your account. Omit either setting to keep its default. [Reasoning effort](https://developers.openai.com/api/docs/guides/reasoning) can be `none`, `minimal`, `low`, `medium`, `high`, or `xhigh`, depending on what your model supports. `KWSH_CHATGPT_MODEL` still overrides the file's `model`, and `--chatgpt` takes precedence over a configured local provider. The JSON file does not depend on `.kwshrc` parsing.
 
 This preview sends only the text after `?`. It does not send history, read files, run tools, or stage commands. Private mode blocks requests. Ctrl+C discards a pending answer and returns to the prompt. Later sessions can start with plain `kwsh`: if no local provider is configured, the first `?` prompt uses the saved ChatGPT account. `kwsh --chatgpt` also reuses the saved account and only opens a browser when sign-in is needed. `kwsh` refreshes access before expiry. Access and refresh tokens are in `~/.kwsh/chatgpt-session`, an owner-only (`0600`) file, separate from shell config and history. It is not encrypted; do not share it. The installation identifier is in `~/.kwsh/chatgpt-host`. `kwsh` creates `~/.kwsh` with mode `0700` and moves existing ChatGPT state there on first use. Quit any sessions running an older build before upgrading. This preview supports one saved account. To revoke the app’s grant, use your ChatGPT settings.
 

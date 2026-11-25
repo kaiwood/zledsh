@@ -2,7 +2,9 @@ mod credentials;
 mod oauth;
 
 use std::fmt;
+use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Read};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -47,10 +49,59 @@ impl fmt::Display for Error {
     }
 }
 
+#[derive(Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Settings {
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+}
+
+impl Settings {
+    fn load(home: &Path) -> Result<Self> {
+        const INVALID: Error =
+            Error::Message("invalid ~/.kwsh/chatgpt.json; expected model and/or reasoning_effort");
+        let file = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(home.join(".kwsh/chatgpt.json"))
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(_) => return Err(INVALID),
+        };
+        let metadata = file.metadata().map_err(|_| INVALID)?;
+        if !metadata.is_file() || metadata.len() > 4096 {
+            return Err(INVALID);
+        }
+        let mut bytes = Vec::new();
+        file.take(4097)
+            .read_to_end(&mut bytes)
+            .map_err(|_| INVALID)?;
+        if bytes.len() > 4096 {
+            return Err(INVALID);
+        }
+        let settings: Self = serde_json::from_slice(&bytes).map_err(|_| INVALID)?;
+        if settings.reasoning_effort.as_deref().is_some_and(|effort| {
+            !matches!(
+                effort,
+                "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+            )
+        }) {
+            return Err(Error::Message(
+                "reasoning_effort must be none, minimal, low, medium, high, or xhigh",
+            ));
+        }
+        Ok(settings)
+    }
+}
+
 pub struct Session {
     agent: ureq::Agent,
     home: PathBuf,
     pub model: String,
+    reasoning_effort: Option<String>,
 }
 
 impl Session {
@@ -60,6 +111,7 @@ impl Session {
         allow_sign_in: bool,
         cancelled: &AtomicBool,
     ) -> Result<Self> {
+        let settings = Settings::load(home)?;
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .https_only(true)
             .proxy(None)
@@ -75,11 +127,15 @@ impl Session {
             .header("Authorization", format!("Bearer {token}"))
             .call()
             .map_err(request_error)?;
-        let model = choose_model(&read_json(reply)?, preferred_model)?;
+        let model = choose_model(
+            &read_json(reply)?,
+            preferred_model.or(settings.model.as_deref()),
+        )?;
         Ok(Self {
             agent,
             home: home.to_owned(),
             model,
+            reasoning_effort: settings.reasoning_effort,
         })
     }
 
@@ -98,15 +154,27 @@ impl Session {
             .config()
             .http_status_as_error(false)
             .build()
-            .send_json(json!({
-                "model": &self.model,
-                "input": [{"role": "user", "content": question}],
-                "store": false,
-                "stream": true
-            }))
+            .send_json(request_body(
+                &self.model,
+                self.reasoning_effort.as_deref(),
+                question,
+            ))
             .map_err(request_error)?;
         read_answer(reply, cancelled)
     }
+}
+
+fn request_body(model: &str, effort: Option<&str>, question: &str) -> Value {
+    let mut body = json!({
+        "model": model,
+        "input": [{"role": "user", "content": question}],
+        "store": false,
+        "stream": true
+    });
+    if let Some(effort) = effort {
+        body["reasoning"] = json!({"effort": effort});
+    }
+    body
 }
 
 fn access_token(
@@ -172,22 +240,14 @@ fn read_answer(
         .map(ToOwned::to_owned);
     let result = match (status.is_success(), format) {
         (true, "event stream") => parse_stream(reply.body_mut().as_reader(), cancelled),
-        (success, "JSON") => {
-            let value: Value = reply
-                .body_mut()
-                .with_config()
-                .limit(MAX_BODY as u64)
-                .read_json()
-                .map_err(|_| Error::Message("invalid or oversized ChatGPT JSON response"))
-                .map_err(|e| with_response(e, status.as_u16(), format, request_id.clone()))?;
-            oauth::check_cancelled(cancelled)?;
-            if let Some(message) = service_error(&value["error"]) {
-                Err(Error::Message(message))
-            } else if success {
-                completed_json(&value)
-            } else {
-                Err(Error::Message(status_message(status.as_u16())))
-            }
+        (success, "JSON") => read_json_answer(
+            reply.body_mut().as_reader(),
+            success,
+            status.as_u16(),
+            cancelled,
+        ),
+        (true, "missing content type") => {
+            read_untyped_answer(reply.body_mut().as_reader(), cancelled)
         }
         (false, _) => Err(Error::Message(status_message(status.as_u16()))),
         (true, _) => Err(Error::Message(
@@ -195,6 +255,59 @@ fn read_answer(
         )),
     };
     result.map_err(|e| with_response(e, status.as_u16(), format, request_id))
+}
+
+fn read_json_answer(
+    input: impl Read,
+    success: bool,
+    status: u16,
+    cancelled: &AtomicBool,
+) -> Result<String> {
+    let mut body = Vec::new();
+    input
+        .take((MAX_BODY + 1) as u64)
+        .read_to_end(&mut body)
+        .map_err(|_| Error::Message("could not read ChatGPT JSON response"))?;
+    if body.len() > MAX_BODY {
+        return Err(Error::Message("oversized ChatGPT JSON response"));
+    }
+    oauth::check_cancelled(cancelled)?;
+    let value: Value = serde_json::from_slice(&body)
+        .map_err(|_| Error::Message("invalid ChatGPT JSON response"))?;
+    if let Some(message) = service_error(&value["error"]) {
+        Err(Error::Message(message))
+    } else if success {
+        completed_json(&value)
+    } else {
+        Err(Error::Message(status_message(status)))
+    }
+}
+
+fn read_untyped_answer(input: impl Read, cancelled: &AtomicBool) -> Result<String> {
+    let mut input = BufReader::new(input.take((MAX_BODY + 1) as u64));
+    // Classify by the first non-whitespace byte, then run the normal parser.
+    // Neither path publishes output without a completed Responses result.
+    let first = loop {
+        oauth::check_cancelled(cancelled)?;
+        let bytes = input
+            .fill_buf()
+            .map_err(|_| Error::Message("could not read ChatGPT response"))?;
+        if let Some(index) = bytes.iter().position(|b| !b.is_ascii_whitespace()) {
+            let first = bytes[index];
+            input.consume(index);
+            break first;
+        }
+        if bytes.is_empty() {
+            return Err(Error::Message("ChatGPT returned an empty response"));
+        }
+        let len = bytes.len();
+        input.consume(len);
+    };
+    match first {
+        b'{' => read_json_answer(input, true, 200, cancelled),
+        b':' | b'd' | b'e' | b'i' | b'r' => parse_stream(input, cancelled),
+        _ => Err(Error::Message("unrecognized ChatGPT response format")),
+    }
 }
 
 fn with_response(
@@ -409,6 +522,68 @@ mod tests {
             .header("x-request-id", "req_0123abcd")
             .body(ureq::Body::builder().data(body.as_bytes()))
             .unwrap()
+    }
+
+    #[test]
+    fn recognizes_completed_replies_without_content_type() {
+        let cancelled = AtomicBool::new(false);
+        let read = |body: &str| {
+            let mut reply = response(200, "application/json", body);
+            reply.headers_mut().remove("content-type");
+            read_answer(reply, &cancelled)
+        };
+        let stream = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+            "data: {\"type\":\"response.completed\"}\n\n"
+        );
+        assert_eq!(read(stream).unwrap(), "hello");
+        let json = r#"{"object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hello"}]}]}"#;
+        assert_eq!(read(json).unwrap(), "hello");
+        assert!(read("").unwrap_err().to_string().contains("empty response"));
+        assert!(read("<html>not an answer</html>").is_err());
+        assert!(
+            read(
+                stream
+                    .split("data: {\"type\":\"response.completed")
+                    .next()
+                    .unwrap()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn settings_select_model_and_pass_reasoning_only_when_configured() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(".kwsh/chatgpt.json");
+        assert!(
+            Settings::load(home.path())
+                .unwrap()
+                .reasoning_effort
+                .is_none()
+        );
+        std::fs::create_dir(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"model":"chosen-model","reasoning_effort":"high"}"#,
+        )
+        .unwrap();
+        let settings = Settings::load(home.path()).unwrap();
+        let body = request_body(
+            settings.model.as_deref().unwrap(),
+            settings.reasoning_effort.as_deref(),
+            "hello",
+        );
+        assert_eq!(body["model"], "chosen-model");
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert!(
+            request_body("chosen-model", None, "hello")
+                .get("reasoning")
+                .is_none()
+        );
+        std::fs::write(path, r#"{"reasoning_effort":"typo"}"#).unwrap();
+        assert!(Settings::load(home.path()).is_err());
     }
 
     #[test]
