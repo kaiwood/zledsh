@@ -555,7 +555,12 @@ impl<'a> Invocation<'a> {
                     Ok(source) => {
                         let saved = (!args.is_empty())
                             .then(|| std::mem::replace(&mut self.args, args.to_vec()));
-                        self.run_nested(name, &source, input, &output);
+                        self.run_nested(
+                            &format!("{name}: {}", path.display()),
+                            &source,
+                            input,
+                            &output,
+                        );
                         if let Some(saved) = saved {
                             self.args = saved;
                         }

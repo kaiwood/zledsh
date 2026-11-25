@@ -582,6 +582,7 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
             '[' if !started && input.peek().is_none_or(|&ch| boundary(ch)) => {
                 literal(&mut word, ch)
             }
+            '(' if word.assignment => return Err("array literals are not supported".into()),
             '<' | '(' | '{' | '}' | '`' | '$' | '*' | '?' | '[' | '~' => {
                 return Err(ParseError::Invalid(format!(
                     "unsupported unquoted syntax: {ch}"

@@ -20,7 +20,13 @@ if command -v rbenv >/dev/null 2>&1; then
 fi
 ```
 
-The full `eval "$(rbenv init - bash)"` recipe is not supported yet. The shims-only setup does not install `rbenv shell` support or programmed completion.
+The shims-only setup does not install `rbenv shell` or programmed completion. The `eval "$(rbenv init - bash)"` bootstrap from rbenv 1.3.2 installs a working `rbenv shell` wrapper, but its sourced Bash completion file produces a diagnostic: arrays and programmed completion are not supported. Use the shims-only setup above for a quiet startup.
+
+### Script with `kwsh`
+
+Use the same syntax in your startup files, `kwsh -c`, redirected stdin, or at the prompt. `&&` and `||` short-circuit, and `!` reverses a pipeline’s exit status. `for`, `while`, and `until` support `break` and `continue`. Basic `case` supports exact patterns, `|` alternatives, and a `*` catch-all. Functions declared as `name() { ...; }` support positional arguments, `local`, `shift`, and `return` for standalone calls, not pipeline stages.
+
+`$(...)` captures stdout in an isolated `kwsh` process. Quote it to keep the result as one argument. `eval`, `.` and `source` execute native `kwsh` syntax in the current shell. For example, `kwsh < setup.kwsh` runs a script and `. ./setup.kwsh` loads it into an existing session. This is a scripting subset, not a Bash interpreter: backticks, arithmetic expansion, arrays, and Bash programmable completion are unsupported.
 
 Set `HISTFILE` before the first prompt to opt into persistent history. For example, put `export HISTFILE="$HOME/.kwsh_history"` in `~/.kwshrc`. History otherwise stays in memory; `HISTSIZE` defaults to 512. At the `kwsh` prompt, use Up and Down to recall commands, Tab to complete simple command names or paths, Ctrl+W to erase the last word, and Ctrl+U to erase to the start of the draft. Left/Right, Home/End, and Ctrl+A/Ctrl+E move the cursor. Bracketed paste inserts text into the draft without running it; press Enter to submit. Use `history pause` before entering a sensitive command, then `history resume` to start recording again. Pausing does not erase earlier history or hide your input from terminal scrollback. Unsafe files (including symlinks and files not owned by you with mode `0600`) are left untouched.
 

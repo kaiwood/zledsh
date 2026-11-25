@@ -293,6 +293,48 @@ class ShellParityTest < Minitest::Test
     refute File.exist?(File.join(@work, "skipped"))
   end
 
+  def test_generated_rbenv_startup_installs_a_working_shell_wrapper
+    bin = File.join(@scratch, "bin")
+    FileUtils.mkdir_p(bin)
+    @env["PATH"] = "#{bin}:/usr/bin:/bin"
+    File.write(File.join(@work, "mock-completions"), "fixture_loaded=yes\n")
+    rbenv = File.join(bin, "rbenv")
+    File.write(rbenv, <<~'SH')
+      #!/bin/sh
+      case "$1" in
+        init) exec /bin/cat ./generated-rbenv-startup;;
+        rehash) exit 0;;
+        sh-shell) printf 'export RBENV_VERSION=system\n';;
+        *) printf '%s' "$1";;
+      esac
+    SH
+    File.chmod(0o755, rbenv)
+    FileUtils.cp(File.join(__dir__, "fixtures/rbenv-generated-startup.sh"), File.join(@work, "generated-rbenv-startup"))
+    File.open(File.join(@home, ".kwshrc"), "a") do |rc|
+      rc.puts <<~'SH'
+        if command -v rbenv >/dev/null 2>&1; then
+          eval "$(rbenv init - bash)"
+        fi
+      SH
+    end
+    executable, *args = COMMAND
+    PTY.spawn(@env, [executable, executable], *args, **@spawn_options) do |reader, writer, pid|
+      read_until(reader, RC_PROMPT)
+      writer.write(<<~'SH')
+        rbenv shell system; printf '%s:%s:%s\n' "$RBENV_VERSION" "$fixture_loaded" "$(rbenv version)"
+      SH
+      read_until(reader, "\r\nsystem:yes:version\r\n")
+      read_until(reader, RC_PROMPT)
+      writer.write("exit 0\n")
+      drain_terminal(reader)
+      assert wait_for_exit(pid).success?
+    ensure
+      reader.close
+      writer.close
+      cleanup_child(pid)
+    end
+  end
+
   def test_terminal
     executable, *args = COMMAND
     PTY.spawn(@env, [executable, executable], *args, **@spawn_options) do |reader, writer, pid|
