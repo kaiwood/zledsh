@@ -1,4 +1,10 @@
-use std::path::Path;
+use std::{
+    io::{self, Read, Seek},
+    os::unix::process::CommandExt,
+    path::Path,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
 
 use crate::runtime::{BUILTINS, Invocation};
 
@@ -9,7 +15,19 @@ pub fn suffix(line: &str, shell: &Invocation<'_>) -> Option<String> {
     }
     let (before, token) = line.rsplit_once(char::is_whitespace).unwrap_or(("", line));
     let command = before.trim().is_empty();
-    let mut matches = Vec::new();
+    let programmed = if command {
+        None
+    } else {
+        let mut words: Vec<_> = before.split_whitespace().map(str::to_owned).collect();
+        words.push(token.into());
+        shell.programmed_completion(words)
+    };
+    let mut matches = programmed.unwrap_or_default();
+    matches.retain(|candidate| {
+        !candidate.is_empty()
+            && candidate.starts_with(token)
+            && !candidate.chars().any(char::is_control)
+    });
     if command && !token.contains('/') {
         if token.is_empty() {
             return None;
@@ -37,7 +55,7 @@ pub fn suffix(line: &str, shell: &Invocation<'_>) -> Option<String> {
             };
             collect(directory, "", token, true, &mut matches);
         }
-    } else {
+    } else if matches.is_empty() {
         let (parent, prefix) = token
             .rsplit_once('/')
             .map_or(("", token), |(parent, prefix)| (parent, prefix));
@@ -72,7 +90,7 @@ pub fn suffix(line: &str, shell: &Invocation<'_>) -> Option<String> {
     }
     let mut suffix = String::new();
     for ch in first.get(token.len()..end)?.chars() {
-        if ch.is_whitespace() || "\\'\"$`;|&<>()*?[]#!".contains(ch) {
+        if ch.is_whitespace() || "\\'\"$`;|&<>()*?[]#!{}~".contains(ch) {
             suffix.push('\\');
         }
         suffix.push(ch);
@@ -81,6 +99,70 @@ pub fn suffix(line: &str, shell: &Invocation<'_>) -> Option<String> {
         suffix.push(' ');
     }
     (!suffix.is_empty()).then_some(suffix)
+}
+
+pub(crate) fn run_callback(mut command: Command) -> io::Result<Vec<String>> {
+    const LIMIT: u64 = 128 * 1024;
+    let mut reply = tempfile::tempfile()?;
+    // Use a fresh session so even an explicit open of /dev/tty cannot
+    // interfere with the line editor. The worker leads its own process group.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let child = command
+        .stdout(reply.try_clone()?)
+        .stderr(Stdio::null())
+        .spawn()?;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut guard = CallbackChild {
+        child,
+        reaped: false,
+    };
+    if !guard.wait(deadline)? {
+        return Ok(Vec::new());
+    }
+    reply.rewind()?;
+    let mut bytes = Vec::new();
+    reply.take(LIMIT + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > LIMIT {
+        return Ok(Vec::new());
+    }
+    serde_json::from_slice(&bytes).map_err(io::Error::other)
+}
+
+struct CallbackChild {
+    child: std::process::Child,
+    reaped: bool,
+}
+
+impl CallbackChild {
+    fn wait(&mut self, deadline: Instant) -> io::Result<bool> {
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                self.reaped = true;
+                return Ok(status.success());
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+impl Drop for CallbackChild {
+    fn drop(&mut self) {
+        // Kill children of a timed-out callback along with the worker.
+        if !self.reaped {
+            unsafe { libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL) };
+            let _ = self.child.wait();
+        }
+    }
 }
 
 fn collect(directory: &Path, base: &str, prefix: &str, command: bool, matches: &mut Vec<String>) {

@@ -19,6 +19,7 @@ pub(crate) struct Invocation<'a> {
     arrays: HashMap<String, BTreeMap<usize, String>>,
     aliases: HashMap<String, String>,
     functions: HashMap<String, Script>,
+    completions: HashMap<String, String>,
     exported: HashSet<String>,
     unset: HashSet<String>,
     substitution_depth: u8,
@@ -50,7 +51,7 @@ enum LoopControl {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Substitution {
-    source: String,
+    task: WorkerTask,
     name: String,
     args: Vec<String>,
     variables: HashMap<String, String>,
@@ -63,6 +64,15 @@ struct Substitution {
     status: u8,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+enum WorkerTask {
+    Script(String),
+    Complete {
+        function: String,
+        words: Vec<String>,
+    },
+}
+
 impl<'a> Invocation<'a> {
     pub fn new(name: &'a str, args: &[String]) -> Self {
         Self {
@@ -72,6 +82,7 @@ impl<'a> Invocation<'a> {
             arrays: HashMap::new(),
             aliases: HashMap::new(),
             functions: HashMap::new(),
+            completions: HashMap::new(),
             exported: HashSet::new(),
             unset: HashSet::new(),
             substitution_depth: 0,
@@ -476,7 +487,7 @@ impl<'a> Invocation<'a> {
         if self.agent_command()
             && matches!(
                 name.as_str(),
-                "exit" | "fg" | "bg" | "wait" | "eval" | "." | "source"
+                "exit" | "fg" | "bg" | "wait" | "eval" | "." | "source" | "complete"
             )
         {
             report(&output[1], &format!("{name} must be submitted by the user"));
@@ -656,6 +667,46 @@ impl<'a> Invocation<'a> {
                     self.exported.remove(name);
                     self.unset.insert(name.clone());
                 }
+            }
+            "complete" => {
+                self.status = match args {
+                    [flag, function, commands @ ..]
+                        if flag == "-F" && valid_name(function) && !commands.is_empty() =>
+                    {
+                        for command in commands {
+                            self.completions.insert(command.clone(), function.clone());
+                        }
+                        0
+                    }
+                    _ => {
+                        report(&output[1], "complete: expected -F function command ...");
+                        2
+                    }
+                };
+            }
+            "compgen" => {
+                let mut matched = false;
+                self.status = match args {
+                    [flag, words, sep, prefix] if flag == "-W" && sep == "--" => {
+                        // The word list is data, not shell source.
+                        let mut result = Ok(());
+                        for word in words
+                            .split_ascii_whitespace()
+                            .filter(|word| word.starts_with(prefix))
+                        {
+                            matched = true;
+                            result = output[0].write(&format!("{word}\n"));
+                            if result.is_err() {
+                                break;
+                            }
+                        }
+                        u8::from(result.is_err() || !matched)
+                    }
+                    _ => {
+                        report(&output[1], "compgen: expected -W wordlist -- prefix");
+                        2
+                    }
+                };
             }
             "alias" | "unalias" => {
                 if let Err(error) = self.update_aliases(name, args, &output[0]) {
@@ -999,9 +1050,14 @@ impl<'a> Invocation<'a> {
                     }
                 }
             };
-            if self.agent_command() && matches!(direct_name(&argv), Some("eval" | "." | "source")) {
+            if self.agent_command()
+                && matches!(
+                    direct_name(&argv),
+                    Some("eval" | "." | "source" | "complete")
+                )
+            {
                 return Err(io::Error::other(
-                    "eval and source must be submitted by the user",
+                    "eval, source and complete must be submitted by the user",
                 ));
             }
             let name = argv[0].clone();
@@ -1204,20 +1260,68 @@ impl<'a> Invocation<'a> {
         shell.substitution_depth = saved.depth;
         shell.status = saved.status;
         process::null_stdin().map_err(|error| error.to_string())?;
-        shell.run_source(&saved.source, &mut io::empty())?;
-        Ok(shell.status)
+        match saved.task {
+            WorkerTask::Script(source) => {
+                shell.run_source(&source, &mut io::empty())?;
+                Ok(shell.status)
+            }
+            WorkerTask::Complete { function, words } => shell.complete_in_worker(&function, words),
+        }
     }
 
-    fn substitute(&self, source: &str) -> Result<(String, u8), String> {
-        const MAX_OUTPUT: u64 = 16 * 1024 * 1024;
-        if self.agent_command() {
-            return Err("command substitutions must be submitted by the user".into());
+    fn complete_in_worker(&mut self, function: &str, words: Vec<String>) -> Result<u8, String> {
+        if !self.functions.contains_key(function) || words.len() < 2 {
+            return Ok(1);
         }
-        if self.substitution_depth >= 16 {
-            return Err("command substitutions nested too deeply".into());
-        }
+        let index = words.len() - 1;
+        let args = [
+            words[0].clone(),
+            words[index].clone(),
+            words[index - 1].clone(),
+        ];
+        self.arrays
+            .insert("COMP_WORDS".into(), words.into_iter().enumerate().collect());
+        self.arrays.insert("COMPREPLY".into(), BTreeMap::new());
+        self.variables
+            .insert("COMP_CWORD".into(), index.to_string());
+        self.arrays.remove("COMP_CWORD");
+        let null = Output::File(Rc::new(
+            File::options()
+                .write(true)
+                .open("/dev/null")
+                .map_err(|error| error.to_string())?,
+        ));
+        self.call_function(function, &args, &mut io::empty(), &[null.clone(), null]);
+        let candidates: Vec<_> = self
+            .arrays
+            .get("COMPREPLY")
+            .into_iter()
+            .flat_map(|array| array.values())
+            .filter(|value| value.len() <= 4096)
+            .take(512)
+            .collect();
+        serde_json::to_writer(io::stdout().lock(), &candidates)
+            .map_err(|_| "could not write completion candidates")?;
+        Ok(0)
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn programmed_completion(&self, words: Vec<String>) -> Option<Vec<String>> {
+        let function = self.completions.get(words.first()?)?;
+        let command = self
+            .worker_command(WorkerTask::Complete {
+                function: function.clone(),
+                words,
+            })
+            .ok()?;
+        // A registered callback is trusted shell code, but cannot see the keyboard,
+        // change this shell's state, print to the terminal, or stall the editor indefinitely.
+        Some(crate::completion::run_callback(command).unwrap_or_default())
+    }
+
+    fn worker_command(&self, task: WorkerTask) -> io::Result<std::process::Command> {
         let saved = Substitution {
-            source: source.into(),
+            task,
             name: self.name.into(),
             args: self.args.clone(),
             variables: self.variables.clone(),
@@ -1229,16 +1333,26 @@ impl<'a> Invocation<'a> {
             depth: self.substitution_depth + 1,
             status: self.status,
         };
+        // Send private shell variables via an anonymous fd, not argv or the environment.
+        let mut payload = tempfile::tempfile()?;
+        serde_json::to_writer(&mut payload, &saved)?;
+        payload.rewind()?;
+        let mut command = std::process::Command::new(std::env::current_exe()?);
+        command.arg(crate::SUBSTITUTION).stdin(payload);
+        Ok(command)
+    }
+
+    fn substitute(&self, source: &str) -> Result<(String, u8), String> {
+        const MAX_OUTPUT: u64 = 16 * 1024 * 1024;
+        if self.agent_command() {
+            return Err("command substitutions must be submitted by the user".into());
+        }
+        if self.substitution_depth >= 16 {
+            return Err("command substitutions nested too deeply".into());
+        }
         let capture = || -> io::Result<_> {
-            // Send private shell variables via an anonymous fd, not argv or the environment.
-            let mut payload = tempfile::tempfile()?;
-            serde_json::to_writer(&mut payload, &saved)?;
-            payload.rewind()?;
-            let mut command = std::process::Command::new(std::env::current_exe()?);
-            command
-                .arg(crate::SUBSTITUTION)
-                .stdin(payload)
-                .stdout(Stdio::piped());
+            let mut command = self.worker_command(WorkerTask::Script(source.into()))?;
+            command.stdout(Stdio::piped());
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             if let Some(tty) = self.foreground.as_ref().filter(|tty| tty.has_terminal()) {
                 return tty.capture(command, MAX_OUTPUT);
@@ -1423,7 +1537,7 @@ impl<'a> Invocation<'a> {
 pub(crate) const BUILTINS: &[&str] = &[
     "exit", "cd", "pwd", "export", "unset", "read", "printf", "fg", "alias", "unalias", "jobs",
     "bg", "wait", "command", ":", "true", "false", "eval", "break", "continue", ".", "source",
-    "local", "shift", "return",
+    "local", "shift", "return", "complete", "compgen",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {

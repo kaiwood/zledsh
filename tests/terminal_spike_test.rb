@@ -233,6 +233,49 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
+  def test_rbenv_bootstrap_loads_and_completes_subcommands_and_values
+    prompt = "rbenv> "
+    env = { "PROMPT" => prompt, "TERM" => "xterm", "ENV" => nil }
+    with_terminal(KWSH, env: env, prompt: prompt, setup: method(:write_rbenv_fixture), start: false) do |reader, writer, pid|
+      refute_includes read_until(reader, prompt), "kwsh:"
+      writer.write("rbenv ver\t\n")
+      read_until(reader, "\r\nversion\r\n")
+      read_until(reader, prompt)
+      writer.write("rbenv shell sys\t\n")
+      read_until(reader, prompt)
+      writer.write(<<~'SH')
+        printf '%s:%s\n' "$RBENV_VERSION" "$fixture_loaded"
+      SH
+      read_until(reader, "\r\nsystem:yes\r\n")
+      read_until(reader, prompt)
+      exit_spike(reader, writer, pid)
+    end
+  end
+
+  def test_slow_completion_does_not_stall_the_editor_or_leave_a_worker_running
+    prompt = "complete> "
+    env = { "PROMPT" => prompt, "TERM" => "xterm", "ENV" => nil }
+    with_terminal(KWSH, env: env, prompt: prompt, setup: ->(home) {
+      File.write(File.join(home, ".kwshrc"), <<~'SH')
+        _slow() { /bin/sh -c 'echo $$ > worker; exec /bin/sleep 15'; }
+        complete -F _slow printf
+      SH
+    }) do |reader, writer, pid, home|
+      writer.write("printf survived\t\n")
+      read_until(reader, "\r\nsurvived")
+      read_until(reader, prompt)
+      worker = Integer(File.read(File.join(home, "worker")))
+      Timeout.timeout(TIMEOUT) do
+        loop do
+          state = IO.popen(["/bin/ps", "-o", "stat=", "-p", worker.to_s], &:read).strip
+          break if state.empty? || state.start_with?("Z")
+          sleep 0.01
+        end
+      end
+      exit_spike(reader, writer, pid)
+    end
+  end
+
   def test_history_arrows_search_the_draft_prefix
     prompt = "prefix> "
     with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
@@ -376,6 +419,35 @@ class TerminalSpikeTest < Minitest::Test
     read_until(reader, "\r\nrequest captured\r\n")
     read_until(reader, prompt)
     JSON.parse(File.read(File.join(home, "request.json")))
+  end
+
+  def write_rbenv_fixture(home)
+    %w[rbenv-generated-startup.sh rbenv-completion.sh].zip(%w[generated-rbenv-startup mock-completions]).each do |from, to|
+      File.write(File.join(home, to), File.read(File.join(__dir__, "fixtures", from)))
+    end
+    File.write(File.join(home, ".kwshrc"), <<~'SH')
+      export PATH="$HOME:/usr/bin:/bin"
+      if command -v rbenv >/dev/null 2>&1; then
+        eval "$(rbenv init - bash)"
+      fi
+    SH
+    rbenv = File.join(home, "rbenv")
+    File.write(rbenv, <<~'SH')
+      #!/bin/sh
+      case "$1" in
+        init) exec /bin/cat ./generated-rbenv-startup;;
+        rehash) exit 0;;
+        commands) printf '%s\n' rehash shell version;;
+        completions)
+          [ "$#:$2" = "2:shell" ] || exit 1
+          printf '%s\n' system custom;;
+        sh-shell)
+          [ "$2" = system ] || exit 1
+          printf 'export RBENV_VERSION=system\n';;
+        *) printf '%s\n' "$1";;
+      esac
+    SH
+    File.chmod(0o755, rbenv)
   end
 
   def with_spike(&block)
