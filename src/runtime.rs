@@ -85,6 +85,24 @@ impl<'a> Invocation<'a> {
                     };
                     return;
                 }
+                "cd" | "pwd" => {
+                    let result = if name == "cd" {
+                        self.change_directory(args, &output[0])
+                    } else if args.is_empty() {
+                        std::env::current_dir()
+                            .and_then(|path| output[0].write(&format!("{}\n", path.display())))
+                            .map_err(|error| error.to_string())
+                    } else {
+                        Err("arguments are not supported".into())
+                    };
+                    self.status = match result {
+                        Ok(()) => 0,
+                        Err(error) => {
+                            report(&output[1], &format!("{name}: {error}"));
+                            1
+                        }
+                    };
+                }
                 "export" => {
                     self.status = 0;
                     for arg in args {
@@ -136,6 +154,30 @@ impl<'a> Invocation<'a> {
                 _ => self.status = self.external(&argv, &output),
             }
         }
+    }
+
+    fn change_directory(&mut self, args: &[String], output: &Output) -> Result<(), String> {
+        let destination = match args {
+            [] => self.variable("HOME").ok_or("HOME is not set")?,
+            [path] if path == "-" => self.variable("OLDPWD").ok_or("OLDPWD is not set")?,
+            [path] => path.clone(),
+            _ => return Err("expected at most one directory".into()),
+        };
+        let previous = std::env::current_dir().map_err(|error| error.to_string())?;
+        std::env::set_current_dir(&destination)
+            .map_err(|error| format!("{destination}: {error}"))?;
+        let current = std::env::current_dir().map_err(|error| error.to_string())?;
+        for (name, path) in [("OLDPWD", previous), ("PWD", current.clone())] {
+            self.variables
+                .insert(name.into(), path.to_string_lossy().into_owned());
+            self.exported.insert(name.into());
+        }
+        if args.first().is_some_and(|arg| arg == "-") {
+            output
+                .write(&format!("{}\n", current.display()))
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
     }
 
     fn external(&mut self, argv: &[String], output: &[Output; 2]) -> u8 {
@@ -235,7 +277,6 @@ impl<'a> Invocation<'a> {
         }
     }
 
-    #[cfg(target_os = "macos")]
     pub fn variable(&self, name: &str) -> Option<String> {
         self.variables
             .get(name)
