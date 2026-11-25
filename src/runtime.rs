@@ -18,6 +18,7 @@ pub(crate) struct Invocation<'a> {
     exported: HashSet<String>,
     unset: HashSet<String>,
     substitution_depth: u8,
+    eval_depth: u8,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub foreground: Option<crate::foreground::Foreground>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -49,6 +50,7 @@ impl<'a> Invocation<'a> {
             exported: HashSet::new(),
             unset: HashSet::new(),
             substitution_depth: 0,
+            eval_depth: 0,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             foreground: None,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -119,11 +121,20 @@ impl<'a> Invocation<'a> {
     }
 
     pub fn run_source(&mut self, source: &str, input: &mut impl BufRead) -> Result<(), String> {
+        self.run_source_with_output(source, input, &[Output::Stdout, Output::Stderr])
+    }
+
+    fn run_source_with_output(
+        &mut self,
+        source: &str,
+        input: &mut impl BufRead,
+        output: &[Output; 2],
+    ) -> Result<(), String> {
         let mut pending = String::new();
         for line in source.split_inclusive('\n') {
             pending.push_str(line);
             match self.parse(&pending) {
-                Ok(commands) => self.run(&commands, input),
+                Ok(commands) => self.run_with_output(&commands, input, output),
                 Err(ParseError::Incomplete(_)) => continue,
                 Err(error) => return Err(error.message().to_owned()),
             }
@@ -162,26 +173,37 @@ impl<'a> Invocation<'a> {
     }
 
     pub fn run(&mut self, script: &[Statement], input: &mut impl BufRead) {
+        self.run_with_output(script, input, &[Output::Stdout, Output::Stderr]);
+    }
+
+    fn run_with_output(
+        &mut self,
+        script: &[Statement],
+        input: &mut impl BufRead,
+        output: &[Output; 2],
+    ) {
         for statement in script {
             if self.exited {
                 break;
             }
             match statement {
-                Statement::Pipeline(pipeline) => self.run_pipeline(pipeline, input),
+                Statement::Pipeline(pipeline) => {
+                    self.run_pipeline_with_output(pipeline, input, output)
+                }
                 Statement::Negated(inner) => {
-                    self.run(std::slice::from_ref(inner.as_ref()), input);
+                    self.run_with_output(std::slice::from_ref(inner.as_ref()), input, output);
                     if !self.exited {
                         self.status = u8::from(self.status == 0);
                     }
                 }
                 Statement::AndOr { first, rest } => {
-                    self.run(std::slice::from_ref(first.as_ref()), input);
+                    self.run_with_output(std::slice::from_ref(first.as_ref()), input, output);
                     for (on_success, statement) in rest {
                         if self.exited {
                             break;
                         }
                         if (self.status == 0) == *on_success {
-                            self.run(std::slice::from_ref(statement), input);
+                            self.run_with_output(std::slice::from_ref(statement), input, output);
                         }
                     }
                 }
@@ -191,7 +213,7 @@ impl<'a> Invocation<'a> {
                 } => {
                     let mut selected = otherwise;
                     for (condition, body) in branches {
-                        self.run(condition, input);
+                        self.run_with_output(condition, input, output);
                         if self.exited {
                             return;
                         }
@@ -203,7 +225,7 @@ impl<'a> Invocation<'a> {
                     if selected.is_empty() {
                         self.status = 0;
                     } else {
-                        self.run(selected, input);
+                        self.run_with_output(selected, input, output);
                     }
                 }
             }
@@ -211,10 +233,18 @@ impl<'a> Invocation<'a> {
     }
 
     pub fn run_pipeline(&mut self, pipeline: &[Command], input: &mut impl BufRead) {
-        let original = [Output::Stdout, Output::Stderr];
+        self.run_pipeline_with_output(pipeline, input, &[Output::Stdout, Output::Stderr]);
+    }
+
+    fn run_pipeline_with_output(
+        &mut self,
+        pipeline: &[Command],
+        input: &mut impl BufRead,
+        original: &[Output; 2],
+    ) {
         let background = pipeline.last().is_some_and(|command| command.background);
         if background || pipeline.len() != 1 {
-            self.status = match self.pipeline(pipeline, background) {
+            self.status = match self.pipeline(pipeline, background, original) {
                 Ok(status) => status,
                 Err(error) => {
                     report(&original[1], &format!("pipeline: {error}"));
@@ -282,17 +312,29 @@ impl<'a> Invocation<'a> {
             self.status = substitution_status.unwrap_or(0);
             return;
         };
-        if self.agent_command() && matches!(name.as_str(), "exit" | "fg" | "bg" | "wait") {
-            report(
-                &output[1],
-                "exit, fg, bg and wait must be submitted by the user",
-            );
+        if self.agent_command() && matches!(name.as_str(), "exit" | "fg" | "bg" | "wait" | "eval") {
+            report(&output[1], &format!("{name} must be submitted by the user"));
             self.status = 2;
             return;
         }
         match name.as_str() {
             ":" | "true" => self.status = 0,
             "false" => self.status = 1,
+            "eval" => {
+                if self.eval_depth >= 32 {
+                    report(&output[1], "eval: nesting too deep");
+                    self.status = 2;
+                    return;
+                }
+                let source = args.join(" ");
+                self.eval_depth += 1;
+                self.status = 0;
+                if let Err(error) = self.run_source_with_output(&source, input, &output) {
+                    report(&output[1], &format!("eval: {error}"));
+                    self.status = 2;
+                }
+                self.eval_depth -= 1;
+            }
             "exit" => {
                 self.exited = true;
                 self.status = match args {
@@ -529,7 +571,12 @@ impl<'a> Invocation<'a> {
         (path, env)
     }
 
-    fn pipeline(&mut self, commands: &[Command], background: bool) -> io::Result<u8> {
+    fn pipeline(
+        &mut self,
+        commands: &[Command],
+        background: bool,
+        original: &[Output; 2],
+    ) -> io::Result<u8> {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         if background {
             return Err(io::Error::other(
@@ -559,9 +606,9 @@ impl<'a> Invocation<'a> {
             };
             let (stdout, next_input) = match next {
                 Some((read, write)) => (Output::File(Rc::new(File::from(write))), Some(read)),
-                None => (Output::Stdout, None),
+                None => (original[0].clone(), None),
             };
-            let mut output = [stdout, Output::Stderr];
+            let mut output = [stdout, original[1].clone()];
             let mut status = None;
             let argv = match self.expand_words(&command.words, &mut status) {
                 Err(error) => {
@@ -580,6 +627,9 @@ impl<'a> Invocation<'a> {
                     }
                 }
             };
+            if self.agent_command() && direct_name(&argv) == Some("eval") {
+                return Err(io::Error::other("eval must be submitted by the user"));
+            }
             let name = argv[0].clone();
             let exec = if is_builtin(&name) {
                 let executable = std::env::current_exe()?;
@@ -941,11 +991,25 @@ impl<'a> Invocation<'a> {
 
 pub(crate) const BUILTINS: &[&str] = &[
     "exit", "cd", "pwd", "export", "unset", "read", "printf", "fg", "alias", "unalias", "jobs",
-    "bg", "wait", "command", ":", "true", "false",
+    "bg", "wait", "command", ":", "true", "false", "eval",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {
     BUILTINS.contains(&name)
+}
+
+fn direct_name(mut argv: &[String]) -> Option<&str> {
+    while let [name, rest @ ..] = argv {
+        if name != "command" {
+            return Some(name);
+        }
+        match rest {
+            [flag, rest @ ..] if flag == "--" => argv = rest,
+            [flag, ..] if flag.starts_with('-') => return Some("command"),
+            _ => argv = rest,
+        }
+    }
+    None
 }
 
 fn alias_words(value: &str) -> Result<Vec<Word>, ParseError> {

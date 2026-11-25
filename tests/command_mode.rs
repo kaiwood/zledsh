@@ -95,6 +95,22 @@ fn substitution_drains_pipes_and_rejects_binary_output() {
 }
 
 #[test]
+fn eval_runs_native_code_with_current_state_and_redirects() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+        .current_dir(dir.path())
+        .args(["-c", r#"
+            eval "$(printf '%s' 'name=loaded; if true; then printf "%s" "$name" | /bin/cat; fi')" > fixture
+            printf '%s:' "$name"; /bin/cat fixture
+            eval 'for?'; printf ':%s' "$?"
+        "#])
+        .output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"loaded:loaded:2");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("eval:"));
+}
+
+#[test]
 fn status_expands_and_unset_removes_inherited_environment() {
     let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
         .env("KWSH_TEST_UNSET", "inherited")
