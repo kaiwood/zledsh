@@ -184,6 +184,19 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
+  def test_tab_completion_and_word_deletion
+    binary = File.expand_path("../target/debug/kward", __dir__)
+    env = { "PROMPT" => "edit> ", "TERM" => "xterm" }
+    with_terminal(binary, "shell", env: env, prompt: "edit> ", setup: ->(home) {
+      File.write(File.join(home, "file with space"), "completed-content\n")
+    }) do |reader, writer, pid|
+      writer.write("/bin/cat wrong\x17fi\t\n")
+      read_until(reader, "completed-content\r\n")
+      read_until(reader, "edit> ")
+      exit_spike(reader, writer, pid)
+    end
+  end
+
   private
 
   def with_spike(&block)

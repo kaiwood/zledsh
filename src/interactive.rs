@@ -33,7 +33,7 @@ pub(crate) fn run(
             prompt.insert_str(0, "[private] ");
         }
         if let Some(editor) = &editor {
-            match editor.read_line(input, &prompt, &mut history, source.is_empty())? {
+            match editor.read_line(input, &prompt, &mut history, source.is_empty(), invocation)? {
                 Line::Submitted(line) => source.push_str(&line),
                 Line::Cancelled => {
                     source.clear();
@@ -145,11 +145,12 @@ impl EditorTerminal {
         prompt: &str,
         history: &mut History,
         primary: bool,
+        shell: &Invocation<'_>,
     ) -> io::Result<Line> {
         set_attributes(&self.editor)?;
         let mut stderr = io::stderr().lock();
         let line = write_prompt(&mut stderr, prompt)
-            .and_then(|()| read_keys(input, &mut stderr, prompt, history, primary));
+            .and_then(|()| read_keys(input, &mut stderr, prompt, history, primary, shell));
         // Builtins such as `read` run with the user's cooked settings.
         set_attributes(&self.original)?;
         line
@@ -179,6 +180,7 @@ fn read_keys(
     prompt: &str,
     history: &mut History,
     primary: bool,
+    shell: &Invocation<'_>,
 ) -> io::Result<Line> {
     let mut cursor = None;
     let mut draft = Vec::new();
@@ -208,7 +210,29 @@ fn read_keys(
             4 if line.is_empty() => return Ok(Line::End),
             8 | 127 if !line.is_empty() => {
                 while line.pop().is_some_and(|ch| ch & 0b1100_0000 == 0b1000_0000) {}
-                echo.write_all(b"\x08 \x08")?;
+                redraw(echo, prompt, &line)?;
+            }
+            21 => {
+                line.clear();
+                redraw(echo, prompt, &line)?;
+            }
+            23 => {
+                while line.last().is_some_and(u8::is_ascii_whitespace) {
+                    line.pop();
+                }
+                while line.last().is_some_and(|ch| !ch.is_ascii_whitespace()) {
+                    line.pop();
+                }
+                redraw(echo, prompt, &line)?;
+            }
+            b'\t' if primary => {
+                if let Some(suffix) = std::str::from_utf8(&line)
+                    .ok()
+                    .and_then(|line| crate::completion::suffix(line, shell))
+                {
+                    line.extend_from_slice(suffix.as_bytes());
+                    echo.write_all(suffix.as_bytes())?;
+                }
             }
             27 => {
                 if !read_key_byte(input)?.is_some_and(|byte| byte == b'[' || byte == b'O') {
@@ -235,15 +259,7 @@ fn read_keys(
                 line = cursor
                     .and_then(|index| history.entries().nth(index))
                     .map_or_else(|| draft.clone(), |text| text.as_bytes().to_vec());
-                echo.write_all(b"\r\x1b[2K")?;
-                echo.write_all(prompt.as_bytes())?;
-                for ch in String::from_utf8_lossy(&line).chars() {
-                    if ch.is_control() {
-                        write!(echo, "{}", ch.escape_default())?;
-                    } else {
-                        write!(echo, "{ch}")?;
-                    }
-                }
+                redraw(echo, prompt, &line)?;
             }
             b' '..=b'~' | 128..=255 | b'\t' => {
                 line.push(byte[0]);
@@ -253,6 +269,19 @@ fn read_keys(
         }
         echo.flush()?;
     }
+}
+
+fn redraw(echo: &mut impl Write, prompt: &str, line: &[u8]) -> io::Result<()> {
+    echo.write_all(b"\r\x1b[2K")?;
+    echo.write_all(prompt.as_bytes())?;
+    for ch in String::from_utf8_lossy(line).chars() {
+        if ch.is_control() {
+            write!(echo, "{}", ch.escape_default())?;
+        } else {
+            write!(echo, "{ch}")?;
+        }
+    }
+    Ok(())
 }
 
 fn read_key_byte(input: &mut impl BufRead) -> io::Result<Option<u8>> {

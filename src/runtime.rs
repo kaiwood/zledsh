@@ -432,11 +432,10 @@ impl<'a> Invocation<'a> {
     }
 }
 
+pub(crate) const BUILTINS: &[&str] = &["exit", "cd", "pwd", "export", "read", "printf", "fg"];
+
 pub(crate) fn is_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "exit" | "cd" | "pwd" | "export" | "read" | "printf" | "fg"
-    )
+    BUILTINS.contains(&name)
 }
 
 fn valid_name(name: &str) -> bool {
