@@ -120,6 +120,51 @@ class ShellParityTest < Minitest::Test
     assert_empty error
   end
 
+  def test_conditionals_in_command_and_redirected_input
+    script = <<~'SH'
+      if /usr/bin/false; then
+        printf wrong > skipped
+      elif /usr/bin/true; then
+        if /usr/bin/true; then selected=right; else selected=wrong; fi
+      fi
+      printf '%s:%s\n' "$selected" "$?"
+      if /usr/bin/false; then printf wrong; fi
+      printf '%s\n' "$?"
+    SH
+    [capture(*COMMAND, "-c", script), capture(*COMMAND, input: script)].each do |output, error, status|
+      assert status.success?, error
+      assert_equal "right:0\n0\n", output
+      assert_empty error
+    end
+    refute File.exist?(File.join(@work, "skipped"))
+  end
+
+  def test_startup_and_cancelled_interactive_conditionals
+    File.open(File.join(@home, ".kwshrc"), "a") do |rc|
+      rc.puts "if /usr/bin/true; then export PARITY_IF=loaded; fi"
+    end
+    executable, *args = COMMAND
+    PTY.spawn(@env, [executable, executable], *args, **@spawn_options) do |reader, writer, pid|
+      read_until(reader, RC_PROMPT)
+      writer.write("PS2='more> '; printf '%s\\n' \"$PARITY_IF\"\n")
+      read_until(reader, "\r\nloaded\r\n")
+      read_until(reader, RC_PROMPT)
+      writer.write("if /usr/bin/true; then printf not-yet > skipped\n")
+      read_until(reader, "more> ")
+      refute File.exist?(File.join(@work, "skipped"))
+      writer.write("\x03")
+      read_until(reader, RC_PROMPT)
+      writer.write("exit 0\n")
+      drain_terminal(reader)
+      assert wait_for_exit(pid).success?
+      refute File.exist?(File.join(@work, "skipped"))
+    ensure
+      reader.close
+      writer.close
+      cleanup_child(pid)
+    end
+  end
+
   def test_terminal
     executable, *args = COMMAND
     PTY.spawn(@env, [executable, executable], *args, **@spawn_options) do |reader, writer, pid|

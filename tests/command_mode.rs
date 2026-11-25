@@ -47,7 +47,9 @@ fn unsupported_syntax_is_rejected_before_execution() {
         r#"printf '%s' "$(printf wrong)""#,
         "printf wrong || printf wrong",
         "printf 'unclosed",
-        "if /usr/bin/false; then printf wrong; fi",
+        "if /usr/bin/false; then printf wrong",
+        "if /usr/bin/true; then ; fi",
+        "fi",
     ] {
         let script = format!("printf earlier; {tail}");
         let output = run(&script, &[]);

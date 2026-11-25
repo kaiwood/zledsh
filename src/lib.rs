@@ -79,7 +79,7 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
     };
     let mut input = BufReader::with_capacity(1, process::Stdin);
     let mut invocation = runtime::Invocation::new("kwsh", &[]);
-    invocation.run(&[vec![command]], &mut input);
+    invocation.run_pipeline(&[command], &mut input);
     invocation.status.into()
 }
 

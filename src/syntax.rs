@@ -56,103 +56,217 @@ impl From<&str> for ParseError {
     }
 }
 
-pub(crate) fn parse(source: &str) -> ParseResult<Vec<Vec<Command>>> {
-    let mut input = source.chars().peekable();
-    let mut commands = Vec::new();
-    let mut stages = Vec::new();
-    let mut command = Command::default();
-    while let Some(&next) = input.peek() {
-        match next {
+pub(crate) type Script = Vec<Statement>;
+
+pub(crate) enum Statement {
+    Pipeline(Vec<Command>),
+    If {
+        branches: Vec<(Script, Script)>,
+        otherwise: Script,
+    },
+}
+
+pub(crate) fn parse(source: &str) -> ParseResult<Script> {
+    list(&mut source.chars().peekable(), &[], 0)
+}
+
+fn skip_space(input: &mut Source<'_>) {
+    while let Some(&ch) = input.peek() {
+        match ch {
             ' ' | '\t' => {
                 input.next();
             }
-            '#' => {
-                while input.peek().is_some_and(|&ch| ch != '\n') {
-                    input.next();
-                }
+            '#' => while input.next_if(|&ch| ch != '\n').is_some() {},
+            _ => break,
+        }
+    }
+}
+
+fn boundary(ch: char) -> bool {
+    matches!(ch, ' ' | '\t' | '\n' | ';' | '>' | '|' | '&')
+}
+
+fn head(input: &Source<'_>) -> String {
+    input.clone().take_while(|&ch| !boundary(ch)).collect()
+}
+
+fn list(input: &mut Source<'_>, stops: &[&str], depth: usize) -> ParseResult<Script> {
+    let mut script = Vec::new();
+    loop {
+        skip_space(input);
+        if input.next_if_eq(&'\n').is_some() {
+            continue;
+        }
+        if input.peek().is_none() {
+            break;
+        }
+        let name = head(input);
+        if stops.contains(&name.as_str()) {
+            break;
+        }
+        let mut statement = if name == "if" {
+            if depth >= 32 {
+                return Err("compound commands nested too deeply".into());
             }
-            '|' => {
-                input.next();
-                if input.peek() == Some(&'|') {
-                    return Err("logical OR is not supported".into());
-                }
-                if command.words.is_empty() && command.redirects.is_empty() {
-                    return Err("missing pipeline command".into());
-                }
-                stages.push(std::mem::take(&mut command));
+            input.by_ref().take(2).count();
+            conditional(input, depth + 1)?
+        } else {
+            Statement::Pipeline(pipeline(input)?)
+        };
+        skip_space(input);
+        let separator = input.next();
+        match separator {
+            Some('&') if input.peek() == Some(&'&') => {
+                return Err("logical AND is not supported".into());
             }
-            '\n' | ';' | '&' => {
-                input.next();
-                if next == '&' && input.peek() == Some(&'&') {
-                    return Err("logical AND is not supported".into());
-                }
-                if !command.words.is_empty() || !command.redirects.is_empty() {
-                    command.background = next == '&';
-                    stages.push(std::mem::take(&mut command));
-                    commands.push(std::mem::take(&mut stages));
-                } else if next != '\n' {
-                    return Err("unexpected command separator".into());
-                }
+            Some('&') => match &mut statement {
+                Statement::Pipeline(stages) => stages.last_mut().unwrap().background = true,
+                _ => return Err("background compound commands are not supported".into()),
+            },
+            Some(';' | '\n') | None => {}
+            _ => return Err("expected a command separator".into()),
+        }
+        script.push(statement);
+        if separator.is_none() {
+            break;
+        }
+    }
+    Ok(script)
+}
+
+fn expect_keyword(
+    input: &mut Source<'_>,
+    keyword: &'static str,
+    message: &'static str,
+) -> ParseResult<()> {
+    if input.peek().is_none() {
+        return Err(ParseError::Incomplete(message));
+    }
+    if head(input) != keyword {
+        return Err(message.into());
+    }
+    input.by_ref().take(keyword.len()).count();
+    Ok(())
+}
+
+fn require_list(script: Script, message: &'static str) -> ParseResult<Script> {
+    if script.is_empty() {
+        Err(message.into())
+    } else {
+        Ok(script)
+    }
+}
+
+fn conditional(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
+    let mut branches = Vec::new();
+    loop {
+        let condition = list(input, &["then"], depth)?;
+        expect_keyword(input, "then", "expected then in if command")?;
+        let condition = require_list(condition, "empty condition in if command")?;
+        let body = list(input, &["elif", "else", "fi"], depth)?;
+        if input.peek().is_none() {
+            return Err(ParseError::Incomplete("expected fi in if command"));
+        }
+        branches.push((condition, require_list(body, "empty branch in if command")?));
+        if head(input) != "elif" {
+            break;
+        }
+        input.by_ref().take(4).count();
+    }
+    let otherwise = if head(input) == "else" {
+        input.by_ref().take(4).count();
+        let body = list(input, &["fi"], depth)?;
+        if input.peek().is_none() {
+            return Err(ParseError::Incomplete("expected fi in if command"));
+        }
+        require_list(body, "empty else branch in if command")?
+    } else {
+        Vec::new()
+    };
+    expect_keyword(input, "fi", "expected fi in if command")?;
+    Ok(Statement::If {
+        branches,
+        otherwise,
+    })
+}
+
+fn pipeline(input: &mut Source<'_>) -> ParseResult<Vec<Command>> {
+    let mut stages = Vec::new();
+    loop {
+        let mut command = Command::default();
+        loop {
+            skip_space(input);
+            let Some(&next) = input.peek() else {
+                break;
+            };
+            if matches!(next, '\n' | ';' | '&' | '|') {
+                break;
             }
-            _ => {
-                if let Some(fd) = redirect_fd(&input)? {
-                    while input.next_if(|ch| ch.is_ascii_digit()).is_some() {}
-                    input.next(); // '>'
-                    let duplicate = input.next_if_eq(&'&').is_some();
-                    while input.next_if(|ch| matches!(ch, ' ' | '\t')).is_some() {}
-                    if matches!(input.peek(), None | Some('#')) {
-                        return Err("missing redirection target".into());
+            if let Some(fd) = redirect_fd(input)? {
+                while input.next_if(|ch| ch.is_ascii_digit()).is_some() {}
+                input.next(); // '>'
+                let duplicate = input.next_if_eq(&'&').is_some();
+                while input.next_if(|ch| matches!(ch, ' ' | '\t')).is_some() {}
+                if matches!(input.peek(), None | Some('#')) {
+                    return Err("missing redirection target".into());
+                }
+                command.redirects.push(Redirect {
+                    fd,
+                    target: word(input)?,
+                    duplicate,
+                });
+            } else {
+                if command.words.is_empty() {
+                    let name = head(input);
+                    if matches!(
+                        name.as_str(),
+                        "if" | "then"
+                            | "elif"
+                            | "else"
+                            | "fi"
+                            | "for"
+                            | "while"
+                            | "until"
+                            | "do"
+                            | "done"
+                            | "case"
+                            | "esac"
+                            | "select"
+                            | "function"
+                            | "!"
+                            | "[["
+                            | "]]"
+                            | "time"
+                    ) {
+                        return Err(ParseError::Invalid(format!(
+                            "unexpected or unsupported shell keyword: {name}"
+                        )));
                     }
-                    command.redirects.push(Redirect {
-                        fd,
-                        target: word(&mut input)?,
-                        duplicate,
-                    });
-                } else {
-                    if command.words.is_empty() {
-                        let head: String = input
-                            .clone()
-                            .take_while(|ch| {
-                                !matches!(ch, ' ' | '\t' | '\n' | ';' | '>' | '|' | '&')
-                            })
-                            .collect();
-                        if matches!(
-                            head.as_str(),
-                            "if" | "then"
-                                | "elif"
-                                | "else"
-                                | "fi"
-                                | "for"
-                                | "while"
-                                | "until"
-                                | "do"
-                                | "done"
-                                | "case"
-                                | "esac"
-                                | "select"
-                                | "function"
-                                | "!"
-                                | "[["
-                                | "]]"
-                                | "time"
-                        ) {
-                            return Err(ParseError::Invalid(format!(
-                                "unsupported shell keyword: {head}"
-                            )));
-                        }
-                    }
-                    command.words.push(word(&mut input)?);
                 }
+                command.words.push(word(input)?);
+            }
+        }
+        if command.words.is_empty() && command.redirects.is_empty() {
+            return if input.peek().is_none() {
+                Err(ParseError::Incomplete("missing pipeline command"))
+            } else {
+                Err("missing pipeline command or unexpected separator".into())
+            };
+        }
+        stages.push(command);
+        if input.next_if_eq(&'|').is_none() {
+            return Ok(stages);
+        }
+        if input.peek() == Some(&'|') {
+            return Err("logical OR is not supported".into());
+        }
+        loop {
+            skip_space(input);
+            if input.next_if_eq(&'\n').is_none() {
+                break;
             }
         }
     }
-    if !command.words.is_empty() || !command.redirects.is_empty() {
-        stages.push(command);
-        commands.push(stages);
-    } else if !stages.is_empty() {
-        return Err(ParseError::Incomplete("missing pipeline command"));
-    }
-    Ok(commands)
 }
 
 fn redirect_fd(input: &Source<'_>) -> ParseResult<Option<usize>> {
@@ -181,7 +295,7 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
     };
     let mut started = false;
     while let Some(&ch) = input.peek() {
-        if matches!(ch, ' ' | '\t' | '\n' | ';' | '>' | '|' | '&') {
+        if boundary(ch) {
             break;
         }
         input.next();

@@ -241,8 +241,10 @@ impl AgentShell<'_, '_> {
             chatgpt::Action::Run(command) | chatgpt::Action::Display(command) => command,
         };
         let pipeline = match self.invocation.parse(&command) {
-            Ok(mut commands) if commands.len() == 1 => commands.pop().unwrap(),
-            Ok(_) => return Ok(json!({"error": "expected one kwsh command or pipeline"})),
+            Ok(script) => match <[syntax::Statement; 1]>::try_from(script) {
+                Ok([syntax::Statement::Pipeline(pipeline)]) => pipeline,
+                _ => return Ok(json!({"error": "expected one kwsh command or pipeline"})),
+            },
             Err(error) => return Ok(json!({"error": error.message()})),
         };
         let prompt = crate::prompt::render(self.invocation, false, self.command_number);
@@ -378,7 +380,7 @@ fn ask(
                     redirects: Vec::new(),
                     background: false,
                 };
-                invocation.run(&[vec![command]], input);
+                invocation.run_pipeline(&[command], input);
             }
             show_answer(&answer);
             Ok(draft)

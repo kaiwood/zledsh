@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use crate::process;
 
-use crate::syntax::{self, Command, ParseError, Part, Redirect, Word};
+use crate::syntax::{self, Command, ParseError, Part, Redirect, Script, Statement, Word};
 
 pub(crate) struct Invocation<'a> {
     name: &'a str,
@@ -43,29 +43,55 @@ impl<'a> Invocation<'a> {
         }
     }
 
-    pub fn parse(&self, source: &str) -> Result<Vec<Vec<Command>>, ParseError> {
+    pub fn parse(&self, source: &str) -> Result<Script, ParseError> {
         let mut commands = syntax::parse(source)?;
-        for command in commands.iter_mut().flatten() {
-            let mut seen = HashSet::new();
-            while let Some(Word {
-                parts,
-                bare: true,
-                assignment: false,
-            }) = command.words.first()
-            {
-                let [Part::Literal(name)] = parts.as_slice() else {
-                    break;
-                };
-                let Some((name, value)) = self.aliases.get_key_value(name) else {
-                    break;
-                };
-                if !seen.insert(name) {
-                    break;
+        self.expand_aliases(&mut commands)?;
+        Ok(commands)
+    }
+
+    fn expand_aliases(&self, script: &mut Script) -> Result<(), ParseError> {
+        for statement in script {
+            match statement {
+                Statement::Pipeline(stages) => {
+                    for command in stages {
+                        self.expand_alias(command)?;
+                    }
                 }
-                command.words.splice(..1, alias_words(value)?);
+                Statement::If {
+                    branches,
+                    otherwise,
+                } => {
+                    for (condition, body) in branches {
+                        self.expand_aliases(condition)?;
+                        self.expand_aliases(body)?;
+                    }
+                    self.expand_aliases(otherwise)?;
+                }
             }
         }
-        Ok(commands)
+        Ok(())
+    }
+
+    fn expand_alias(&self, command: &mut Command) -> Result<(), ParseError> {
+        let mut seen = HashSet::new();
+        while let Some(Word {
+            parts,
+            bare: true,
+            assignment: false,
+        }) = command.words.first()
+        {
+            let [Part::Literal(name)] = parts.as_slice() else {
+                break;
+            };
+            let Some((name, value)) = self.aliases.get_key_value(name) else {
+                break;
+            };
+            if !seen.insert(name) {
+                break;
+            }
+            command.words.splice(..1, alias_words(value)?);
+        }
+        Ok(())
     }
 
     pub fn run_source(&mut self, source: &str, input: &mut impl BufRead) -> Result<(), String> {
@@ -96,7 +122,7 @@ impl<'a> Invocation<'a> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub fn run_agent_command(&mut self, pipeline: Vec<Command>) {
         self.agent_deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
-        self.run(&[pipeline], &mut io::empty());
+        self.run_pipeline(&pipeline, &mut io::empty());
         self.agent_deadline = None;
     }
 
@@ -111,175 +137,204 @@ impl<'a> Invocation<'a> {
         }
     }
 
-    pub fn run(&mut self, commands: &[Vec<Command>], input: &mut impl BufRead) {
+    pub fn run(&mut self, script: &[Statement], input: &mut impl BufRead) {
+        for statement in script {
+            if self.exited {
+                break;
+            }
+            match statement {
+                Statement::Pipeline(pipeline) => self.run_pipeline(pipeline, input),
+                Statement::If {
+                    branches,
+                    otherwise,
+                } => {
+                    let mut selected = otherwise;
+                    for (condition, body) in branches {
+                        self.run(condition, input);
+                        if self.exited {
+                            return;
+                        }
+                        if self.status == 0 {
+                            selected = body;
+                            break;
+                        }
+                    }
+                    if selected.is_empty() {
+                        self.status = 0;
+                    } else {
+                        self.run(selected, input);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn run_pipeline(&mut self, pipeline: &[Command], input: &mut impl BufRead) {
         let original = [Output::Stdout, Output::Stderr];
-        for pipeline in commands {
-            let background = pipeline.last().is_some_and(|command| command.background);
-            if background || pipeline.len() != 1 {
-                self.status = match self.pipeline(pipeline, background) {
-                    Ok(status) => status,
+        let background = pipeline.last().is_some_and(|command| command.background);
+        if background || pipeline.len() != 1 {
+            self.status = match self.pipeline(pipeline, background) {
+                Ok(status) => status,
+                Err(error) => {
+                    report(&original[1], &format!("pipeline: {error}"));
+                    1
+                }
+            };
+            return;
+        }
+        let command = &pipeline[0];
+        let mut output = original.clone();
+        if let Err(error) = self.redirect(&command.redirects, &mut output) {
+            report(&output[1], &error);
+            self.status = 1;
+            return;
+        }
+        if !command.words.is_empty() && command.words.iter().all(|word| word.assignment) {
+            self.status = 0;
+            for word in &command.words {
+                let fields = self.expand(word);
+                if let [field] = fields.as_slice() {
+                    self.assign(field);
+                } else {
+                    report(&output[1], "assignment must expand to one value");
+                    self.status = 2;
+                    break;
+                }
+            }
+            return;
+        }
+        let argv: Vec<_> = command
+            .words
+            .iter()
+            .flat_map(|word| self.expand(word))
+            .collect();
+        let Some((name, args)) = argv.split_first() else {
+            self.status = 0;
+            return;
+        };
+        if self.agent_command() && matches!(name.as_str(), "exit" | "fg" | "bg" | "wait") {
+            report(
+                &output[1],
+                "exit, fg, bg and wait must be submitted by the user",
+            );
+            self.status = 2;
+            return;
+        }
+        match name.as_str() {
+            "exit" => {
+                self.exited = true;
+                self.status = match args {
+                    [] => self.status,
+                    [arg] => match arg.parse::<i64>() {
+                        Ok(value) => value as u8,
+                        Err(_) => {
+                            report(&output[1], "exit: expected numeric status");
+                            2
+                        }
+                    },
+                    _ => {
+                        report(&output[1], "exit: too many arguments");
+                        2
+                    }
+                };
+            }
+            "cd" | "pwd" => {
+                let result = if name == "cd" {
+                    self.change_directory(args, &output[0])
+                } else if args.is_empty() {
+                    std::env::current_dir()
+                        .and_then(|path| output[0].write(&format!("{}\n", path.display())))
+                        .map_err(|error| error.to_string())
+                } else {
+                    Err("arguments are not supported".into())
+                };
+                self.status = match result {
+                    Ok(()) => 0,
                     Err(error) => {
-                        report(&original[1], &format!("pipeline: {error}"));
+                        report(&output[1], &format!("{name}: {error}"));
                         1
                     }
                 };
-                continue;
             }
-            let command = &pipeline[0];
-            let mut output = original.clone();
-            if let Err(error) = self.redirect(&command.redirects, &mut output) {
-                report(&output[1], &error);
-                self.status = 1;
-                continue;
-            }
-            if !command.words.is_empty() && command.words.iter().all(|word| word.assignment) {
+            "export" => {
                 self.status = 0;
-                for word in &command.words {
-                    let fields = self.expand(word);
-                    if let [field] = fields.as_slice() {
-                        self.assign(field);
-                    } else {
-                        report(&output[1], "assignment must expand to one value");
+                for arg in args {
+                    let name = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
+                    if !valid_name(name) {
+                        report(&output[1], "export: expected a variable name or assignment");
                         self.status = 2;
                         break;
                     }
+                    self.exported.insert(name.to_owned());
+                    self.assign(arg);
                 }
-                continue;
             }
-            let argv: Vec<_> = command
-                .words
-                .iter()
-                .flat_map(|word| self.expand(word))
-                .collect();
-            let Some((name, args)) = argv.split_first() else {
+            "unset" => {
                 self.status = 0;
-                continue;
-            };
-            if self.agent_command() && matches!(name.as_str(), "exit" | "fg" | "bg" | "wait") {
-                report(
-                    &output[1],
-                    "exit, fg, bg and wait must be submitted by the user",
-                );
-                self.status = 2;
-                continue;
+                for name in args.strip_prefix(&[String::from("-v")]).unwrap_or(args) {
+                    if !valid_name(name) {
+                        report(&output[1], "unset: expected a variable name");
+                        self.status = 2;
+                        break;
+                    }
+                    self.variables.remove(name);
+                    self.exported.remove(name);
+                    self.unset.insert(name.clone());
+                }
             }
-            match name.as_str() {
-                "exit" => {
-                    self.exited = true;
-                    self.status = match args {
-                        [] => self.status,
-                        [arg] => match arg.parse::<i64>() {
-                            Ok(value) => value as u8,
-                            Err(_) => {
-                                report(&output[1], "exit: expected numeric status");
-                                2
-                            }
-                        },
-                        _ => {
-                            report(&output[1], "exit: too many arguments");
-                            2
-                        }
-                    };
-                    return;
-                }
-                "cd" | "pwd" => {
-                    let result = if name == "cd" {
-                        self.change_directory(args, &output[0])
-                    } else if args.is_empty() {
-                        std::env::current_dir()
-                            .and_then(|path| output[0].write(&format!("{}\n", path.display())))
-                            .map_err(|error| error.to_string())
-                    } else {
-                        Err("arguments are not supported".into())
-                    };
-                    self.status = match result {
-                        Ok(()) => 0,
-                        Err(error) => {
-                            report(&output[1], &format!("{name}: {error}"));
-                            1
-                        }
-                    };
-                }
-                "export" => {
+            "alias" | "unalias" => {
+                if let Err(error) = self.update_aliases(name, args, &output[0]) {
+                    report(&output[1], &format!("{name}: {error}"));
+                    self.status = 1;
+                } else {
                     self.status = 0;
-                    for arg in args {
-                        let name = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
-                        if !valid_name(name) {
-                            report(&output[1], "export: expected a variable name or assignment");
-                            self.status = 2;
-                            break;
-                        }
-                        self.exported.insert(name.to_owned());
-                        self.assign(arg);
-                    }
                 }
-                "unset" => {
-                    self.status = 0;
-                    for name in args.strip_prefix(&[String::from("-v")]).unwrap_or(args) {
-                        if !valid_name(name) {
-                            report(&output[1], "unset: expected a variable name");
-                            self.status = 2;
-                            break;
-                        }
-                        self.variables.remove(name);
-                        self.exported.remove(name);
-                        self.unset.insert(name.clone());
-                    }
-                }
-                "alias" | "unalias" => {
-                    if let Err(error) = self.update_aliases(name, args, &output[0]) {
-                        report(&output[1], &format!("{name}: {error}"));
-                        self.status = 1;
-                    } else {
-                        self.status = 0;
-                    }
-                }
-                "read" => {
-                    self.status = match self.read(args, input) {
-                        Ok(complete) => u8::from(!complete),
-                        Err(error) => {
-                            report(&output[1], &format!("read: {error}"));
-                            1
-                        }
-                    };
-                }
-                "printf" => {
-                    self.status = match printf(args)
-                        .and_then(|text| output[0].write(&text).map_err(|e| e.to_string()))
-                    {
-                        Ok(()) => 0,
-                        Err(error) => {
-                            report(&output[1], &format!("printf: {error}"));
-                            1
-                        }
-                    };
-                }
-                #[cfg(any(target_os = "macos", target_os = "linux"))]
-                "fg" | "bg" | "jobs" | "wait" => {
-                    let jobs = self
-                        .foreground
-                        .get_or_insert_with(crate::foreground::Foreground::noninteractive);
-                    let selector = args.first().map(String::as_str);
-                    let result = if args.len() > 1 || (name == "jobs" && selector.is_some()) {
-                        Err(io::Error::other("unexpected job arguments"))
-                    } else {
-                        match name.as_str() {
-                            "fg" => jobs.resume(selector),
-                            "bg" => jobs.background(selector),
-                            "wait" => jobs.wait_background(selector),
-                            _ => jobs
-                                .listing()
-                                .and_then(|text| output[0].write(&text))
-                                .map(|()| 0),
-                        }
-                    };
-                    self.status = result.unwrap_or_else(|error| {
-                        report(&output[1], &format!("{name}: {error}"));
-                        if name == "wait" { 127 } else { 1 }
-                    });
-                }
-                _ => self.status = self.external(&argv, &output),
             }
+            "read" => {
+                self.status = match self.read(args, input) {
+                    Ok(complete) => u8::from(!complete),
+                    Err(error) => {
+                        report(&output[1], &format!("read: {error}"));
+                        1
+                    }
+                };
+            }
+            "printf" => {
+                self.status = match printf(args)
+                    .and_then(|text| output[0].write(&text).map_err(|e| e.to_string()))
+                {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        report(&output[1], &format!("printf: {error}"));
+                        1
+                    }
+                };
+            }
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            "fg" | "bg" | "jobs" | "wait" => {
+                let jobs = self
+                    .foreground
+                    .get_or_insert_with(crate::foreground::Foreground::noninteractive);
+                let selector = args.first().map(String::as_str);
+                let result = if args.len() > 1 || (name == "jobs" && selector.is_some()) {
+                    Err(io::Error::other("unexpected job arguments"))
+                } else {
+                    match name.as_str() {
+                        "fg" => jobs.resume(selector),
+                        "bg" => jobs.background(selector),
+                        "wait" => jobs.wait_background(selector),
+                        _ => jobs
+                            .listing()
+                            .and_then(|text| output[0].write(&text))
+                            .map(|()| 0),
+                    }
+                };
+                self.status = result.unwrap_or_else(|error| {
+                    report(&output[1], &format!("{name}: {error}"));
+                    if name == "wait" { 127 } else { 1 }
+                });
+            }
+            _ => self.status = self.external(&argv, &output),
         }
     }
 
@@ -674,9 +729,10 @@ pub(crate) fn is_builtin(name: &str) -> bool {
 
 fn alias_words(value: &str) -> Result<Vec<Word>, ParseError> {
     let mut parsed = syntax::parse(value)?;
-    if let [pipeline] = parsed.as_mut_slice() {
+    if let [Statement::Pipeline(pipeline)] = parsed.as_mut_slice() {
         if let [command] = pipeline.as_mut_slice() {
-            if command.redirects.is_empty()
+            if !command.background
+                && command.redirects.is_empty()
                 && !command.words.is_empty()
                 && command.words.iter().all(|word| !word.assignment)
             {
@@ -779,7 +835,10 @@ mod tests {
             invocation.foreground = Some(crate::foreground::Foreground::new().unwrap());
             let mut run = |source| {
                 let mut commands = crate::syntax::parse(source).ok().unwrap();
-                invocation.run_agent_command(commands.pop().unwrap());
+                let Some(Statement::Pipeline(pipeline)) = commands.pop() else {
+                    panic!("expected a pipeline")
+                };
+                invocation.run_agent_command(pipeline);
                 assert_eq!(invocation.status, 0, "{source}");
             };
             run("/usr/bin/touch foo.txt");
