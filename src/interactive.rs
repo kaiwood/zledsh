@@ -24,10 +24,10 @@ pub(crate) fn run(
 ) -> io::Result<u8> {
     if matching_identity() && invocation.variable("TERM").as_deref() != Some("dumb") {
         return transcript::run(|transcript| {
-            run_shell(invocation, input, connect_chatgpt, transcript)
+            run_shell(invocation, input, connect_chatgpt, transcript, None)
         });
     }
-    run_shell(invocation, input, connect_chatgpt, None)
+    run_shell(invocation, input, connect_chatgpt, None, None)
 }
 
 fn run_shell(
@@ -35,6 +35,7 @@ fn run_shell(
     input: &mut impl BufRead,
     connect_chatgpt: bool,
     mut transcript: Option<Transcript>,
+    session: Option<Arc<chatgpt::Session>>,
 ) -> io::Result<u8> {
     invocation.foreground = Some(Foreground::new()?);
     load_startup(invocation, input);
@@ -76,7 +77,7 @@ fn run_shell(
             }
         }
     } else {
-        None
+        session
     };
     let mut source = String::new();
     let mut history = History::new(invocation);
@@ -696,6 +697,8 @@ fn read_key_byte(input: &mut impl BufRead) -> io::Result<Option<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod hosted_pty;
 
     #[test]
     fn shell_tool_prints_before_execution_and_drafts_do_not_execute() {

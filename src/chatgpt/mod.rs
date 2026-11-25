@@ -106,11 +106,16 @@ impl Settings {
     }
 }
 
+#[cfg(test)]
+type FixtureResponse = fn(&serde_json::Value, &AtomicBool) -> Result<Reply>;
+
 pub struct Session {
     agent: ureq::Agent,
     home: PathBuf,
     pub model: String,
     reasoning_effort: Option<String>,
+    #[cfg(test)]
+    fixture: Option<FixtureResponse>,
 }
 
 impl Session {
@@ -146,11 +151,33 @@ impl Session {
             home: home.to_owned(),
             model,
             reasoning_effort: settings.reasoning_effort,
+            #[cfg(test)]
+            fixture: None,
         })
+    }
+
+    #[cfg(test)]
+    pub fn fixture(respond: FixtureResponse) -> Self {
+        Self {
+            agent: ureq::Agent::new_with_defaults(),
+            home: PathBuf::new(),
+            model: "fixture".into(),
+            reasoning_effort: None,
+            fixture: Some(respond),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn fixture_stream(stream: &str, cancelled: &AtomicBool) -> Result<Reply> {
+        parse_stream(stream.as_bytes(), cancelled)
     }
 
     pub fn respond(&self, turn: &Turn, cancelled: &AtomicBool) -> Result<Reply> {
         oauth::check_cancelled(cancelled)?;
+        #[cfg(test)]
+        if let Some(fixture) = self.fixture {
+            return fixture(&request_body(&self.model, None, &turn.input), cancelled);
+        }
         let token = access_token(&self.agent, &self.home, false, cancelled)?;
         oauth::check_cancelled(cancelled)?;
         let reply = self
