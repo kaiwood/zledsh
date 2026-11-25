@@ -36,6 +36,7 @@ pub(crate) enum Part {
         name: String,
         default: Option<Word>,
         if_empty: bool,
+        alternate: bool,
     },
 }
 
@@ -125,10 +126,20 @@ pub(crate) enum Statement {
         condition: Script,
         body: Script,
     },
+    Case {
+        word: Word,
+        clauses: Vec<(Vec<CasePattern>, Script)>,
+    },
     If {
         branches: Vec<(Script, Script)>,
         otherwise: Script,
     },
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) enum CasePattern {
+    Any,
+    Exact(Word),
 }
 
 pub(crate) fn parse(source: &str) -> ParseResult<Script> {
@@ -165,7 +176,7 @@ fn list(input: &mut Source<'_>, stops: &[&str], depth: usize) -> ParseResult<Scr
         if input.peek().is_none() {
             break;
         }
-        if input.peek() == Some(&')') && stops.contains(&")") {
+        if at_operator_stop(input, stops) {
             break;
         }
         let name = head(input);
@@ -174,7 +185,7 @@ fn list(input: &mut Source<'_>, stops: &[&str], depth: usize) -> ParseResult<Scr
         }
         let mut statement = and_or(input, depth)?;
         skip_space(input);
-        if input.peek() == Some(&')') && stops.contains(&")") {
+        if at_operator_stop(input, stops) {
             script.push(statement);
             break;
         }
@@ -193,6 +204,11 @@ fn list(input: &mut Source<'_>, stops: &[&str], depth: usize) -> ParseResult<Scr
         }
     }
     Ok(script)
+}
+
+fn at_operator_stop(input: &mut Source<'_>, stops: &[&str]) -> bool {
+    (stops.contains(&")") && input.peek() == Some(&')'))
+        || (stops.contains(&";;") && input.clone().take(2).eq([';', ';']))
 }
 
 fn and_or(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
@@ -239,7 +255,7 @@ fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
         skip_space(input);
     }
     let name = head(input);
-    let statement = if matches!(name.as_str(), "if" | "for" | "while" | "until") {
+    let statement = if matches!(name.as_str(), "if" | "for" | "while" | "until" | "case") {
         if depth >= 32 {
             return Err("compound commands nested too deeply".into());
         }
@@ -247,6 +263,7 @@ fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
         match name.as_str() {
             "if" => conditional(input, depth + 1)?,
             "for" => for_loop(input, depth + 1)?,
+            "case" => case_statement(input, depth + 1)?,
             _ => while_loop(input, depth + 1, name == "until")?,
         }
     } else if let Some(name) = function_header(input) {
@@ -392,6 +409,57 @@ fn while_loop(input: &mut Source<'_>, depth: usize, until: bool) -> ParseResult<
         until,
         condition: require_list(condition, "empty loop condition")?,
         body,
+    })
+}
+
+fn case_statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
+    skip_space(input);
+    if input.peek().is_none() {
+        return Err(ParseError::Incomplete("expected a case word"));
+    }
+    let subject = word(input)?;
+    skip_newlines(input);
+    expect_keyword(input, "in", "expected in after case word")?;
+    let mut clauses = Vec::new();
+    loop {
+        skip_newlines(input);
+        if head(input) == "esac" {
+            break;
+        }
+        if input.peek().is_none() {
+            return Err(ParseError::Incomplete("expected esac in case command"));
+        }
+        input.next_if_eq(&'(');
+        let mut patterns = Vec::new();
+        loop {
+            skip_space(input);
+            let pattern = if input.next_if_eq(&'*').is_some() {
+                CasePattern::Any
+            } else {
+                CasePattern::Exact(word(input)?)
+            };
+            patterns.push(pattern);
+            skip_space(input);
+            match input.next() {
+                Some('|') => continue,
+                Some(')') => break,
+                None => return Err(ParseError::Incomplete("expected ) after case pattern")),
+                _ => return Err("expected | or ) after case pattern".into()),
+            }
+        }
+        let body = list(input, &[";;", "esac"], depth)?;
+        clauses.push((patterns, body));
+        if at_operator_stop(input, &[";;"]) {
+            input.next();
+            input.next();
+        } else {
+            break;
+        }
+    }
+    expect_keyword(input, "esac", "expected esac in case command")?;
+    Ok(Statement::Case {
+        word: subject,
+        clauses,
     })
 }
 
@@ -610,6 +678,7 @@ fn parameter_at(input: &mut Source<'_>, word: &mut Word, depth: usize) -> ParseR
             name: input.next().unwrap().to_string(),
             default: None,
             if_empty: false,
+            alternate: false,
         },
         Some('@') => {
             input.next();
@@ -623,7 +692,8 @@ fn parameter_at(input: &mut Source<'_>, word: &mut Word, depth: usize) -> ParseR
                 variable_name(input).ok_or("unsupported braced parameter")?
             };
             let if_empty = input.next_if_eq(&':').is_some();
-            let default = if input.next_if_eq(&'-').is_some() {
+            let operator = input.next_if(|ch| matches!(ch, '-' | '+'));
+            let default = if operator.is_some() {
                 let mut value = Word::default();
                 while let Some(ch) = input.next_if(|ch| *ch != '}') {
                     match ch {
@@ -647,6 +717,7 @@ fn parameter_at(input: &mut Source<'_>, word: &mut Word, depth: usize) -> ParseR
                 name,
                 default,
                 if_empty,
+                alternate: operator == Some('+'),
             }
         }
         Some(ch) if ch.is_ascii_alphanumeric() || "_(*#?$!-".contains(*ch) => {
@@ -655,6 +726,7 @@ fn parameter_at(input: &mut Source<'_>, word: &mut Word, depth: usize) -> ParseR
                 name,
                 default: None,
                 if_empty: false,
+                alternate: false,
             }
         }
         _ => {

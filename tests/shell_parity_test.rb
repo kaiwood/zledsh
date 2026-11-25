@@ -273,6 +273,26 @@ class ShellParityTest < Minitest::Test
     assert_empty error
   end
 
+  def test_case_selects_the_first_match_and_expands_only_the_chosen_body
+    script = <<~'SH'
+      value=rehash
+      case "$value" in
+        shell|rehash) printf 'first';;
+        *) printf wrong > skipped;;
+      esac
+      printf ':%s' "$(case x in (x) printf yes;; esac)"
+      unset value
+      printf ':%s' "${value+x}"
+      value=
+      printf ':%s:%s' "${value+x}" "${value:+x}"
+    SH
+    output, error, status = capture(*COMMAND, "-c", script)
+    assert status.success?, error
+    assert_equal "first:yes::x:", output
+    assert_empty error
+    refute File.exist?(File.join(@work, "skipped"))
+  end
+
   def test_terminal
     executable, *args = COMMAND
     PTY.spawn(@env, [executable, executable], *args, **@spawn_options) do |reader, writer, pid|

@@ -8,7 +8,9 @@ use std::rc::Rc;
 
 use crate::process;
 
-use crate::syntax::{self, Command, ParseError, Part, Redirect, Script, Statement, Word};
+use crate::syntax::{
+    self, CasePattern, Command, ParseError, Part, Redirect, Script, Statement, Word,
+};
 
 pub(crate) struct Invocation<'a> {
     name: &'a str,
@@ -114,6 +116,11 @@ impl<'a> Invocation<'a> {
                 } => {
                     self.expand_aliases(condition)?;
                     self.expand_aliases(body)?;
+                }
+                Statement::Case { clauses, .. } => {
+                    for (_, body) in clauses {
+                        self.expand_aliases(body)?;
+                    }
                 }
                 Statement::If {
                     branches,
@@ -294,6 +301,14 @@ impl<'a> Invocation<'a> {
                     self.loop_depth -= 1;
                     self.status = last;
                 }
+                Statement::Case { word, clauses } => match self.select_case(word, clauses) {
+                    Ok(Some(body)) if !body.is_empty() => self.run_with_output(body, input, output),
+                    Ok(_) => self.status = 0,
+                    Err(error) => {
+                        report(&output[1], &error);
+                        self.status = 2;
+                    }
+                },
                 Statement::If {
                     branches,
                     otherwise,
@@ -317,6 +332,27 @@ impl<'a> Invocation<'a> {
                 }
             }
         }
+    }
+
+    fn select_case<'b>(
+        &self,
+        word: &Word,
+        clauses: &'b [(Vec<CasePattern>, Script)],
+    ) -> Result<Option<&'b Script>, String> {
+        let word = self.expand(word, &mut None)?.join(" ");
+        for (patterns, body) in clauses {
+            for pattern in patterns {
+                if match pattern {
+                    CasePattern::Any => true,
+                    CasePattern::Exact(pattern) => {
+                        self.expand(pattern, &mut None)?.join(" ") == word
+                    }
+                } {
+                    return Ok(Some(body));
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn interrupted(&self) -> bool {
@@ -1234,6 +1270,7 @@ impl<'a> Invocation<'a> {
                     name,
                     default,
                     if_empty,
+                    alternate,
                 } => {
                     let value = if name == "#" {
                         Some(self.args.len().to_string().into())
@@ -1246,10 +1283,13 @@ impl<'a> Invocation<'a> {
                     } else {
                         self.variable_os(name)
                     };
-                    if let Some(value) = value.filter(|value| !if_empty || !value.is_empty()) {
-                        field.push_str(&value.to_string_lossy());
-                    } else if let Some(value) = default {
-                        field.push_str(&self.expand(value, status)?.join(" "));
+                    let value = value.filter(|value| !if_empty || !value.is_empty());
+                    if value.is_some() == *alternate {
+                        if let Some(default) = default {
+                            field.push_str(&self.expand(default, status)?.join(" "));
+                        }
+                    } else if !alternate {
+                        field.push_str(&value.unwrap().to_string_lossy());
                     }
                 }
             }
