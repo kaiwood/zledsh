@@ -1,0 +1,7 @@
+# Cargo build artifacts
+/target/
+
+# Local development files
+.DS_Store
+*.rs.bk
+/PLAN.md
