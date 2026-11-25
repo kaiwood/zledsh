@@ -320,6 +320,34 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
+  def test_reverse_search_cycles_substring_matches_and_preserves_cancelled_draft
+    prompt = "history> "
+    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
+      %w[first-café second-café unrelated].each do |word|
+        writer.write("/bin/echo #{word}\n")
+        read_until(reader, "\r\n#{word}\r\n".b)
+        read_until(reader, prompt)
+      end
+      writer.write("/bin/echo draft\x12café")
+      read_until(reader, "(reverse-i-search)`café': /bin/echo second-café".b)
+      writer.write("\x07\n")
+      read_until(reader, "\r\ndraft\r\n")
+      read_until(reader, prompt)
+      writer.write("\x12café\x12")
+      read_until(reader, "(reverse-i-search)`café': /bin/echo first-café".b)
+      writer.write("\n")
+      read_until(reader, "\r\nfirst-café\r\n".b)
+      read_until(reader, prompt)
+      writer.write("history pause\n")
+      read_until(reader, "[private] #{prompt}")
+      writer.write("\x12/bin/echo private\n")
+      output = read_until(reader, "\r\nprivate\r\n")
+      refute_includes output, "reverse-i-search"
+      read_until(reader, "[private] #{prompt}")
+      exit_spike(reader, writer, pid)
+    end
+  end
+
   def test_assistant_changes_live_directory_but_does_not_execute_draft
     env = { "PROMPT" => "%1~> ", "TERM" => "xterm" }
     with_terminal(KWSH, env: env, prompt: "~> ", setup: ->(home) {

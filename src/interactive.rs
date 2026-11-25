@@ -602,12 +602,21 @@ fn read_keys(
     echo.flush()?;
     let mut line = draft.into_bytes();
     let mut cursor = line.len();
-    while let Some(byte) = read_editor_byte(input, shell)? {
-        let key = if byte == 27 {
-            read_escape(input)?
-        } else {
-            Key::Byte(byte)
-        };
+    while let Some(mut key) = read_key(input, shell)? {
+        if key == Key::Byte(18) && primary && !history.paused {
+            history.refresh();
+            let Some(result) = reverse_search(input, echo, history, shell)? else {
+                return Ok(Line::End);
+            };
+            if let Some((text, position)) = result.selected {
+                line = text.as_bytes().to_vec();
+                cursor = position;
+                history_index = None;
+            }
+            redraw(echo, prompt, &line, cursor)?;
+            echo.flush()?;
+            key = result.next;
+        }
         match key {
             Key::Byte(b'\n' | b'\r') => {
                 line.push(b'\n');
@@ -753,6 +762,93 @@ enum Key {
     Ignored,
 }
 
+fn read_key(input: &mut impl BufRead, shell: &mut Invocation<'_>) -> io::Result<Option<Key>> {
+    match read_editor_byte(input, shell)? {
+        Some(27) => read_escape(input).map(Some),
+        byte => Ok(byte.map(Key::Byte)),
+    }
+}
+
+struct SearchExit<'a> {
+    selected: Option<(&'a str, usize)>,
+    next: Key,
+}
+
+fn reverse_search<'a>(
+    input: &mut impl BufRead,
+    echo: &mut impl Write,
+    history: &'a History,
+    shell: &mut Invocation<'_>,
+) -> io::Result<Option<SearchExit<'a>>> {
+    let mut query = Vec::new();
+    let mut found = None;
+    let count = history.entries().len();
+    loop {
+        let prompt = format!("(reverse-i-search)`{}': ", display(&query));
+        let text = found.map_or("", |(_, text, _)| text);
+        redraw(echo, &prompt, text.as_bytes(), text.len())?;
+        echo.flush()?;
+        let Some(key) = read_key(input, shell)? else {
+            return Ok(None);
+        };
+        let bound = match key {
+            Key::Byte(18) => found.map_or(count, |(index, _, _)| index),
+            Key::Byte(8 | 127) => {
+                query.truncate(previous_char(&query, query.len()));
+                count
+            }
+            Key::Byte(byte @ (b' '..=b'~' | 128..=255)) => {
+                if query.len() >= 4096 {
+                    continue;
+                }
+                query.push(byte);
+                count
+            }
+            Key::Byte(12) => {
+                echo.write_all(b"\x1b[H\x1b[2J")?;
+                continue;
+            }
+            Key::Byte(7) => {
+                return Ok(Some(SearchExit {
+                    selected: None,
+                    next: Key::Ignored,
+                }));
+            }
+            Key::Byte(b'\n' | b'\r') if found.is_none() => {
+                return Ok(Some(SearchExit {
+                    selected: None,
+                    next: Key::Ignored,
+                }));
+            }
+            key => {
+                return Ok(Some(SearchExit {
+                    selected: found.map(|(_, text, position)| (text, position)),
+                    next: key,
+                }));
+            }
+        };
+        let pattern = std::str::from_utf8(&query)
+            .ok()
+            .filter(|text| !text.is_empty());
+        if let Some(pattern) = pattern {
+            let matched =
+                history
+                    .entries()
+                    .take(bound)
+                    .enumerate()
+                    .rev()
+                    .find_map(|(index, text)| {
+                        text.find(pattern).map(|position| (index, text, position))
+                    });
+            if key != Key::Byte(18) || matched.is_some() {
+                found = matched;
+            }
+        } else {
+            found = None;
+        }
+    }
+}
+
 fn read_escape(input: &mut impl BufRead) -> io::Result<Key> {
     match read_key_byte(input)? {
         Some(b'[' | b'O') => {}
@@ -878,18 +974,19 @@ fn next_word(line: &[u8], mut cursor: usize) -> usize {
     cursor
 }
 
-fn redraw(echo: &mut impl Write, prompt: &str, line: &[u8], cursor: usize) -> io::Result<()> {
-    fn display(bytes: &[u8]) -> String {
-        let mut visible = String::new();
-        for ch in String::from_utf8_lossy(bytes).chars() {
-            if ch.is_control() {
-                visible.extend(ch.escape_default());
-            } else {
-                visible.push(ch);
-            }
+fn display(bytes: &[u8]) -> String {
+    let mut visible = String::new();
+    for ch in String::from_utf8_lossy(bytes).chars() {
+        if ch.is_control() {
+            visible.extend(ch.escape_default());
+        } else {
+            visible.push(ch);
         }
-        visible
     }
+    visible
+}
+
+fn redraw(echo: &mut impl Write, prompt: &str, line: &[u8], cursor: usize) -> io::Result<()> {
     let before = display(&line[..cursor]);
     let after = display(&line[cursor..]);
     write!(echo, "\r\x1b[2K{prompt}{before}{after}")?;
