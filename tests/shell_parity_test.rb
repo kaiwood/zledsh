@@ -228,6 +228,32 @@ class ShellParityTest < Minitest::Test
     refute File.exist?(File.join(@work, "skipped"))
   end
 
+  def test_loops_keep_state_and_control_nested_iterations
+    script = <<~'SH'
+      for item; do
+        if [ "$item" = skip ]; then continue; fi
+        if [ "$item" = stop ]; then break; fi
+        printf '%s' "$item"
+      done
+      for outer in 1 2; do
+        for inner in x y; do
+          printf ':%s%s' "$outer" "$inner"
+          continue 2
+        done
+        printf wrong
+      done
+      value=start
+      while [ "$value" = start ]; do value=next; done
+      until [ "$value" = done ]; do value=done; done
+      for item in; do printf wrong; done
+      printf ':%s:%s' "$value" "$?"
+    SH
+    output, error, status = capture(*COMMAND, "-c", script, "fixture", "a b", "skip", "c", "stop", "wrong")
+    assert status.success?, error
+    assert_equal "a bc:1x:2x:done:0", output
+    assert_empty error
+  end
+
   def test_terminal
     executable, *args = COMMAND
     PTY.spawn(@env, [executable, executable], *args, **@spawn_options) do |reader, writer, pid|

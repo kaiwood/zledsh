@@ -19,12 +19,20 @@ pub(crate) struct Invocation<'a> {
     unset: HashSet<String>,
     substitution_depth: u8,
     eval_depth: u8,
+    loop_depth: usize,
+    loop_control: Option<LoopControl>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub foreground: Option<crate::foreground::Foreground>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     agent_deadline: Option<std::time::Instant>,
     pub status: u8,
     pub exited: bool,
+}
+
+#[derive(Clone, Copy)]
+enum LoopControl {
+    Break(usize),
+    Continue(usize),
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -51,6 +59,8 @@ impl<'a> Invocation<'a> {
             unset: HashSet::new(),
             substitution_depth: 0,
             eval_depth: 0,
+            loop_depth: 0,
+            loop_control: None,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             foreground: None,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -82,6 +92,13 @@ impl<'a> Invocation<'a> {
                     for (_, statement) in rest {
                         self.expand_aliases(std::slice::from_mut(statement))?;
                     }
+                }
+                Statement::For { body, .. } => self.expand_aliases(body)?,
+                Statement::While {
+                    condition, body, ..
+                } => {
+                    self.expand_aliases(condition)?;
+                    self.expand_aliases(body)?;
                 }
                 Statement::If {
                     branches,
@@ -138,7 +155,7 @@ impl<'a> Invocation<'a> {
                 Err(ParseError::Incomplete(_)) => continue,
                 Err(error) => return Err(error.message().to_owned()),
             }
-            if self.exited {
+            if self.interrupted() {
                 return Ok(());
             }
             pending.clear();
@@ -183,7 +200,7 @@ impl<'a> Invocation<'a> {
         output: &[Output; 2],
     ) {
         for statement in script {
-            if self.exited {
+            if self.interrupted() {
                 break;
             }
             match statement {
@@ -192,20 +209,71 @@ impl<'a> Invocation<'a> {
                 }
                 Statement::Negated(inner) => {
                     self.run_with_output(std::slice::from_ref(inner.as_ref()), input, output);
-                    if !self.exited {
+                    if !self.interrupted() {
                         self.status = u8::from(self.status == 0);
                     }
                 }
                 Statement::AndOr { first, rest } => {
                     self.run_with_output(std::slice::from_ref(first.as_ref()), input, output);
                     for (on_success, statement) in rest {
-                        if self.exited {
+                        if self.interrupted() {
                             break;
                         }
                         if (self.status == 0) == *on_success {
                             self.run_with_output(std::slice::from_ref(statement), input, output);
                         }
                     }
+                }
+                Statement::For { name, words, body } => {
+                    let items = match words {
+                        Some(words) => match self.expand_words(words, &mut None) {
+                            Ok(items) => items,
+                            Err(error) => {
+                                report(&output[1], &error);
+                                self.status = 2;
+                                continue;
+                            }
+                        },
+                        None => self.args.to_vec(),
+                    };
+                    self.status = 0;
+                    self.loop_depth += 1;
+                    for item in items {
+                        self.assign(&format!("{name}={item}"));
+                        self.run_with_output(body, input, output);
+                        if !self.next_iteration() {
+                            break;
+                        }
+                    }
+                    self.loop_depth -= 1;
+                }
+                Statement::While {
+                    until,
+                    condition,
+                    body,
+                } => {
+                    let mut last = 0;
+                    self.loop_depth += 1;
+                    loop {
+                        self.run_with_output(condition, input, output);
+                        if self.interrupted() {
+                            last = self.status;
+                            if self.next_iteration() {
+                                continue;
+                            }
+                            break;
+                        }
+                        if (self.status != 0) != *until {
+                            break;
+                        }
+                        self.run_with_output(body, input, output);
+                        last = self.status;
+                        if !self.next_iteration() {
+                            break;
+                        }
+                    }
+                    self.loop_depth -= 1;
+                    self.status = last;
                 }
                 Statement::If {
                     branches,
@@ -214,7 +282,7 @@ impl<'a> Invocation<'a> {
                     let mut selected = otherwise;
                     for (condition, body) in branches {
                         self.run_with_output(condition, input, output);
-                        if self.exited {
+                        if self.interrupted() {
                             return;
                         }
                         if self.status == 0 {
@@ -228,6 +296,28 @@ impl<'a> Invocation<'a> {
                         self.run_with_output(selected, input, output);
                     }
                 }
+            }
+        }
+    }
+
+    fn interrupted(&self) -> bool {
+        self.exited || self.loop_control.is_some()
+    }
+
+    fn next_iteration(&mut self) -> bool {
+        if self.exited {
+            return false;
+        }
+        match self.loop_control.take() {
+            None | Some(LoopControl::Continue(1)) => true,
+            Some(LoopControl::Break(1)) => false,
+            Some(LoopControl::Break(levels)) => {
+                self.loop_control = Some(LoopControl::Break(levels - 1));
+                false
+            }
+            Some(LoopControl::Continue(levels)) => {
+                self.loop_control = Some(LoopControl::Continue(levels - 1));
+                false
             }
         }
     }
@@ -320,6 +410,27 @@ impl<'a> Invocation<'a> {
         match name.as_str() {
             ":" | "true" => self.status = 0,
             "false" => self.status = 1,
+            "break" | "continue" => {
+                let count = match args {
+                    [] => Some(1),
+                    [arg] => arg.parse::<usize>().ok().filter(|&n| n > 0),
+                    _ => None,
+                };
+                if let Some(levels) = count.filter(|&n| n <= self.loop_depth) {
+                    self.loop_control = Some(if name == "break" {
+                        LoopControl::Break(levels)
+                    } else {
+                        LoopControl::Continue(levels)
+                    });
+                    self.status = 0;
+                } else {
+                    report(
+                        &output[1],
+                        &format!("{name}: expected a valid enclosing loop level"),
+                    );
+                    self.status = 2;
+                }
+            }
             "eval" => {
                 if self.eval_depth >= 32 {
                     report(&output[1], "eval: nesting too deep");
@@ -991,7 +1102,7 @@ impl<'a> Invocation<'a> {
 
 pub(crate) const BUILTINS: &[&str] = &[
     "exit", "cd", "pwd", "export", "unset", "read", "printf", "fg", "alias", "unalias", "jobs",
-    "bg", "wait", "command", ":", "true", "false", "eval",
+    "bg", "wait", "command", ":", "true", "false", "eval", "break", "continue",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {

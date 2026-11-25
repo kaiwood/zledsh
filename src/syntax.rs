@@ -108,6 +108,16 @@ pub(crate) enum Statement {
         first: Box<Statement>,
         rest: Vec<(bool, Statement)>,
     },
+    For {
+        name: String,
+        words: Option<Vec<Word>>,
+        body: Script,
+    },
+    While {
+        until: bool,
+        condition: Script,
+        body: Script,
+    },
     If {
         branches: Vec<(Script, Script)>,
         otherwise: Script,
@@ -221,12 +231,17 @@ fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
         input.next();
         skip_space(input);
     }
-    let statement = if head(input) == "if" {
+    let name = head(input);
+    let statement = if matches!(name.as_str(), "if" | "for" | "while" | "until") {
         if depth >= 32 {
             return Err("compound commands nested too deeply".into());
         }
-        input.by_ref().take(2).count();
-        conditional(input, depth + 1)?
+        input.by_ref().take(name.len()).count();
+        match name.as_str() {
+            "if" => conditional(input, depth + 1)?,
+            "for" => for_loop(input, depth + 1)?,
+            _ => while_loop(input, depth + 1, name == "until")?,
+        }
     } else {
         Statement::Pipeline(pipeline(input)?)
     };
@@ -290,6 +305,63 @@ fn conditional(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
     Ok(Statement::If {
         branches,
         otherwise,
+    })
+}
+
+fn loop_body(input: &mut Source<'_>, depth: usize) -> ParseResult<Script> {
+    expect_keyword(input, "do", "expected do in loop")?;
+    let body = list(input, &["done"], depth)?;
+    expect_keyword(input, "done", "expected done in loop")?;
+    require_list(body, "empty loop body")
+}
+
+fn for_loop(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
+    skip_space(input);
+    if input.peek().is_none() {
+        return Err(ParseError::Incomplete("expected for variable"));
+    }
+    let name = variable_name(input).ok_or("expected a variable name after for")?;
+    if input
+        .peek()
+        .is_some_and(|&ch| !matches!(ch, ' ' | '\t' | ';' | '\n'))
+    {
+        return Err("invalid for variable name".into());
+    }
+    skip_space(input);
+    let words = if head(input) == "in" {
+        input.by_ref().take(2).count();
+        let mut words = Vec::new();
+        loop {
+            skip_space(input);
+            match input.peek() {
+                None | Some(';' | '\n') => break,
+                _ => words.push(word(input)?),
+            }
+        }
+        Some(words)
+    } else {
+        None
+    };
+    match input.next() {
+        None => return Err(ParseError::Incomplete("expected do in for loop")),
+        Some(';' | '\n') => {}
+        _ => return Err("expected a separator before do".into()),
+    }
+    skip_newlines(input);
+    Ok(Statement::For {
+        name,
+        words,
+        body: loop_body(input, depth)?,
+    })
+}
+
+fn while_loop(input: &mut Source<'_>, depth: usize, until: bool) -> ParseResult<Statement> {
+    let condition = list(input, &["do"], depth)?;
+    let body = loop_body(input, depth)?;
+    Ok(Statement::While {
+        until,
+        condition: require_list(condition, "empty loop condition")?,
+        body,
     })
 }
 
@@ -408,6 +480,9 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
             '$' if input.peek() == Some(&'(') => {
                 let split = !word.assignment;
                 substitution(input, &mut word, split)?;
+            }
+            '[' if !started && input.peek().is_none_or(|&ch| boundary(ch)) => {
+                literal(&mut word, ch)
             }
             '<' | '(' | '{' | '}' | '`' | '$' | '*' | '?' | '[' | '~' => {
                 return Err(ParseError::Invalid(format!(
