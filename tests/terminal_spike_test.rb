@@ -245,6 +245,19 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
+  def test_word_motion_and_clear_screen_keep_the_draft_editable
+    prompt = "move> "
+    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
+      writer.write("printf '<%s>\\n' one café\ebpré-\ef-fin\x0c")
+      read_until(reader, "\e[H\e[2J")
+      read_until(reader, "#{prompt}printf '<%s>\\n' one pré-café-fin".b)
+      writer.write("\n")
+      read_until(reader, "\r\n<one>\r\n<pré-café-fin>\r\n".b)
+      read_until(reader, prompt)
+      exit_spike(reader, writer, pid)
+    end
+  end
+
   def test_rbenv_bootstrap_loads_and_completes_subcommands_and_values
     prompt = "rbenv> "
     env = { "PROMPT" => prompt, "TERM" => "xterm", "ENV" => nil }

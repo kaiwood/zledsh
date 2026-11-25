@@ -633,6 +633,7 @@ fn read_keys(
                     .map_or(line.len(), |offset| cursor + offset.max(1));
                 line.drain(cursor..end);
             }
+            Key::Byte(12) => echo.write_all(b"\x1b[H\x1b[2J")?,
             Key::Byte(21) => {
                 line.drain(..cursor);
                 cursor = 0;
@@ -651,6 +652,8 @@ fn read_keys(
             Key::Byte(5) | Key::End => cursor = line.len(),
             Key::Byte(2) | Key::Left => cursor = previous_char(&line, cursor),
             Key::Byte(6) | Key::Right => cursor = next_char(&line, cursor),
+            Key::PreviousWord => cursor = previous_word(&line, cursor),
+            Key::NextWord => cursor = next_word(&line, cursor),
             Key::Paste => match read_paste(input)? {
                 Paste::Text(bytes) => {
                     let len = bytes.len();
@@ -742,6 +745,8 @@ enum Key {
     Down,
     Left,
     Right,
+    PreviousWord,
+    NextWord,
     Home,
     End,
     Paste,
@@ -749,8 +754,11 @@ enum Key {
 }
 
 fn read_escape(input: &mut impl BufRead) -> io::Result<Key> {
-    if !matches!(read_key_byte(input)?, Some(b'[' | b'O')) {
-        return Ok(Key::Ignored);
+    match read_key_byte(input)? {
+        Some(b'[' | b'O') => {}
+        Some(b'b' | b'B') => return Ok(Key::PreviousWord),
+        Some(b'f' | b'F') => return Ok(Key::NextWord),
+        _ => return Ok(Key::Ignored),
     }
     let mut sequence = [0; 16];
     for index in 0..sequence.len() {
@@ -835,6 +843,39 @@ fn next_char(line: &[u8], cursor: usize) -> usize {
         index += 1;
     }
     index
+}
+
+fn is_word_char(bytes: &[u8]) -> bool {
+    std::str::from_utf8(bytes)
+        .ok()
+        .and_then(|text| text.chars().next())
+        .is_some_and(char::is_alphanumeric)
+}
+
+fn previous_word(line: &[u8], mut cursor: usize) -> usize {
+    for word in [false, true] {
+        while cursor > 0 {
+            let start = previous_char(line, cursor);
+            if is_word_char(&line[start..cursor]) != word {
+                break;
+            }
+            cursor = start;
+        }
+    }
+    cursor
+}
+
+fn next_word(line: &[u8], mut cursor: usize) -> usize {
+    for word in [false, true] {
+        while cursor < line.len() {
+            let end = next_char(line, cursor);
+            if is_word_char(&line[cursor..end]) != word {
+                break;
+            }
+            cursor = end;
+        }
+    }
+    cursor
 }
 
 fn redraw(echo: &mut impl Write, prompt: &str, line: &[u8], cursor: usize) -> io::Result<()> {
