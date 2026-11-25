@@ -26,6 +26,8 @@ For `rbenv shell` and Tab completion, use `eval "$(rbenv init - bash)"` instead 
 
 Run a script with `kwsh ./setup.kwsh arg1 arg2`. The script path becomes `$0`; its arguments become `$1`, `$2`, and so on. The script need not be executable, and its commands can still read from stdin. Use `kwsh -- script-name` if the name starts with `-`. To read the script itself from stdin and pass it arguments, use `kwsh -s arg1 arg2 < setup.kwsh`.
 
+Use `kwsh -i` to force interactive input even on a pipe. It loads startup files, prints prompts, and keeps reading after a syntax error. Raw editing and terminal job control still require a terminal.
+
 Use the same syntax in your startup files, `kwsh -c`, redirected stdin, or at the prompt. `&&` and `||` short-circuit, and `!` reverses a pipeline’s exit status. `for`, `while`, and `until` support `break` and `continue`. Basic `case` supports exact patterns, `|` alternatives, and a `*` catch-all. Functions declared as `name() { ...; }` support positional arguments, `local`, `shift`, and `return` for standalone calls, not pipeline stages.
 
 `$(...)` captures stdout in an isolated `kwsh` process. Quote it to keep the result as one argument. `eval`, `.` and `source` execute native `kwsh` syntax in the current shell. For example, `. ./setup.kwsh` loads a script into an existing session. This is a scripting subset, not a Bash interpreter: backticks, arithmetic expansion, and associative arrays are unsupported.

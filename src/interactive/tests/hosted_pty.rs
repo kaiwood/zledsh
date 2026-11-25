@@ -19,6 +19,7 @@ fn hosted_turns_in_a_real_terminal() {
                     false,
                     transcript,
                     Some(Arc::new(session)),
+                    true,
                 )
                 .unwrap(),
             ));

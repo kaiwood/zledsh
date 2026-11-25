@@ -25,10 +25,17 @@ pub(crate) fn run(
 ) -> io::Result<u8> {
     if matching_identity() && invocation.variable("TERM").as_deref() != Some("dumb") {
         return transcript::run(|transcript| {
-            run_shell(invocation, input, connect_chatgpt, transcript, None)
+            run_shell(invocation, input, connect_chatgpt, transcript, None, true)
         });
     }
-    run_shell(invocation, input, connect_chatgpt, None, None)
+    run_shell(invocation, input, connect_chatgpt, None, None, true)
+}
+
+pub(crate) fn run_without_terminal(
+    invocation: &mut Invocation<'_>,
+    input: &mut impl BufRead,
+) -> io::Result<u8> {
+    run_shell(invocation, input, false, None, None, false)
 }
 
 fn run_shell(
@@ -37,13 +44,16 @@ fn run_shell(
     connect_chatgpt: bool,
     mut transcript: Option<Transcript>,
     session: Option<Arc<chatgpt::Session>>,
+    terminal: bool,
 ) -> io::Result<u8> {
-    invocation.foreground = Some(Foreground::new()?);
+    if terminal {
+        invocation.foreground = Some(Foreground::new()?);
+    }
     load_startup(invocation, input);
     if invocation.exited {
         return Ok(invocation.status);
     }
-    let mut editor = if invocation.variable("TERM").as_deref() != Some("dumb") {
+    let mut editor = if terminal && invocation.variable("TERM").as_deref() != Some("dumb") {
         Some(EditorTerminal::new()?)
     } else {
         None
@@ -86,7 +96,9 @@ fn run_shell(
     let mut last_command = None;
     let mut conversation = chatgpt::Conversation::default();
     while !invocation.exited {
-        invocation.foreground.as_mut().unwrap().refresh()?;
+        if let Some(foreground) = &mut invocation.foreground {
+            foreground.refresh()?;
+        }
         let mut prompt = crate::prompt::render(invocation, !source.is_empty(), history.next);
         if history.paused {
             prompt.insert_str(0, "[private] ");
@@ -414,7 +426,7 @@ fn matching_identity() -> bool {
     unsafe { libc::getuid() == libc::geteuid() && libc::getgid() == libc::getegid() }
 }
 
-fn load_startup(invocation: &mut Invocation<'_>, input: &mut impl BufRead) {
+pub(crate) fn load_startup(invocation: &mut Invocation<'_>, input: &mut impl BufRead) {
     // Do not run user startup files if real and effective IDs differ.
     if !matching_identity() {
         return;

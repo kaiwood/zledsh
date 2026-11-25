@@ -126,3 +126,44 @@ fn missing_named_script_fails_without_reading_stdin_as_commands() {
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("missing.kwsh"));
 }
+
+// POSIX sh: OPTIONS (-i) and Shell Language 2.8.1 (interactive syntax errors).
+#[test]
+fn forced_interactive_pipe_loads_startup_and_recovers_without_terminal_editing() {
+    let dir = tempfile::tempdir().unwrap();
+    let startup = dir.path().join("env.kwsh");
+    std::fs::write(&startup, "startup=from-env\n").unwrap();
+    std::fs::write(dir.path().join(".kwshrc"), "local_rc=from-rc\n").unwrap();
+    let output = run_with_pipe(
+        Command::new(env!("CARGO_BIN_EXE_kwsh"))
+            .env("HOME", dir.path())
+            .env("ENV", &startup)
+            .env("PROMPT", "ready> ")
+            .env("TERM", "xterm")
+            .env_remove("KWARD_CONFIG_PATH")
+            .env_remove("HISTFILE")
+            .args(["-i", "-s", "arg"]),
+        b"printf '%s:%s:%s\\n' \"$local_rc\" \"$startup\" \"$1\"\n)\nprintf 'after:%s\\n' \"$?\"\n",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"from-rc:from-env:arg\nafter:2\n");
+    assert!(output.stderr.starts_with(b"ready> ready> kwsh:"));
+    assert!(!output.stderr.contains(&27), "unexpected terminal controls");
+}
+
+#[test]
+fn forced_interactive_command_string_loads_startup_without_prompts() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".kwshrc"), "startup=loaded\n").unwrap();
+    let output = run_with_pipe(
+        Command::new(env!("CARGO_BIN_EXE_kwsh"))
+            .env("HOME", dir.path())
+            .env_remove("ENV")
+            .env_remove("KWARD_CONFIG_PATH")
+            .args(["-ic", "printf '%s' \"$startup\""]),
+        b"",
+    );
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"loaded");
+    assert!(output.stderr.is_empty());
+}
