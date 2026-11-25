@@ -45,7 +45,7 @@ impl Terminal {
         // The child claims the tty before exec, so it cannot read it too early.
         // The closure runs after fork and uses only async-signal-safe calls.
         unsafe {
-            command.pre_exec(enter_child);
+            command.pre_exec(|| enter_child(TTY));
         }
         let child = command.spawn()?;
         self.finish(Job(Some(child.id() as libc::pid_t)))

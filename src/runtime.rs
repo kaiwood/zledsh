@@ -343,12 +343,20 @@ impl<'a> Invocation<'a> {
         #[cfg(target_os = "macos")]
         let result = match &mut self.foreground {
             Some(tty) => tty.run(self.agent_deadline, || {
-                launch(Some(crate::terminal_modes::enter_child))
+                use std::os::fd::AsRawFd;
+
+                // pre_exec runs after stdio is installed, so fd 0 may be
+                // /dev/null. Keep the original tty open just until exec.
+                let terminal = process::duplicate(crate::terminal_modes::TTY)?;
+                launch(Some(move || {
+                    crate::terminal_modes::enter_child(terminal.as_raw_fd())
+                }))
             }),
             None => launch(None).and_then(|mut child| child.wait().map(process::status_code)),
         };
         #[cfg(not(target_os = "macos"))]
-        let result = launch(None).and_then(|mut child| child.wait().map(process::status_code));
+        let result = launch(None::<fn() -> io::Result<()>>)
+            .and_then(|mut child| child.wait().map(process::status_code));
         match result {
             Ok(status) => status,
             Err(error) => {
@@ -575,5 +583,51 @@ fn printf(args: &[String]) -> Result<String, String> {
         if args.len() == 0 || !consumes_arguments {
             return Ok(output);
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_external_command_keeps_terminal_handoff_with_null_stdin() {
+        const CHILD: &str = "KWSH_TEST_AGENT_FOREGROUND_CHILD";
+        const TEST: &str =
+            "runtime::tests::agent_external_command_keeps_terminal_handoff_with_null_stdin";
+        if std::env::var_os(CHILD).is_some() {
+            let mut invocation = Invocation::new("kwsh", &[]);
+            invocation.foreground = Some(crate::foreground::Foreground::new().unwrap());
+            let mut run = |source| {
+                let mut commands = crate::syntax::parse(source).ok().unwrap();
+                invocation.run_agent_command(commands.pop().unwrap());
+                assert_eq!(invocation.status, 0, "{source}");
+            };
+            run("/usr/bin/touch foo.txt");
+            run("/bin/test ! -t 0 > output 2>&1");
+            assert!(crate::foreground::Foreground::new().is_ok());
+            return;
+        }
+
+        // Re-exec this test on a controlling PTY, not Cargo's stdin.
+        let work = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new("/usr/bin/script")
+            .args(["-q", "/dev/null"])
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", TEST])
+            .env(CHILD, "1")
+            .current_dir(work.path())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("1 passed")
+                && std::fs::metadata(work.path().join("foo.txt")).is_ok_and(|file| file.len() == 0),
+            "{}{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            std::fs::read_to_string(work.path().join("output")).unwrap_or_default(),
+        );
     }
 }

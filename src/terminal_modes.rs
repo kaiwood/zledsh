@@ -38,7 +38,7 @@ fn retry(mut call: impl FnMut() -> libc::c_int) -> io::Result<()> {
 
 // The caller is the newly created process group leader, in pre_exec. All
 // operations here and in give_terminal are async-signal-safe.
-pub(crate) fn enter_child() -> io::Result<()> {
+pub(crate) fn enter_child(tty: libc::c_int) -> io::Result<()> {
     for signal in [
         libc::SIGTTOU,
         libc::SIGTTIN,
@@ -50,10 +50,14 @@ pub(crate) fn enter_child() -> io::Result<()> {
             return Err(io::Error::last_os_error());
         }
     }
-    give_terminal(unsafe { libc::getpgrp() })
+    give_terminal_on(tty, unsafe { libc::getpgrp() })
 }
 
 pub(crate) fn give_terminal(group: libc::pid_t) -> io::Result<()> {
+    give_terminal_on(TTY, group)
+}
+
+fn give_terminal_on(tty: libc::c_int, group: libc::pid_t) -> io::Result<()> {
     // A background group can reclaim or hand off the tty without stopping
     // itself. Keep SIGTTOU blocked only for this operation.
     let mut block = MaybeUninit::uninit();
@@ -66,7 +70,7 @@ pub(crate) fn give_terminal(group: libc::pid_t) -> io::Result<()> {
             block.as_ptr(),
             old.as_mut_ptr(),
         ))?;
-        let result = cvt(libc::tcsetpgrp(TTY, group));
+        let result = cvt(libc::tcsetpgrp(tty, group));
         let restore = cvt(libc::sigprocmask(
             libc::SIG_SETMASK,
             old.as_ptr(),

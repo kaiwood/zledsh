@@ -33,7 +33,7 @@ pub(crate) fn spawn(
     path: &OsStr,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
     [stdin, stdout, stderr]: [Stdio; 3],
-    foreground: Option<fn() -> io::Result<()>>,
+    foreground: Option<impl Fn() -> io::Result<()> + Send + Sync + 'static>,
 ) -> io::Result<Child> {
     let exec = Exec::new(argv, path, environment)?;
 
@@ -46,7 +46,7 @@ pub(crate) fn spawn(
     }
     unsafe {
         command.pre_exec(move || {
-            if let Some(enter) = foreground {
+            if let Some(enter) = &foreground {
                 enter()?;
             }
             Err(exec.invoke())
