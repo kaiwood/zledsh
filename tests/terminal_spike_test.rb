@@ -237,7 +237,80 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
+  def test_assistant_receives_last_command_and_live_cwd_but_not_private_context
+    with_context_provider do |reader, writer, pid, home, prompt|
+      writer.write("cd moved\n")
+      read_until(reader, prompt)
+      command = %q(/bin/sh -c 'echo visible; echo fixture-failure >&2; echo fd-nine >&9; exit 23')
+      writer.write("#{command}\n")
+      read_until(reader, "\r\nvisible\r\nfixture-failure\r\n")
+      read_until(reader, prompt)
+
+      request = assistant_request(reader, writer, home, prompt)
+      assert_equal "inspect context", request.fetch("instruction")
+      assert_equal({
+        "cwd" => File.realpath(File.join(home, "moved")),
+        "last_command" => command,
+        "last_output" => "visible\nfixture-failure\n",
+        "exit_status" => 23
+      }, request.fetch("context"))
+      assert_equal "fd-nine\n", File.read(File.join(home, "fd9"))
+
+      writer.write("history pause\n")
+      read_until(reader, "[private] #{prompt}")
+      writer.write("printf 'private-data\\n'\n")
+      read_until(reader, "\r\nprivate-data\r\n")
+      read_until(reader, "[private] #{prompt}")
+      writer.write("history resume\n")
+      read_until(reader, prompt)
+      context = assistant_request(reader, writer, home, prompt).fetch("context")
+      assert_nil context.fetch("last_command")
+      assert_nil context.fetch("last_output")
+      assert_nil context.fetch("exit_status")
+      exit_spike(reader, writer, pid)
+    end
+  end
+
+  def test_assistant_omits_output_from_a_job_that_reads_terminal_input
+    with_context_provider do |reader, writer, pid, home, prompt|
+      command = %q(/bin/sh -c 'echo waiting-for-input; read text; echo "$text"')
+      writer.write("#{command}\n")
+      read_until(reader, "\r\nwaiting-for-input\r\n")
+      writer.write("typed-data\n")
+      read_until(reader, "typed-data\r\ntyped-data\r\n")
+      read_until(reader, prompt)
+      context = assistant_request(reader, writer, home, prompt).fetch("context")
+      assert_nil context.fetch("last_output")
+      assert_equal command, context.fetch("last_command")
+      assert_equal 0, context.fetch("exit_status")
+      exit_spike(reader, writer, pid)
+    end
+  end
+
   private
+
+  def with_context_provider
+    prompt = "context> "
+    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt, setup: ->(home) {
+      provider = File.join(home, "provider")
+      File.write(provider, <<~'SCRIPT')
+        #!/bin/sh
+        /bin/cat > "$HOME/request.json"
+        printf '%s\n' '{"answer":"request captured"}'
+      SCRIPT
+      File.chmod(0o700, provider)
+      File.write(File.join(home, ".kwshrc"), 'KWSH_ASSISTANT_EXEC="$HOME/provider"' + "\n")
+    }) do |reader, writer, pid, home|
+      yield reader, writer, pid, home, prompt
+    end
+  end
+
+  def assistant_request(reader, writer, home, prompt)
+    writer.write("? inspect context\n")
+    read_until(reader, "\r\nrequest captured\r\n")
+    read_until(reader, prompt)
+    JSON.parse(File.read(File.join(home, "request.json")))
+  end
 
   def with_spike(&block)
     with_terminal(SPIKE, env: {}, prompt: PROMPT, &block)

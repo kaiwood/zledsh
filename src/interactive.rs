@@ -9,16 +9,32 @@ use std::{env, fs};
 
 use crate::history::History;
 use crate::runtime::Invocation;
+use crate::shell_context::{LastCommand, ShellContext};
 use crate::syntax::{self, ParseError};
 use crate::terminal_modes::{
     TTY, attributes, editor_attributes, restore_attributes, set_attributes,
 };
+use crate::transcript::{self, Transcript};
 use crate::{chatgpt, foreground::Foreground};
 
 pub(crate) fn run(
     invocation: &mut Invocation<'_>,
     input: &mut impl BufRead,
     connect_chatgpt: bool,
+) -> io::Result<u8> {
+    if matching_identity() && invocation.variable("TERM").as_deref() != Some("dumb") {
+        return transcript::run(|transcript| {
+            run_shell(invocation, input, connect_chatgpt, transcript)
+        });
+    }
+    run_shell(invocation, input, connect_chatgpt, None)
+}
+
+fn run_shell(
+    invocation: &mut Invocation<'_>,
+    input: &mut impl BufRead,
+    connect_chatgpt: bool,
+    mut transcript: Option<Transcript>,
 ) -> io::Result<u8> {
     invocation.foreground = Some(Foreground::new()?);
     load_startup(invocation, input);
@@ -65,21 +81,25 @@ pub(crate) fn run(
     let mut source = String::new();
     let mut history = History::new(invocation);
     let mut pending_draft = String::new();
+    let mut last_command = None;
     while !invocation.exited {
         let mut prompt = crate::prompt::render(invocation, !source.is_empty(), history.next);
         if history.paused {
             prompt.insert_str(0, "[private] ");
         }
         let primary = source.is_empty();
+        let mut input_pending = false;
         if let Some(editor) = &editor {
-            match editor.read_line(
+            let (line, pending) = editor.read_line(
                 input,
                 &prompt,
                 &mut history,
                 primary,
                 invocation,
                 std::mem::take(&mut pending_draft),
-            )? {
+            )?;
+            input_pending = pending;
+            match line {
                 Line::Submitted(line) => source.push_str(&line),
                 Line::Cancelled => {
                     source.clear();
@@ -102,12 +122,13 @@ pub(crate) fn run(
             } else if instruction.trim().is_empty() {
                 eprintln!("Shell prompt instruction required after ?");
             } else if let Some(editor) = &editor {
+                let context = ShellContext::current(last_command.as_ref());
                 let program = invocation.variable("KWSH_ASSISTANT_EXEC");
                 if let Some(program) = program.filter(|_| chatgpt.is_none() && !connect_chatgpt) {
                     pending_draft = ask(
                         editor,
                         Path::new(&program),
-                        instruction.trim(),
+                        (instruction.trim(), &context),
                         invocation,
                         input,
                     )?;
@@ -132,7 +153,7 @@ pub(crate) fn run(
                                 cancelled,
                             )?),
                         };
-                        let answer = session.answer(&question, cancelled)?;
+                        let answer = session.answer(&question, &context, cancelled)?;
                         Ok((session, answer))
                     })? {
                         Some(Ok((session, answer))) => {
@@ -152,18 +173,43 @@ pub(crate) fn run(
             continue;
         }
         if history.control(&source) {
+            if history.paused {
+                last_command = None;
+            }
             source.clear();
             continue;
         }
-        match syntax::parse(&source) {
+        let parsed = syntax::parse(&source);
+        if matches!(parsed, Err(ParseError::Incomplete(_))) {
+            continue;
+        }
+        let record_context =
+            !history.paused && !matches!(&parsed, Ok(commands) if commands.is_empty());
+        let mut capture = transcript
+            .as_mut()
+            .filter(|_| record_context && editor.is_some());
+        if let Some(capture) = &mut capture {
+            capture.begin(input_pending)?;
+        }
+        match parsed {
             Ok(commands) => invocation.run(&commands, input),
-            Err(ParseError::Incomplete(_)) => continue,
             Err(error) => {
                 eprintln!("kwsh: {}", error.message());
                 invocation.status = 2;
             }
         }
+        let output = match capture {
+            Some(capture) => capture.finish()?,
+            None => None,
+        };
         history.record(&source);
+        if record_context {
+            last_command = Some(LastCommand {
+                source: source.trim_end_matches('\n').to_owned(),
+                output,
+                status: invocation.status,
+            });
+        }
         source.clear();
     }
     if !source.is_empty() {
@@ -176,13 +222,13 @@ pub(crate) fn run(
 fn ask(
     editor: &EditorTerminal,
     program: &Path,
-    instruction: &str,
+    (instruction, context): (&str, &ShellContext),
     invocation: &mut Invocation<'_>,
     input: &mut impl BufRead,
 ) -> io::Result<String> {
     use crate::assistant::Turn;
     set_attributes(&editor.editor)?;
-    let result = crate::assistant::turn(program, instruction);
+    let result = crate::assistant::turn(program, instruction, context);
     set_attributes(&editor.original)?;
     match result {
         Ok(Turn::Reply {
@@ -314,14 +360,15 @@ impl EditorTerminal {
         primary: bool,
         shell: &Invocation<'_>,
         draft: String,
-    ) -> io::Result<Line> {
+    ) -> io::Result<(Line, bool)> {
         set_attributes(&self.editor)?;
         let mut stderr = io::stderr().lock();
         let line = write_prompt(&mut stderr, prompt)
             .and_then(|()| read_keys(input, &mut stderr, prompt, history, primary, shell, draft));
+        let pending = transcript::input_pending();
         // Builtins such as `read` run with the user's cooked settings.
         set_attributes(&self.original)?;
-        line
+        Ok((line?, pending))
     }
 }
 

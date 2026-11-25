@@ -14,9 +14,13 @@ mod process;
 #[cfg(target_os = "macos")]
 mod prompt;
 mod runtime;
+#[cfg(target_os = "macos")]
+mod shell_context;
 mod syntax;
 #[cfg(target_os = "macos")]
 mod terminal_modes;
+#[cfg(target_os = "macos")]
+mod transcript;
 
 use std::{
     env,

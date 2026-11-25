@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::shell_context::ShellContext;
+
 const MAX_REPLY: usize = 64 * 1024;
 
 pub enum Turn {
@@ -17,15 +19,18 @@ pub enum Turn {
     },
 }
 
-pub fn turn(program: &Path, instruction: &str) -> io::Result<Turn> {
+pub fn turn(program: &Path, instruction: &str, context: &ShellContext) -> io::Result<Turn> {
     if !program.is_absolute() || instruction.len() > 8192 {
         return Err(io::Error::other(
             "provider must be an absolute path and instructions at most 8192 bytes",
         ));
     }
     let mut request = tempfile::tempfile()?;
-    serde_json::to_writer(&mut request, &json!({ "instruction": instruction }))
-        .map_err(io::Error::other)?;
+    serde_json::to_writer(
+        &mut request,
+        &json!({ "instruction": instruction, "context": context }),
+    )
+    .map_err(io::Error::other)?;
     request.write_all(b"\n")?;
     request.rewind()?;
     let mut child = Provider(
