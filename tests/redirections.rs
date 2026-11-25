@@ -62,6 +62,68 @@ fn failed_input_redirect_skips_the_command_and_leaves_input_intact() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("missing"));
 }
 
+// POSIX Shell Command Language 2.7.2 and 2.7.3.
+#[test]
+fn append_preserves_existing_output_and_force_write_replaces_it() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("log"), "first\n").unwrap();
+    fs::write(dir.path().join("replace"), "old longer contents\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+        .current_dir(dir.path())
+        .args([
+            "-c",
+            r#"printf 'second\n' >>log
+printf 'third\n' 2>>log 1>&2
+printf 'created\n' >>new-log
+printf 'replacement\n' >|replace
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        fs::read(dir.path().join("log")).unwrap(),
+        b"first\nsecond\nthird\n"
+    );
+    assert_eq!(fs::read(dir.path().join("new-log")).unwrap(), b"created\n");
+    assert_eq!(
+        fs::read(dir.path().join("replace")).unwrap(),
+        b"replacement\n"
+    );
+}
+
+// POSIX Shell Command Language 2.7.7.
+#[test]
+fn read_write_redirection_creates_files_without_truncating_existing_files() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("data"), "head\ntail\n").unwrap();
+    fs::write(dir.path().join("output"), "old suffix\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+        .current_dir(dir.path())
+        .args([
+            "-c",
+            r#"edit() { read -r head; /bin/sh -c 'printf "new!" >&0'; }
+edit <>data
+printf '<%s>\n' "$head"
+printf '%s' new 1<>output
+: <>created
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(output.stdout, b"<head>\n");
+    assert!(output.stderr.is_empty());
+    assert_eq!(fs::read(dir.path().join("data")).unwrap(), b"head\nnew!\n");
+    assert_eq!(
+        fs::read(dir.path().join("output")).unwrap(),
+        b"new suffix\n"
+    );
+    assert!(fs::read(dir.path().join("created")).unwrap().is_empty());
+}
+
 // POSIX Shell Command Language 2.7.4.
 #[test]
 fn here_document_quotes_and_tab_stripping_control_expansion() {

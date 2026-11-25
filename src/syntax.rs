@@ -33,7 +33,10 @@ struct PendingHere {
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub(crate) enum RedirectKind {
     Read,
+    ReadWrite,
     Write,
+    ForceWrite,
+    Append,
     Duplicate,
 }
 
@@ -663,6 +666,15 @@ fn redirect(input: &mut Source<'_>) -> ParseResult<Option<Redirect>> {
         digits.push(digit);
     }
     let (fd, kind) = match ahead.next() {
+        Some('<') if ahead.next_if_eq(&'>').is_some() => {
+            let fd = match digits.as_str() {
+                "" | "0" => 0,
+                "1" => 1,
+                "2" => 2,
+                _ => return Err("only descriptors 0, 1 and 2 are supported".into()),
+            };
+            (fd, RedirectKind::ReadWrite)
+        }
         Some('<') => {
             if !matches!(digits.as_str(), "" | "0") {
                 return Err("only input descriptor 0 is supported".into());
@@ -691,10 +703,11 @@ fn redirect(input: &mut Source<'_>) -> ParseResult<Option<Redirect>> {
                 "2" => 2,
                 _ => return Err("only output descriptors 1 and 2 are supported".into()),
             };
-            let kind = if ahead.next_if_eq(&'&').is_some() {
-                RedirectKind::Duplicate
-            } else {
-                RedirectKind::Write
+            let kind = match ahead.next_if(|ch| matches!(ch, '&' | '>' | '|')) {
+                Some('&') => RedirectKind::Duplicate,
+                Some('>') => RedirectKind::Append,
+                Some('|') => RedirectKind::ForceWrite,
+                _ => RedirectKind::Write,
             };
             (fd, kind)
         }

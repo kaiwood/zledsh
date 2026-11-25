@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 use std::os::fd::OwnedFd;
 use std::process::Stdio;
@@ -1581,7 +1581,8 @@ impl<'a> Invocation<'a> {
                     continue;
                 }
             };
-            if self.agent_command() && matches!(kind, RedirectKind::Read) {
+            if self.agent_command() && matches!(kind, RedirectKind::Read | RedirectKind::ReadWrite)
+            {
                 return Err("input redirection must be submitted by the user".into());
             }
             let targets = self.expand(target, status)?;
@@ -1593,9 +1594,28 @@ impl<'a> Invocation<'a> {
                     *input =
                         Some(File::open(target).map_err(|error| format!("{target}: {error}"))?);
                 }
-                RedirectKind::Write => {
-                    let file =
-                        File::create(target).map_err(|error| format!("{target}: {error}"))?;
+                RedirectKind::ReadWrite => {
+                    let file = OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .truncate(false)
+                        .open(target)
+                        .map_err(|error| format!("{target}: {error}"))?;
+                    if fd == 0 {
+                        *input = Some(file);
+                    } else {
+                        output[fd - 1] = Output::File(Rc::new(file));
+                    }
+                }
+                RedirectKind::Write | RedirectKind::ForceWrite | RedirectKind::Append => {
+                    let file = match kind {
+                        RedirectKind::Append => {
+                            OpenOptions::new().append(true).create(true).open(target)
+                        }
+                        _ => File::create(target),
+                    }
+                    .map_err(|error| format!("{target}: {error}"))?;
                     output[fd - 1] = Output::File(Rc::new(file));
                 }
                 RedirectKind::Duplicate => {
