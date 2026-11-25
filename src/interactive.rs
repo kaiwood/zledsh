@@ -27,13 +27,22 @@ pub(crate) fn run(
     };
     let mut source = String::new();
     let mut history = History::new(invocation);
+    let mut pending_draft = String::new();
     while !invocation.exited {
         let mut prompt = crate::prompt::render(invocation, kward, !source.is_empty(), history.next);
         if kward && history.paused {
             prompt.insert_str(0, "[private] ");
         }
+        let primary = source.is_empty();
         if let Some(editor) = &editor {
-            match editor.read_line(input, &prompt, &mut history, source.is_empty(), invocation)? {
+            match editor.read_line(
+                input,
+                &prompt,
+                &mut history,
+                primary,
+                invocation,
+                std::mem::take(&mut pending_draft),
+            )? {
                 Line::Submitted(line) => source.push_str(&line),
                 Line::Cancelled => {
                     source.clear();
@@ -47,6 +56,30 @@ pub(crate) fn run(
             if input.read_line(&mut source)? == 0 {
                 break;
             }
+        }
+        if let Some(instruction) = source.strip_prefix('?').filter(|_| kward && primary) {
+            if history.paused {
+                eprintln!(
+                    "Shell agent unavailable while history is paused. Use history resume first."
+                );
+            } else if instruction.trim().is_empty() {
+                eprintln!("Shell prompt instruction required after ?");
+            } else if let Some((editor, program)) = editor
+                .as_ref()
+                .zip(invocation.variable("KWSH_ASSISTANT_EXEC"))
+            {
+                pending_draft = ask(
+                    editor,
+                    Path::new(&program),
+                    instruction.trim(),
+                    invocation,
+                    input,
+                )?;
+            } else {
+                eprintln!("kwsh: assistant requires a configured provider and line editor");
+            }
+            source.clear();
+            continue;
         }
         if kward && history.control(&source) {
             source.clear();
@@ -68,6 +101,56 @@ pub(crate) fn run(
         return Ok(2);
     }
     Ok(invocation.status)
+}
+
+fn ask(
+    editor: &EditorTerminal,
+    program: &Path,
+    instruction: &str,
+    invocation: &mut Invocation<'_>,
+    input: &mut impl BufRead,
+) -> io::Result<String> {
+    use crate::assistant::Turn;
+    set_attributes(&editor.editor)?;
+    let result = crate::assistant::turn(program, instruction);
+    set_attributes(&editor.original)?;
+    match result {
+        Ok(Turn::Reply {
+            answer,
+            draft,
+            directory,
+        }) => {
+            if !directory.is_empty() {
+                let command = syntax::Command {
+                    words: ["cd", &directory]
+                        .into_iter()
+                        .map(|text| syntax::Word {
+                            parts: vec![syntax::Part::Literal(text.into())],
+                            assignment: false,
+                        })
+                        .collect(),
+                    redirects: Vec::new(),
+                };
+                invocation.run(&[vec![command]], input);
+            }
+            if !answer.is_empty() {
+                let safe: String = answer
+                    .chars()
+                    .filter(|ch| !ch.is_control() || *ch == '\n')
+                    .collect();
+                println!("{safe}");
+            }
+            Ok(draft)
+        }
+        Ok(Turn::Cancelled) => {
+            eprintln!("^C\nturn cancelled");
+            Ok(String::new())
+        }
+        Err(error) => {
+            eprintln!("kwsh: assistant: {error}");
+            Ok(String::new())
+        }
+    }
 }
 
 fn load_startup(invocation: &mut Invocation<'_>, input: &mut impl BufRead, kward: bool) {
@@ -146,11 +229,12 @@ impl EditorTerminal {
         history: &mut History,
         primary: bool,
         shell: &Invocation<'_>,
+        draft: String,
     ) -> io::Result<Line> {
         set_attributes(&self.editor)?;
         let mut stderr = io::stderr().lock();
         let line = write_prompt(&mut stderr, prompt)
-            .and_then(|()| read_keys(input, &mut stderr, prompt, history, primary, shell));
+            .and_then(|()| read_keys(input, &mut stderr, prompt, history, primary, shell, draft));
         // Builtins such as `read` run with the user's cooked settings.
         set_attributes(&self.original)?;
         line
@@ -181,10 +265,13 @@ fn read_keys(
     history: &mut History,
     primary: bool,
     shell: &Invocation<'_>,
+    draft: String,
 ) -> io::Result<Line> {
     let mut cursor = None;
-    let mut draft = Vec::new();
-    let mut line = Vec::new();
+    let mut saved_draft = Vec::new();
+    echo.write_all(draft.as_bytes())?;
+    echo.flush()?;
+    let mut line = draft.into_bytes();
     let mut byte = [0];
     loop {
         match input.read(&mut byte) {
@@ -246,7 +333,7 @@ fn read_keys(
                 }
                 if direction == b'A' && cursor.is_none() {
                     history.refresh();
-                    draft.clone_from(&line);
+                    saved_draft.clone_from(&line);
                 }
                 let size = history.entries().len();
                 if direction == b'A' {
@@ -258,7 +345,7 @@ fn read_keys(
                 }
                 line = cursor
                     .and_then(|index| history.entries().nth(index))
-                    .map_or_else(|| draft.clone(), |text| text.as_bytes().to_vec());
+                    .map_or_else(|| saved_draft.clone(), |text| text.as_bytes().to_vec());
                 redraw(echo, prompt, &line)?;
             }
             b' '..=b'~' | 128..=255 | b'\t' => {

@@ -1,4 +1,6 @@
 #[cfg(target_os = "macos")]
+mod assistant;
+#[cfg(target_os = "macos")]
 mod completion;
 #[cfg(target_os = "macos")]
 mod foreground;

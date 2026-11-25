@@ -197,6 +197,58 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
+  def test_assistant_changes_live_directory_but_does_not_execute_draft
+    binary = File.expand_path("../target/debug/kward", __dir__)
+    env = { "PROMPT" => "%1~> ", "TERM" => "xterm" }
+    with_terminal(binary, "shell", env: env, prompt: "~> ", setup: ->(home) {
+      provider = File.join(home, "provider")
+      File.write(provider, <<~'SCRIPT')
+        #!/bin/sh
+        read -r request
+        case "$request" in
+          *private-request*) touch private-request-sent ;;
+          *waiting*) echo "$$" > waiting.pid; exec /bin/sleep 60 ;;
+          *) printf '%s\n' '{"directory":"moved","draft":"printf draft > marker"}' ;;
+        esac
+      SCRIPT
+      File.chmod(0o700, provider)
+      File.write(File.join(home, ".kwshrc"), 'KWSH_ASSISTANT_EXEC="$HOME/provider"' + "\n")
+    }) do |reader, writer, pid, home|
+      writer.write("history pause\n")
+      read_until(reader, "[private] ~> ")
+      writer.write("? private-request\n")
+      read_until(reader, "Shell agent unavailable while history is paused.")
+      read_until(reader, "[private] ~> ")
+      refute File.exist?(File.join(home, "private-request-sent"))
+      writer.write("history resume\n")
+      read_until(reader, "~> ")
+
+      writer.write("? waiting\n")
+      provider_pid = Timeout.timeout(TIMEOUT) do
+        path = File.join(home, "waiting.pid")
+        loop do
+          value = File.read(path).strip if File.exist?(path)
+          break Integer(value) if value && !value.empty?
+          sleep 0.01
+        end
+      end
+      writer.write("\x03")
+      read_until(reader, "turn cancelled\r\n")
+      read_until(reader, "~> ")
+      assert_raises(Errno::ESRCH) { Process.kill(0, provider_pid) }
+
+      writer.write("? make a draft\n")
+      read_until(reader, "moved> printf draft > marker")
+      marker = File.join(home, "moved", "marker")
+      refute File.exist?(marker)
+      writer.write("-edited\n")
+      read_until(reader, "moved> ")
+      assert_equal "draft", File.read(marker + "-edited")
+      refute File.exist?(marker)
+      exit_spike(reader, writer, pid)
+    end
+  end
+
   private
 
   def with_spike(&block)
