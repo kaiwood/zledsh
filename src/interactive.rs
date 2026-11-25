@@ -229,10 +229,10 @@ impl AgentShell<'_, '_> {
                 *self.draft = command;
                 return Ok(json!({"prepared": true, "executed": false}));
             }
-            chatgpt::Action::Run(_) if !self.draft.is_empty() => {
+            chatgpt::Action::Run(_) | chatgpt::Action::Display(_) if !self.draft.is_empty() => {
                 return Ok(json!({"error": "the prepared draft must be submitted by the user"}));
             }
-            chatgpt::Action::Run(command) => command,
+            chatgpt::Action::Run(command) | chatgpt::Action::Display(command) => command,
         };
         let pipeline = match syntax::parse(&command) {
             Ok(mut commands) if commands.len() == 1 => commands.pop().unwrap(),
@@ -248,7 +248,7 @@ impl AgentShell<'_, '_> {
         }
         self.invocation.run_agent_command(pipeline);
         let output = match &mut self.transcript {
-            Some(capture) => capture.finish()?,
+            Some(capture) => capture.finish_agent()?,
             None => None,
         };
         let status = self.invocation.status;

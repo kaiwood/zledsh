@@ -24,7 +24,15 @@ impl Transcript {
     }
 
     pub fn finish(&mut self) -> io::Result<Option<String>> {
-        self.0.write_all(b"f")?;
+        self.finish_with(b"f")
+    }
+
+    pub fn finish_agent(&mut self) -> io::Result<Option<String>> {
+        self.finish_with(b"l")
+    }
+
+    fn finish_with(&mut self, request: &[u8; 1]) -> io::Result<Option<String>> {
+        self.0.write_all(request)?;
         let mut len = [0; 4];
         self.0.read_exact(&mut len)?;
         let len = u32::from_be_bytes(len) as usize;
@@ -91,6 +99,7 @@ fn relay(
     let mut output = io::stdout().lock();
     let mut control = channel.as_raw_fd();
     let mut capture = None;
+    let mut at_line_start = true;
     let mut pending = Vec::new();
     let mut buf = [0; CHUNK];
     loop {
@@ -119,7 +128,7 @@ fn relay(
             }
         }
         if poll[0].revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0
-            && !drain(&mut master, &mut output, &mut capture)?
+            && !drain(&mut master, &mut output, &mut capture, &mut at_line_start)?
         {
             return Ok(0);
         }
@@ -130,13 +139,20 @@ fn relay(
             } else {
                 // Drain before acknowledging either boundary: prompts and editor
                 // echo stay outside the snapshot, even on very fast commands.
-                drain(&mut master, &mut output, &mut capture)?;
+                drain(&mut master, &mut output, &mut capture, &mut at_line_start)?;
                 match buf[0] {
                     b'b' | b's' => {
                         capture = (buf[0] == b'b' && pending.is_empty()).then(Vec::new);
                         channel.write_all(b"\0")?;
                     }
-                    b'f' => {
+                    b'f' | b'l' => {
+                        // Separate the next prompt or answer from command output
+                        // without adding a newline to the captured bytes.
+                        if buf[0] == b'l' && !at_line_start {
+                            output.write_all(b"\r\n")?;
+                            output.flush()?;
+                            at_line_start = true;
+                        }
                         let snapshot = capture.take().unwrap_or_default();
                         channel.write_all(&(snapshot.len() as u32).to_be_bytes())?;
                         channel.write_all(&snapshot)?;
@@ -172,6 +188,7 @@ fn drain(
     master: &mut File,
     output: &mut impl Write,
     capture: &mut Option<Vec<u8>>,
+    at_line_start: &mut bool,
 ) -> io::Result<bool> {
     let mut buf = [0; CHUNK];
     for _ in 0..64 {
@@ -185,6 +202,7 @@ fn drain(
         let bytes = &buf[..count];
         output.write_all(bytes)?;
         output.flush()?;
+        *at_line_start = bytes.ends_with(b"\n");
         if let Some(snapshot) = capture {
             if snapshot.len() + count > LIMIT {
                 *capture = None;
@@ -320,6 +338,56 @@ fn wait(pid: libc::pid_t, flags: libc::c_int) -> io::Result<Option<u8>> {
 #[cfg(test)]
 mod tests {
     use super::plain_text;
+
+    #[test]
+    fn agent_output_with_or_without_a_final_newline_leaves_the_prompt_on_its_own_line() {
+        use super::*;
+        use std::process::{Command, Stdio};
+
+        const CHILD: &str = "KWSH_TEST_AGENT_OUTPUT_CHILD";
+        const TEST: &str = "transcript::tests::agent_output_with_or_without_a_final_newline_leaves_the_prompt_on_its_own_line";
+        if std::env::var_os(CHILD).is_some() {
+            let status = run(|transcript| {
+                let mut transcript = transcript.unwrap();
+                let mut stdout = io::stdout().lock();
+                for text in ["bar", "baz\n"] {
+                    transcript.begin(false)?;
+                    stdout.write_all(text.as_bytes())?;
+                    stdout.flush()?;
+                    assert_eq!(transcript.finish_agent()?.as_deref(), Some(text));
+                    writeln!(stdout, "next prompt")?;
+                }
+                stdout.flush()?;
+                // The forked shell exits here; only the relay returns to the test harness.
+                std::process::exit(0)
+            })
+            .unwrap();
+            assert_eq!(status, 0);
+            return;
+        }
+
+        let mut child = Command::new("/usr/bin/script")
+            .args(["-q", "/dev/null"])
+            .arg(std::env::current_exe().unwrap())
+            .args(["--exact", TEST, "--nocapture"])
+            .env(CHILD, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let _keep_input_open = child.stdin.take().unwrap();
+        let result = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        assert!(
+            result.status.success() && stdout.contains("1 passed"),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains("bar\r\nnext prompt\r\nbaz\r\nnext prompt\r\n"),
+            "{stdout}"
+        );
+    }
 
     #[test]
     fn retains_plain_and_styled_output_but_not_terminal_screen_updates() {
