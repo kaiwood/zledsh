@@ -254,6 +254,25 @@ class ShellParityTest < Minitest::Test
     assert_empty error
   end
 
+  def test_functions_restore_locals_and_arguments_and_work_inside_substitution
+    script = <<~'SH'
+      value=outside
+      show() {
+        local value="${1:-fallback}"
+        if [ "$#" -gt 0 ]; then shift; fi
+        printf '%s:%s' "$value" "$#"
+        return 7
+        printf wrong
+      }
+      reply=$(show 'two words' extra)
+      printf '%s:%s:%s:%s' "$?" "$reply" "$value" "$1"
+    SH
+    output, error, status = capture(*COMMAND, "-c", script, "fixture", "caller")
+    assert status.success?, error
+    assert_equal "7:two words:1:outside:caller", output
+    assert_empty error
+  end
+
   def test_terminal
     executable, *args = COMMAND
     PTY.spawn(@env, [executable, executable], *args, **@spawn_options) do |reader, writer, pid|

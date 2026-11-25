@@ -15,18 +15,27 @@ pub(crate) struct Invocation<'a> {
     args: Vec<String>,
     variables: HashMap<String, String>,
     aliases: HashMap<String, String>,
+    functions: HashMap<String, Script>,
     exported: HashSet<String>,
     unset: HashSet<String>,
     substitution_depth: u8,
     script_depth: u8,
     loop_depth: usize,
     loop_control: Option<LoopControl>,
+    locals: Vec<HashMap<String, SavedVariable>>,
+    returned: bool,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub foreground: Option<crate::foreground::Foreground>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     agent_deadline: Option<std::time::Instant>,
     pub status: u8,
     pub exited: bool,
+}
+
+struct SavedVariable {
+    value: Option<String>,
+    exported: bool,
+    unset: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -42,6 +51,7 @@ struct Substitution {
     args: Vec<String>,
     variables: HashMap<String, String>,
     aliases: HashMap<String, String>,
+    functions: HashMap<String, Script>,
     exported: HashSet<String>,
     unset: HashSet<String>,
     depth: u8,
@@ -55,12 +65,15 @@ impl<'a> Invocation<'a> {
             args: args.to_vec(),
             variables: HashMap::new(),
             aliases: HashMap::new(),
+            functions: HashMap::new(),
             exported: HashSet::new(),
             unset: HashSet::new(),
             substitution_depth: 0,
             script_depth: 0,
             loop_depth: 0,
             loop_control: None,
+            locals: Vec::new(),
+            returned: false,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             foreground: None,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -93,7 +106,9 @@ impl<'a> Invocation<'a> {
                         self.expand_aliases(std::slice::from_mut(statement))?;
                     }
                 }
-                Statement::For { body, .. } => self.expand_aliases(body)?,
+                Statement::For { body, .. } | Statement::Function { body, .. } => {
+                    self.expand_aliases(body)?
+                }
                 Statement::While {
                     condition, body, ..
                 } => {
@@ -224,6 +239,10 @@ impl<'a> Invocation<'a> {
                         }
                     }
                 }
+                Statement::Function { name, body } => {
+                    self.functions.insert(name.clone(), body.clone());
+                    self.status = 0;
+                }
                 Statement::For { name, words, body } => {
                     let items = match words {
                         Some(words) => match self.expand_words(words, &mut None) {
@@ -301,11 +320,11 @@ impl<'a> Invocation<'a> {
     }
 
     fn interrupted(&self) -> bool {
-        self.exited || self.loop_control.is_some()
+        self.exited || self.returned || self.loop_control.is_some()
     }
 
     fn next_iteration(&mut self) -> bool {
-        if self.exited {
+        if self.exited || self.returned {
             return false;
         }
         match self.loop_control.take() {
@@ -380,10 +399,12 @@ impl<'a> Invocation<'a> {
             }
         };
         let mut argv = argv.as_slice();
+        let mut bypass_functions = false;
         while let [prefix, rest @ ..] = argv {
             if prefix != "command" {
                 break;
             }
+            bypass_functions = true;
             match rest {
                 [flag, names @ ..] if flag == "-v" => {
                     self.status = self.describe_commands(names, &output);
@@ -412,6 +433,15 @@ impl<'a> Invocation<'a> {
             self.status = 2;
             return;
         }
+        if !bypass_functions && self.functions.contains_key(name) {
+            if self.agent_command() {
+                report(&output[1], "shell functions must be submitted by the user");
+                self.status = 2;
+            } else {
+                self.call_function(name, args, input, &output);
+            }
+            return;
+        }
         match name.as_str() {
             ":" | "true" => self.status = 0,
             "false" => self.status = 1,
@@ -432,6 +462,40 @@ impl<'a> Invocation<'a> {
                     report(
                         &output[1],
                         &format!("{name}: expected a valid enclosing loop level"),
+                    );
+                    self.status = 2;
+                }
+            }
+            "local" => {
+                self.status = self.set_locals(args, &output[1]);
+            }
+            "shift" => {
+                let count = match args {
+                    [] => Some(1),
+                    [arg] => arg.parse::<usize>().ok(),
+                    _ => None,
+                };
+                if let Some(count) = count.filter(|&n| n <= self.args.len()) {
+                    self.args.drain(..count);
+                    self.status = 0;
+                } else {
+                    report(&output[1], "shift: expected a valid argument count");
+                    self.status = 1;
+                }
+            }
+            "return" => {
+                let code = match args {
+                    [] => Some(self.status),
+                    [arg] => arg.parse::<i64>().ok().map(|n| n as u8),
+                    _ => None,
+                };
+                if let Some(code) = code.filter(|_| !self.locals.is_empty()) {
+                    self.status = code;
+                    self.returned = true;
+                } else {
+                    report(
+                        &output[1],
+                        "return: expected a function and an optional numeric status",
                     );
                     self.status = 2;
                 }
@@ -583,6 +647,72 @@ impl<'a> Invocation<'a> {
         }
     }
 
+    fn call_function(
+        &mut self,
+        name: &str,
+        args: &[String],
+        input: &mut impl BufRead,
+        output: &[Output; 2],
+    ) {
+        if self.script_depth >= 32 {
+            report(&output[1], &format!("{name}: nesting too deep"));
+            self.status = 2;
+            return;
+        }
+        let body = self.functions[name].clone();
+        let previous = std::mem::replace(&mut self.args, args.to_vec());
+        self.locals.push(HashMap::new());
+        self.script_depth += 1;
+        self.run_with_output(&body, input, output);
+        self.script_depth -= 1;
+        for (name, saved) in self.locals.pop().unwrap() {
+            if let Some(value) = saved.value {
+                self.variables.insert(name.clone(), value);
+            } else {
+                self.variables.remove(&name);
+            }
+            if saved.unset {
+                self.unset.insert(name.clone());
+            } else {
+                self.unset.remove(&name);
+            }
+            if saved.exported {
+                self.exported.insert(name);
+            } else {
+                self.exported.remove(&name);
+            }
+        }
+        self.returned = false;
+        self.args = previous;
+    }
+
+    fn set_locals(&mut self, args: &[String], output: &Output) -> u8 {
+        if self.locals.is_empty() {
+            report(output, "local: only available in a function");
+            return 2;
+        }
+        for arg in args {
+            let (name, value) = arg.split_once('=').unwrap_or((arg, ""));
+            if !valid_name(name) {
+                report(output, "local: expected a variable name or assignment");
+                return 2;
+            }
+            let saved = SavedVariable {
+                value: self.variables.get(name).cloned(),
+                exported: self.exported.contains(name),
+                unset: self.unset.contains(name),
+            };
+            self.locals
+                .last_mut()
+                .unwrap()
+                .entry(name.into())
+                .or_insert(saved);
+            self.variables.insert(name.into(), value.into());
+            self.unset.remove(name);
+        }
+        0
+    }
+
     fn run_nested(
         &mut self,
         name: &str,
@@ -689,7 +819,7 @@ impl<'a> Invocation<'a> {
         for name in names {
             let description = if let Some(alias) = self.aliases.get(name) {
                 format!("alias {name}='{}'", alias.replace("'", "'\\''"))
-            } else if is_builtin(name) {
+            } else if is_builtin(name) || self.functions.contains_key(name) {
                 name.clone()
             } else if let Some(path) = process::find_executable(name, &path) {
                 path.to_string_lossy().into_owned()
@@ -785,6 +915,11 @@ impl<'a> Invocation<'a> {
                 ));
             }
             let name = argv[0].clone();
+            if self.functions.contains_key(&name) && name != "command" {
+                return Err(io::Error::other(
+                    "shell functions are not supported in pipeline stages; use command to bypass them",
+                ));
+            }
             let exec = if is_builtin(&name) {
                 let executable = std::env::current_exe()?;
                 let mut args = vec![
@@ -972,6 +1107,7 @@ impl<'a> Invocation<'a> {
         let mut shell = Invocation::new(&saved.name, &saved.args);
         shell.variables = saved.variables;
         shell.aliases = saved.aliases;
+        shell.functions = saved.functions;
         shell.exported = saved.exported;
         shell.unset = saved.unset;
         shell.substitution_depth = saved.depth;
@@ -995,6 +1131,7 @@ impl<'a> Invocation<'a> {
             args: self.args.clone(),
             variables: self.variables.clone(),
             aliases: self.aliases.clone(),
+            functions: self.functions.clone(),
             exported: self.exported.clone(),
             unset: self.unset.clone(),
             depth: self.substitution_depth + 1,
@@ -1098,10 +1235,18 @@ impl<'a> Invocation<'a> {
                     default,
                     if_empty,
                 } => {
-                    if let Some(value) = self
-                        .variable_os(name)
-                        .filter(|value| !if_empty || !value.is_empty())
-                    {
+                    let value = if name == "#" {
+                        Some(self.args.len().to_string().into())
+                    } else if let Ok(index) = name.parse::<usize>() {
+                        if index == 0 {
+                            Some(self.name.into())
+                        } else {
+                            self.args.get(index - 1).map(OsString::from)
+                        }
+                    } else {
+                        self.variable_os(name)
+                    };
+                    if let Some(value) = value.filter(|value| !if_empty || !value.is_empty()) {
                         field.push_str(&value.to_string_lossy());
                     } else if let Some(value) = default {
                         field.push_str(&self.expand(value, status)?.join(" "));
@@ -1146,6 +1291,7 @@ impl<'a> Invocation<'a> {
 pub(crate) const BUILTINS: &[&str] = &[
     "exit", "cd", "pwd", "export", "unset", "read", "printf", "fg", "alias", "unalias", "jobs",
     "bg", "wait", "command", ":", "true", "false", "eval", "break", "continue", ".", "source",
+    "local", "shift", "return",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {

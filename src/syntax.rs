@@ -1,25 +1,27 @@
 use std::{iter::Peekable, str::Chars};
 
-#[derive(Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Command {
     pub words: Vec<Word>,
     pub background: bool,
     pub redirects: Vec<Redirect>,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Redirect {
     pub fd: usize,
     pub target: Word,
     pub duplicate: bool,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Word {
     pub parts: Vec<Part>,
     pub assignment: bool,
     pub bare: bool,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Part {
     Literal(String),
     Name,
@@ -101,8 +103,13 @@ impl From<&str> for ParseError {
 
 pub(crate) type Script = Vec<Statement>;
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Statement {
     Pipeline(Vec<Command>),
+    Function {
+        name: String,
+        body: Script,
+    },
     Negated(Box<Statement>),
     AndOr {
         first: Box<Statement>,
@@ -242,6 +249,18 @@ fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
             "for" => for_loop(input, depth + 1)?,
             _ => while_loop(input, depth + 1, name == "until")?,
         }
+    } else if let Some(name) = function_header(input) {
+        if depth >= 32 {
+            return Err("compound commands nested too deeply".into());
+        }
+        skip_newlines(input);
+        expect_keyword(input, "{", "expected { after function header")?;
+        let body = list(input, &["}"], depth + 1)?;
+        expect_keyword(input, "}", "expected } after function body")?;
+        Statement::Function {
+            name,
+            body: require_list(body, "empty function body")?,
+        }
     } else {
         Statement::Pipeline(pipeline(input)?)
     };
@@ -250,6 +269,17 @@ fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
     } else {
         statement
     })
+}
+
+fn function_header(input: &mut Source<'_>) -> Option<String> {
+    let mut ahead = input.clone();
+    let name = variable_name(&mut ahead)?;
+    skip_space(&mut ahead);
+    ahead.next_if_eq(&'(')?;
+    skip_space(&mut ahead);
+    ahead.next_if_eq(&')')?;
+    *input = ahead;
+    Some(name)
 }
 
 fn expect_keyword(
@@ -576,13 +606,22 @@ fn parameter_at(input: &mut Source<'_>, word: &mut Word, depth: usize) -> ParseR
             input.next();
             Part::Name
         }
+        Some(ch) if *ch == '#' || ch.is_ascii_digit() => Part::Variable {
+            name: input.next().unwrap().to_string(),
+            default: None,
+            if_empty: false,
+        },
         Some('@') => {
             input.next();
             Part::Arguments
         }
         Some('{') => {
             input.next();
-            let name = variable_name(input).ok_or("unsupported braced parameter")?;
+            let name = if input.peek().is_some_and(char::is_ascii_digit) {
+                std::iter::from_fn(|| input.next_if(char::is_ascii_digit)).collect()
+            } else {
+                variable_name(input).ok_or("unsupported braced parameter")?
+            };
             let if_empty = input.next_if_eq(&':').is_some();
             let default = if input.next_if_eq(&'-').is_some() {
                 let mut value = Word::default();
