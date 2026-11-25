@@ -328,7 +328,7 @@ fn run_chatgpt_task<T: Send + 'static>(
             let _ = tx.send(task(&worker_flag));
         })?;
     if !started.recv().unwrap_or(false) {
-        return Ok(Some(Err(chatgpt::Error(
+        return Ok(Some(Err(chatgpt::Error::Message(
             "previous request is still ending; try again shortly",
         ))));
     }

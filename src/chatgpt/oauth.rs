@@ -26,15 +26,16 @@ pub(super) fn authorize(
     home: &Path,
     cancelled: &AtomicBool,
 ) -> Result<String> {
-    let host = host_id(home).map_err(|_| Error("could not read or create the ChatGPT host ID"))?;
+    let host = host_id(home)
+        .map_err(|_| Error::Message("could not read or create the ChatGPT host ID"))?;
     let listener = TcpListener::bind(("127.0.0.1", 0))
-        .map_err(|_| Error("could not start the sign-in callback"))?;
+        .map_err(|_| Error::Message("could not start the sign-in callback"))?;
     listener
         .set_nonblocking(true)
-        .map_err(|_| Error("could not configure the sign-in callback"))?;
+        .map_err(|_| Error::Message("could not configure the sign-in callback"))?;
     let address = listener
         .local_addr()
-        .map_err(|_| Error("could not read the callback address"))?
+        .map_err(|_| Error::Message("could not read the callback address"))?
         .to_string();
     let redirect = format!("http://{address}{CALLBACK}");
     let state = secret()?;
@@ -62,9 +63,9 @@ pub(super) fn authorize(
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .map_err(|_| Error("could not open the browser"))?;
+        .map_err(|_| Error::Message("could not open the browser"))?;
     if !status.success() {
-        return Err(Error("could not open the browser"));
+        return Err(Error::Message("could not open the browser"));
     }
     let grant = await_callback(listener, &address, &state, cancelled)?;
     check_cancelled(cancelled)?;
@@ -80,14 +81,16 @@ pub(super) fn authorize(
         .post("https://auth.openai.com/api/accounts/oauth/token")
         .header("Content-Type", "application/x-www-form-urlencoded")
         .send(body)
-        .map_err(|_| Error("OpenAI rejected the authorization code or the token request failed"))?;
+        .map_err(|_| {
+            Error::Message("OpenAI rejected the authorization code or the token request failed")
+        })?;
     let reply = super::read_json(reply)?;
     let (access, id) = plan_tokens(&reply)?;
     check_cancelled(cancelled)?;
     let keys = agent
         .get("https://auth.openai.com/.well-known/jwks.json")
         .call()
-        .map_err(|_| Error("could not fetch OpenAI signing keys"))?;
+        .map_err(|_| Error::Message("could not fetch OpenAI signing keys"))?;
     verify_identity(id, &super::read_json(keys)?, &grant.client, &nonce)?;
     Ok(access.to_owned())
 }
@@ -100,7 +103,7 @@ fn form(fields: &[(&str, &str)]) -> String {
 
 fn secret() -> Result<String> {
     let bytes: [u8; 32] = rand::generate(&rand::SystemRandom::new())
-        .map_err(|_| Error("could not obtain secure randomness"))?
+        .map_err(|_| Error::Message("could not obtain secure randomness"))?
         .expose();
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
@@ -261,7 +264,7 @@ fn await_callback(
                 match callback {
                     Some(Callback::Accepted(grant)) => return Ok(grant),
                     Some(Callback::Denied) => {
-                        return Err(Error("ChatGPT sign-in was declined or failed"));
+                        return Err(Error::Message("ChatGPT sign-in was declined or failed"));
                     }
                     _ => {}
                 }
@@ -274,10 +277,10 @@ fn await_callback(
             {
                 std::thread::sleep(Duration::from_millis(50))
             }
-            Err(_) => return Err(Error("sign-in callback failed")),
+            Err(_) => return Err(Error::Message("sign-in callback failed")),
         }
     }
-    Err(Error("ChatGPT sign-in timed out"))
+    Err(Error::Message("ChatGPT sign-in timed out"))
 }
 
 fn read_callback(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
@@ -314,13 +317,13 @@ fn plan_tokens(reply: &Value) -> Result<(&str, &str)> {
         .iter()
         .all(|scope| scopes.split_ascii_whitespace().any(|s| &s == scope))
     {
-        return Err(Error("ChatGPT plan permission was not granted"));
+        return Err(Error::Message("ChatGPT plan permission was not granted"));
     }
     if !reply["token_type"]
         .as_str()
         .is_some_and(|value| value.eq_ignore_ascii_case("Bearer"))
     {
-        return Err(Error("unexpected OpenAI token type"));
+        return Err(Error::Message("unexpected OpenAI token type"));
     }
     let token = |name: &str| {
         reply[name].as_str().filter(|value| {
@@ -328,47 +331,47 @@ fn plan_tokens(reply: &Value) -> Result<(&str, &str)> {
         })
     };
     Ok((
-        token("access_token").ok_or(Error("missing OpenAI access token"))?,
-        token("id_token").ok_or(Error("missing OpenAI ID token"))?,
+        token("access_token").ok_or(Error::Message("missing OpenAI access token"))?,
+        token("id_token").ok_or(Error::Message("missing OpenAI ID token"))?,
     ))
 }
 
 fn verify_identity(token: &str, keys: &Value, client: &str, nonce: &str) -> Result<()> {
-    let invalid = Error("OpenAI ID token failed validation");
-    let header = decode_header(token).map_err(|_| invalid)?;
+    const INVALID: Error = Error::Message("OpenAI ID token failed validation");
+    let header = decode_header(token).map_err(|_| INVALID)?;
     let kid = header
         .kid
         .as_deref()
         .filter(|kid| !kid.is_empty())
-        .ok_or(invalid)?;
+        .ok_or(INVALID)?;
     if header.alg != Algorithm::RS256 {
-        return Err(invalid);
+        return Err(INVALID);
     }
     let mut matching = keys["keys"]
         .as_array()
-        .ok_or(invalid)?
+        .ok_or(INVALID)?
         .iter()
         .filter(|key| key["kid"] == kid);
-    let jwk = matching.next().ok_or(invalid)?;
+    let jwk = matching.next().ok_or(INVALID)?;
     if matching.next().is_some()
         || jwk["kty"] != "RSA"
         || jwk.get("use").is_some_and(|usage| usage != "sig")
         || jwk.get("alg").is_some_and(|alg| alg != "RS256")
     {
-        return Err(invalid);
+        return Err(INVALID);
     }
     let key = DecodingKey::from_rsa_components(
-        jwk["n"].as_str().ok_or(invalid)?,
-        jwk["e"].as_str().ok_or(invalid)?,
+        jwk["n"].as_str().ok_or(INVALID)?,
+        jwk["e"].as_str().ok_or(INVALID)?,
     )
-    .map_err(|_| invalid)?;
+    .map_err(|_| INVALID)?;
     let mut validation = Validation::new(Algorithm::RS256);
     validation.leeway = 0;
     validation.set_required_spec_claims(&["exp", "iss", "aud", "sub"]);
     validation.set_issuer(&[ISSUER]);
     validation.set_audience(&[client]);
     let claims = decode::<Value>(token, &key, &validation)
-        .map_err(|_| invalid)?
+        .map_err(|_| INVALID)?
         .claims;
     if claims["nonce"] != nonce
         || claims["sub"].as_str().is_none_or(str::is_empty)
@@ -377,14 +380,14 @@ fn verify_identity(token: &str, keys: &Value, client: &str, nonce: &str) -> Resu
             .as_array()
             .is_some_and(|aud| aud.len() > 1 && claims["azp"] != client)
     {
-        return Err(invalid);
+        return Err(INVALID);
     }
     Ok(())
 }
 
 pub(super) fn check_cancelled(cancelled: &AtomicBool) -> Result<()> {
     if cancelled.load(Ordering::Relaxed) {
-        Err(Error("cancelled"))
+        Err(Error::Message("cancelled"))
     } else {
         Ok(())
     }

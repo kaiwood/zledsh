@@ -13,12 +13,34 @@ const MAX_ANSWER: usize = 64 * 1024;
 
 type Result<T> = std::result::Result<T, Error>;
 
-#[derive(Clone, Copy, Debug)]
-pub struct Error(pub &'static str);
+#[derive(Debug)]
+pub enum Error {
+    Message(&'static str),
+    Response {
+        message: &'static str,
+        status: u16,
+        format: &'static str,
+        request_id: Option<String>,
+    },
+}
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.0)
+        match self {
+            Self::Message(message) => f.write_str(message),
+            Self::Response {
+                message,
+                status,
+                format,
+                request_id,
+            } => {
+                write!(f, "{message} (HTTP {status}, {format}")?;
+                if let Some(id) = request_id {
+                    write!(f, ", request ID {id}")?;
+                }
+                f.write_str(")")
+            }
+        }
     }
 }
 
@@ -59,14 +81,17 @@ impl Session {
 
     pub fn answer(&self, question: &str, cancelled: &AtomicBool) -> Result<String> {
         if question.len() > 8192 {
-            return Err(Error("instructions must be at most 8192 bytes"));
+            return Err(Error::Message("instructions must be at most 8192 bytes"));
         }
         oauth::check_cancelled(cancelled)?;
-        let mut reply = self
+        let reply = self
             .agent
             .post("https://api.openai.com/v1/responses")
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "text/event-stream")
+            .config()
+            .http_status_as_error(false)
+            .build()
             .send_json(json!({
                 "model": &self.model,
                 "input": [{"role": "user", "content": question}],
@@ -74,45 +99,169 @@ impl Session {
                 "stream": true
             }))
             .map_err(request_error)?;
-        let event_stream = reply
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| {
-                value
-                    .split(';')
-                    .next()
-                    .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("text/event-stream"))
-            });
-        if !reply.status().is_success() || !event_stream {
-            return Err(Error("expected a ChatGPT event stream"));
+        read_answer(reply, cancelled)
+    }
+}
+
+fn read_answer(
+    mut reply: ureq::http::Response<ureq::Body>,
+    cancelled: &AtomicBool,
+) -> Result<String> {
+    oauth::check_cancelled(cancelled)?;
+    let status = reply.status();
+    let media_type = reply
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .map(str::trim);
+    let format = match media_type {
+        Some(kind) if kind.eq_ignore_ascii_case("text/event-stream") => "event stream",
+        Some(kind)
+            if kind.eq_ignore_ascii_case("application/json")
+                || kind.eq_ignore_ascii_case("application/problem+json") =>
+        {
+            "JSON"
         }
-        parse_stream(reply.body_mut().as_reader(), cancelled)
+        Some(kind) if kind.eq_ignore_ascii_case("text/html") => "HTML",
+        None => "missing content type",
+        _ => "unexpected content type",
+    };
+    let request_id = reply
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .filter(|id| {
+            id.strip_prefix("req_").is_some_and(|suffix| {
+                !suffix.is_empty()
+                    && suffix.len() <= 64
+                    && suffix.bytes().all(|b| b.is_ascii_hexdigit())
+            })
+        })
+        .map(ToOwned::to_owned);
+    let result = match (status.is_success(), format) {
+        (true, "event stream") => parse_stream(reply.body_mut().as_reader(), cancelled),
+        (success, "JSON") => {
+            let value: Value = reply
+                .body_mut()
+                .with_config()
+                .limit(MAX_BODY as u64)
+                .read_json()
+                .map_err(|_| Error::Message("invalid or oversized ChatGPT JSON response"))
+                .map_err(|e| with_response(e, status.as_u16(), format, request_id.clone()))?;
+            oauth::check_cancelled(cancelled)?;
+            if let Some(message) = service_error(&value["error"]) {
+                Err(Error::Message(message))
+            } else if success {
+                completed_json(&value)
+            } else {
+                Err(Error::Message(status_message(status.as_u16())))
+            }
+        }
+        (false, _) => Err(Error::Message(status_message(status.as_u16()))),
+        (true, _) => Err(Error::Message(
+            "expected a ChatGPT event stream or completed JSON response",
+        )),
+    };
+    result.map_err(|e| with_response(e, status.as_u16(), format, request_id))
+}
+
+fn with_response(
+    error: Error,
+    status: u16,
+    format: &'static str,
+    request_id: Option<String>,
+) -> Error {
+    match error {
+        Error::Message(message) => Error::Response {
+            message,
+            status,
+            format,
+            request_id,
+        },
+        response => response,
+    }
+}
+
+fn completed_json(value: &Value) -> Result<String> {
+    if value["object"] != "response" || value["status"] != "completed" || !value["error"].is_null()
+    {
+        return Err(Error::Message(
+            "ChatGPT returned JSON without a completed response",
+        ));
+    }
+    let mut answer = String::new();
+    for item in value["output"].as_array().into_iter().flatten() {
+        if item["type"] != "message" || item["role"] != "assistant" {
+            continue;
+        }
+        for part in item["content"].as_array().into_iter().flatten() {
+            if part["type"] == "output_text" {
+                let text = part["text"]
+                    .as_str()
+                    .ok_or(Error::Message("invalid ChatGPT text output"))?;
+                append_text(&mut answer, text)?;
+            }
+        }
+    }
+    if answer.trim().is_empty() {
+        return Err(Error::Message("ChatGPT completed without a text answer"));
+    }
+    Ok(answer)
+}
+
+fn append_text(answer: &mut String, text: &str) -> Result<()> {
+    if answer.len() + text.len() > MAX_ANSWER {
+        return Err(Error::Message("ChatGPT answer exceeded 64 KiB"));
+    }
+    answer.push_str(text);
+    Ok(())
+}
+
+fn service_error(error: &Value) -> Option<&'static str> {
+    match error["code"].as_str()? {
+        "subscription_sharing_user_not_eligible" => {
+            Some("this ChatGPT account or workspace is not eligible for plan usage")
+        }
+        "subscription_sharing_usage_limit_exceeded" => Some("ChatGPT plan usage limit reached"),
+        "subscription_sharing_usage_unavailable" => {
+            Some("ChatGPT plan usage is temporarily unavailable")
+        }
+        "subscription_sharing_unsupported_capability" => {
+            Some("ChatGPT plan usage does not support this request or model")
+        }
+        _ => None,
+    }
+}
+
+fn status_message(status: u16) -> &'static str {
+    match status {
+        401 => "ChatGPT session expired or was rejected; restart kwsh --chatgpt",
+        403 => "ChatGPT denied access for this account or model",
+        429 => "ChatGPT usage or rate limit reached",
+        503 => "ChatGPT service is temporarily unavailable",
+        _ => "ChatGPT request failed",
     }
 }
 
 fn request_error(error: ureq::Error) -> Error {
     // Never display response bodies, URLs with OAuth values, or request headers.
-    match error {
-        ureq::Error::StatusCode(401) => {
-            Error("ChatGPT session expired or was rejected; restart kwsh --chatgpt")
-        }
-        ureq::Error::StatusCode(403) => Error("ChatGPT denied access for this account or model"),
-        ureq::Error::StatusCode(429) => Error("ChatGPT usage or rate limit reached"),
-        _ => Error("ChatGPT request failed"),
-    }
+    Error::Message(match error {
+        ureq::Error::StatusCode(status) => status_message(status),
+        _ => "ChatGPT request failed",
+    })
 }
 
 fn read_json(mut reply: ureq::http::Response<ureq::Body>) -> Result<Value> {
     if !reply.status().is_success() {
-        return Err(Error("unexpected OpenAI response status"));
+        return Err(Error::Message("unexpected OpenAI response status"));
     }
     reply
         .body_mut()
         .with_config()
         .limit(MAX_BODY as u64)
         .read_json()
-        .map_err(|_| Error("invalid or oversized OpenAI response"))
+        .map_err(|_| Error::Message("invalid or oversized OpenAI response"))
 }
 
 fn choose_model(catalog: &Value, preferred: Option<&str>) -> Result<String> {
@@ -131,7 +280,7 @@ fn choose_model(catalog: &Value, preferred: Option<&str>) -> Result<String> {
         })
         .find(|slug| preferred.is_none_or(|model| model == *slug))
         .map(ToOwned::to_owned)
-        .ok_or(Error(if preferred.is_some() {
+        .ok_or(Error::Message(if preferred.is_some() {
             "configured model is not listed for this ChatGPT account"
         } else {
             "this ChatGPT account has no listed model"
@@ -148,10 +297,10 @@ fn parse_stream(input: impl Read, cancelled: &AtomicBool) -> Result<String> {
         line.clear();
         if input
             .read_line(&mut line)
-            .map_err(|_| Error("could not read ChatGPT response"))?
+            .map_err(|_| Error::Message("could not read ChatGPT response"))?
             == 0
         {
-            return Err(Error("ChatGPT response ended before completion"));
+            return Err(Error::Message("ChatGPT response ended before completion"));
         }
         let field = line.trim_end_matches(['\r', '\n']);
         if let Some(value) = field.strip_prefix("data:") {
@@ -164,25 +313,25 @@ fn parse_stream(input: impl Read, cancelled: &AtomicBool) -> Result<String> {
         if !field.is_empty() || data.is_empty() {
             continue;
         }
-        let event: Value =
-            serde_json::from_str(&data).map_err(|_| Error("invalid ChatGPT stream event"))?;
+        let event: Value = serde_json::from_str(&data)
+            .map_err(|_| Error::Message("invalid ChatGPT stream event"))?;
         data.clear();
         match event["type"].as_str() {
             Some("response.output_text.delta") => {
                 let text = event["delta"]
                     .as_str()
-                    .ok_or(Error("invalid ChatGPT text event"))?;
-                if answer.len() + text.len() > MAX_ANSWER {
-                    return Err(Error("ChatGPT answer exceeded 64 KiB"));
-                }
-                answer.push_str(text);
+                    .ok_or(Error::Message("invalid ChatGPT text event"))?;
+                append_text(&mut answer, text)?;
             }
             Some("response.completed") if !answer.trim().is_empty() => return Ok(answer),
             Some("response.completed") => {
-                return Err(Error("ChatGPT completed without a text answer"));
+                return Err(Error::Message("ChatGPT completed without a text answer"));
             }
             Some("response.failed" | "response.incomplete" | "error") => {
-                return Err(Error("ChatGPT did not complete the request"));
+                let message = service_error(&event["response"]["error"])
+                    .or_else(|| service_error(&event))
+                    .unwrap_or("ChatGPT did not complete the request");
+                return Err(Error::Message(message));
             }
             _ => {}
         }
@@ -192,6 +341,62 @@ fn parse_stream(input: impl Read, cancelled: &AtomicBool) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn response(status: u16, format: &str, body: &str) -> ureq::http::Response<ureq::Body> {
+        ureq::http::Response::builder()
+            .status(status)
+            .header("content-type", format)
+            .header("x-request-id", "req_0123abcd")
+            .body(ureq::Body::builder().data(body.as_bytes()))
+            .unwrap()
+    }
+
+    #[test]
+    fn accepts_completed_json_but_does_not_publish_incomplete_output() {
+        let mut body = json!({
+            "object": "response", "status": "completed",
+            "output": [{"type": "message", "role": "assistant", "content": [
+                {"type": "output_text", "text": "hello"}
+            ]}]
+        });
+        let cancelled = AtomicBool::new(false);
+        let read = |body: &Value| {
+            read_answer(
+                response(200, "application/json; charset=utf-8", &body.to_string()),
+                &cancelled,
+            )
+        };
+        assert_eq!(read(&body).unwrap(), "hello");
+        body["status"] = json!("incomplete");
+        let error = read(&body).unwrap_err().to_string();
+        assert!(error.contains("HTTP 200, JSON"));
+        assert!(!error.contains("hello"));
+    }
+
+    #[test]
+    fn reports_http_metadata_without_dumping_headers_or_error_bodies() {
+        let cancelled = AtomicBool::new(false);
+        let redirect = response(302, "text/html", "opaque page contents");
+        let error = read_answer(redirect, &cancelled).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "ChatGPT request failed (HTTP 302, HTML, request ID req_0123abcd)"
+        );
+
+        let mut denied = response(
+            403,
+            "application/json",
+            r#"{"error":{"code":"subscription_sharing_user_not_eligible","message":"sensitive echo"}}"#,
+        );
+        denied
+            .headers_mut()
+            .insert("x-request-id", "unexpected-secret".parse().unwrap());
+        let error = read_answer(denied, &cancelled).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            "this ChatGPT account or workspace is not eligible for plan usage (HTTP 403, JSON)"
+        );
+    }
 
     #[test]
     fn chooses_only_visible_models_from_the_account() {
