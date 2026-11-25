@@ -11,7 +11,14 @@ pub(crate) struct Command {
 pub(crate) struct Redirect {
     pub fd: usize,
     pub target: Word,
-    pub duplicate: bool,
+    pub kind: RedirectKind,
+}
+
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub(crate) enum RedirectKind {
+    Read,
+    Write,
+    Duplicate,
 }
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -176,7 +183,7 @@ fn skip_space(input: &mut Source<'_>) {
 }
 
 fn boundary(ch: char) -> bool {
-    matches!(ch, ' ' | '\t' | '\n' | ';' | '>' | '|' | '&' | ')')
+    matches!(ch, ' ' | '\t' | '\n' | ';' | '<' | '>' | '|' | '&' | ')')
 }
 
 fn head(input: &Source<'_>) -> String {
@@ -520,19 +527,8 @@ fn pipeline(input: &mut Source<'_>) -> ParseResult<Vec<Command>> {
             if matches!(next, '\n' | ';' | '&' | '|' | ')') {
                 break;
             }
-            if let Some(fd) = redirect_fd(input)? {
-                while input.next_if(|ch| ch.is_ascii_digit()).is_some() {}
-                input.next(); // '>'
-                let duplicate = input.next_if_eq(&'&').is_some();
-                while input.next_if(|ch| matches!(ch, ' ' | '\t')).is_some() {}
-                if matches!(input.peek(), None | Some('#')) {
-                    return Err("missing redirection target".into());
-                }
-                command.redirects.push(Redirect {
-                    fd,
-                    target: word(input)?,
-                    duplicate,
-                });
+            if let Some(redirect) = redirect(input)? {
+                command.redirects.push(redirect);
             } else {
                 if command.words.is_empty() {
                     let name = head(input);
@@ -581,20 +577,46 @@ fn pipeline(input: &mut Source<'_>) -> ParseResult<Vec<Command>> {
     }
 }
 
-fn redirect_fd(input: &Source<'_>) -> ParseResult<Option<usize>> {
+fn redirect(input: &mut Source<'_>) -> ParseResult<Option<Redirect>> {
     let mut ahead = input.clone();
     let mut digits = String::new();
     while let Some(digit) = ahead.next_if(char::is_ascii_digit) {
         digits.push(digit);
     }
-    if ahead.next_if_eq(&'>').is_none() {
-        return Ok(None);
+    let (fd, kind) = match ahead.next() {
+        Some('<') => {
+            if !matches!(digits.as_str(), "" | "0") {
+                return Err("only input descriptor 0 is supported".into());
+            }
+            (0, RedirectKind::Read)
+        }
+        Some('>') => {
+            let fd = match digits.as_str() {
+                "" | "1" => 1,
+                "2" => 2,
+                _ => return Err("only output descriptors 1 and 2 are supported".into()),
+            };
+            let kind = if ahead.next_if_eq(&'&').is_some() {
+                RedirectKind::Duplicate
+            } else {
+                RedirectKind::Write
+            };
+            (fd, kind)
+        }
+        _ => return Ok(None),
+    };
+    while ahead.next_if(|ch| matches!(ch, ' ' | '\t')).is_some() {}
+    if matches!(ahead.peek(), None | Some('#')) {
+        return Err("missing redirection target".into());
     }
-    match digits.as_str() {
-        "" | "1" => Ok(Some(1)),
-        "2" => Ok(Some(2)),
-        _ => Err("only output descriptors 1 and 2 are supported".into()),
+    let mut target = word(&mut ahead)?;
+    for part in &mut target.parts {
+        if let Part::Substitution { split, .. } = part {
+            *split = false;
+        }
     }
+    *input = ahead;
+    Ok(Some(Redirect { fd, target, kind }))
 }
 
 fn word(input: &mut Source<'_>) -> ParseResult<Word> {

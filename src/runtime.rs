@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{self, BufRead, Read, Seek, Write};
+use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 use std::os::fd::OwnedFd;
 use std::process::Stdio;
 use std::rc::Rc;
@@ -9,7 +9,8 @@ use std::rc::Rc;
 use crate::process;
 
 use crate::syntax::{
-    self, ArrayIndex, CasePattern, Command, ParseError, Part, Redirect, Script, Statement, Word,
+    self, ArrayIndex, CasePattern, Command, ParseError, Part, Redirect, RedirectKind, Script,
+    Statement, Word,
 };
 
 pub(crate) struct Invocation<'a> {
@@ -176,13 +177,17 @@ impl<'a> Invocation<'a> {
     }
 
     pub fn run_source(&mut self, source: &str, input: &mut impl BufRead) -> Result<(), String> {
-        self.run_source_with_output(source, input, &[Output::Stdout, Output::Stderr])
+        self.run_source_with_output(
+            source,
+            &mut Input::Inherited(input),
+            &[Output::Stdout, Output::Stderr],
+        )
     }
 
     fn run_source_with_output(
         &mut self,
         source: &str,
-        input: &mut impl BufRead,
+        input: &mut Input<'_>,
         output: &[Output; 2],
     ) -> Result<(), String> {
         let mut pending = String::new();
@@ -228,13 +233,17 @@ impl<'a> Invocation<'a> {
     }
 
     pub fn run(&mut self, script: &[Statement], input: &mut impl BufRead) {
-        self.run_with_output(script, input, &[Output::Stdout, Output::Stderr]);
+        self.run_with_output(
+            script,
+            &mut Input::Inherited(input),
+            &[Output::Stdout, Output::Stderr],
+        );
     }
 
     fn run_with_output(
         &mut self,
         script: &[Statement],
-        input: &mut impl BufRead,
+        input: &mut Input<'_>,
         output: &[Output; 2],
     ) {
         for statement in script {
@@ -403,18 +412,22 @@ impl<'a> Invocation<'a> {
     }
 
     pub fn run_pipeline(&mut self, pipeline: &[Command], input: &mut impl BufRead) {
-        self.run_pipeline_with_output(pipeline, input, &[Output::Stdout, Output::Stderr]);
+        self.run_pipeline_with_output(
+            pipeline,
+            &mut Input::Inherited(input),
+            &[Output::Stdout, Output::Stderr],
+        );
     }
 
     fn run_pipeline_with_output(
         &mut self,
         pipeline: &[Command],
-        input: &mut impl BufRead,
+        input: &mut Input<'_>,
         original: &[Output; 2],
     ) {
         let background = pipeline.last().is_some_and(|command| command.background);
         if background || pipeline.len() != 1 {
-            self.status = match self.pipeline(pipeline, background, original) {
+            self.status = match self.pipeline(pipeline, background, input, original) {
                 Ok(status) => status,
                 Err(error) => {
                     report(&original[1], &format!("pipeline: {error}"));
@@ -426,12 +439,20 @@ impl<'a> Invocation<'a> {
         let command = &pipeline[0];
         let mut output = original.clone();
         let mut substitution_status = None;
-        if let Err(error) = self.redirect(&command.redirects, &mut output, &mut substitution_status)
-        {
+        let mut redirected = None;
+        if let Err(error) = self.redirect(
+            &command.redirects,
+            &mut redirected,
+            &mut output,
+            &mut substitution_status,
+        ) {
             report(&output[1], &error);
             self.status = 1;
             return;
         }
+        // A builtin must leave unread bytes available to nested external commands.
+        let mut redirected = redirected.map(|file| Input::File(BufReader::with_capacity(1, file)));
+        let input = redirected.as_mut().unwrap_or(input);
         if !command.words.is_empty() && command.words.iter().all(|word| word.assignment) {
             for word in &command.words {
                 match self.expand(word, &mut substitution_status) {
@@ -717,7 +738,7 @@ impl<'a> Invocation<'a> {
                 }
             }
             "read" => {
-                self.status = match self.read(args, input) {
+                self.status = match self.read(args, input.reader()) {
                     Ok(complete) => u8::from(!complete),
                     Err(error) => {
                         report(&output[1], &format!("read: {error}"));
@@ -760,7 +781,7 @@ impl<'a> Invocation<'a> {
                     if name == "wait" { 127 } else { 1 }
                 });
             }
-            _ => self.status = self.external(argv, &output),
+            _ => self.status = self.external(argv, input, &output),
         }
     }
 
@@ -768,7 +789,7 @@ impl<'a> Invocation<'a> {
         &mut self,
         name: &str,
         args: &[String],
-        input: &mut impl BufRead,
+        input: &mut Input<'_>,
         output: &[Output; 2],
     ) {
         if self.script_depth >= 32 {
@@ -858,7 +879,7 @@ impl<'a> Invocation<'a> {
         &mut self,
         name: &str,
         source: &str,
-        input: &mut impl BufRead,
+        input: &mut Input<'_>,
         output: &[Output; 2],
     ) {
         if self.script_depth >= 32 {
@@ -998,6 +1019,7 @@ impl<'a> Invocation<'a> {
         &mut self,
         commands: &[Command],
         background: bool,
+        input: &Input<'_>,
         original: &[Output; 2],
     ) -> io::Result<u8> {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -1018,7 +1040,7 @@ impl<'a> Invocation<'a> {
         let mut stdin = if background || self.agent_command() {
             File::open("/dev/null")?.into()
         } else {
-            process::duplicate(libc::STDIN_FILENO)?
+            input.descriptor()?
         };
         let mut stages = Vec::new();
         for (index, command) in commands.iter().enumerate() {
@@ -1033,14 +1055,19 @@ impl<'a> Invocation<'a> {
             };
             let mut output = [stdout, original[1].clone()];
             let mut status = None;
+            let mut redirected = None;
             let argv = match self.expand_words(&command.words, &mut status) {
                 Err(error) => {
                     report(&output[1], &error);
                     vec!["exit".into(), "2".into()]
                 }
                 Ok(argv) => {
-                    if let Err(error) = self.redirect(&command.redirects, &mut output, &mut status)
-                    {
+                    if let Err(error) = self.redirect(
+                        &command.redirects,
+                        &mut redirected,
+                        &mut output,
+                        &mut status,
+                    ) {
                         report(&output[1], &error);
                         vec!["exit".into(), "1".into()]
                     } else if argv.is_empty() || command.words.iter().all(|word| word.assignment) {
@@ -1088,7 +1115,11 @@ impl<'a> Invocation<'a> {
             };
             stages.push(process::Stage {
                 exec,
-                streams: [stdin, output[0].descriptor()?, output[1].descriptor()?],
+                streams: [
+                    redirected.map(OwnedFd::from).unwrap_or(stdin),
+                    output[0].descriptor()?,
+                    output[1].descriptor()?,
+                ],
                 missing: format!("kwsh: {name}: command not found\n").into_bytes(),
                 failed: format!("kwsh: {name}: cannot execute\n").into_bytes(),
             });
@@ -1117,7 +1148,7 @@ impl<'a> Invocation<'a> {
         }
     }
 
-    fn external(&mut self, argv: &[String], output: &[Output; 2]) -> u8 {
+    fn external(&mut self, argv: &[String], input: &Input<'_>, output: &[Output; 2]) -> u8 {
         let (path, env) = self.execution_environment();
         let streams = output[0]
             .descriptor()
@@ -1129,10 +1160,16 @@ impl<'a> Invocation<'a> {
                 return 1;
             }
         };
-        let stdin = if self.agent_command() {
-            Stdio::null()
-        } else {
-            Stdio::inherit()
+        let stdin = match input {
+            Input::File(file) => match file.get_ref().try_clone() {
+                Ok(file) => Stdio::from(file),
+                Err(error) => {
+                    report(&output[1], &format!("{}: {error}", argv[0]));
+                    return 1;
+                }
+            },
+            Input::Inherited(_) if self.agent_command() => Stdio::null(),
+            Input::Inherited(_) => Stdio::inherit(),
         };
         let launch = |enter| process::spawn(argv, &path, env, [stdin, stdout, stderr], enter);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1167,7 +1204,7 @@ impl<'a> Invocation<'a> {
         }
     }
 
-    fn read(&mut self, args: &[String], input: &mut impl BufRead) -> Result<bool, String> {
+    fn read(&mut self, args: &[String], input: &mut dyn BufRead) -> Result<bool, String> {
         let (raw, name) = match args {
             [name] => (false, name),
             [flag, name] if flag == "-r" => (true, name),
@@ -1291,7 +1328,12 @@ impl<'a> Invocation<'a> {
                 .open("/dev/null")
                 .map_err(|error| error.to_string())?,
         ));
-        self.call_function(function, &args, &mut io::empty(), &[null.clone(), null]);
+        self.call_function(
+            function,
+            &args,
+            &mut Input::Inherited(&mut io::empty()),
+            &[null.clone(), null],
+        );
         let candidates: Vec<_> = self
             .arrays
             .get("COMPREPLY")
@@ -1511,25 +1553,36 @@ impl<'a> Invocation<'a> {
     fn redirect(
         &self,
         redirects: &[Redirect],
+        input: &mut Option<File>,
         output: &mut [Output; 2],
         status: &mut Option<u8>,
     ) -> Result<(), String> {
         for redirect in redirects {
+            if self.agent_command() && matches!(redirect.kind, RedirectKind::Read) {
+                return Err("input redirection must be submitted by the user".into());
+            }
             let targets = self.expand(&redirect.target, status)?;
             let [target] = targets.as_slice() else {
                 return Err("ambiguous redirection".into());
             };
-            let destination = if redirect.duplicate {
-                match target.as_str() {
-                    "1" => output[0].clone(),
-                    "2" => output[1].clone(),
-                    _ => return Err("only output descriptors 1 and 2 are supported".into()),
+            match redirect.kind {
+                RedirectKind::Read => {
+                    *input =
+                        Some(File::open(target).map_err(|error| format!("{target}: {error}"))?);
                 }
-            } else {
-                let file = File::create(target).map_err(|error| format!("{target}: {error}"))?;
-                Output::File(Rc::new(file))
-            };
-            output[redirect.fd - 1] = destination;
+                RedirectKind::Write => {
+                    let file =
+                        File::create(target).map_err(|error| format!("{target}: {error}"))?;
+                    output[redirect.fd - 1] = Output::File(Rc::new(file));
+                }
+                RedirectKind::Duplicate => {
+                    output[redirect.fd - 1] = match target.as_str() {
+                        "1" => output[0].clone(),
+                        "2" => output[1].clone(),
+                        _ => return Err("only output descriptors 1 and 2 are supported".into()),
+                    };
+                }
+            }
         }
         Ok(())
     }
@@ -1581,6 +1634,27 @@ fn valid_name(name: &str) -> bool {
         .next()
         .is_some_and(|ch| ch == b'_' || ch.is_ascii_alphabetic())
         && chars.all(|ch| ch == b'_' || ch.is_ascii_alphanumeric())
+}
+
+enum Input<'a> {
+    Inherited(&'a mut dyn BufRead),
+    File(BufReader<File>),
+}
+
+impl Input<'_> {
+    fn reader(&mut self) -> &mut dyn BufRead {
+        match self {
+            Self::Inherited(reader) => *reader,
+            Self::File(reader) => reader,
+        }
+    }
+
+    fn descriptor(&self) -> io::Result<OwnedFd> {
+        match self {
+            Self::Inherited(_) => process::duplicate(libc::STDIN_FILENO),
+            Self::File(reader) => reader.get_ref().try_clone().map(OwnedFd::from),
+        }
+    }
 }
 
 #[derive(Clone)]
