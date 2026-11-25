@@ -1,4 +1,6 @@
 #[cfg(target_os = "macos")]
+mod foreground;
+#[cfg(target_os = "macos")]
 mod interactive;
 mod process;
 mod runtime;
@@ -57,7 +59,6 @@ fn run_command(
         {
             use std::io::IsTerminal;
             if io::stdin().is_terminal() && io::stderr().is_terminal() {
-                invocation.allow_external = false;
                 return interactive::run(&mut invocation, &mut input, program == "kward shell")
                     .map_err(|error| error.to_string());
             }

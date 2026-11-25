@@ -2,6 +2,7 @@ use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
+use crate::foreground::Foreground;
 use crate::runtime::Invocation;
 use crate::syntax::{self, ParseError};
 use crate::terminal_modes::{
@@ -13,6 +14,7 @@ pub(crate) fn run(
     input: &mut impl BufRead,
     kward: bool,
 ) -> io::Result<u8> {
+    invocation.foreground = Some(Foreground::new()?);
     if kward {
         load_startup(invocation, input);
     }

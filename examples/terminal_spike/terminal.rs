@@ -4,7 +4,8 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::terminal_modes::{
-    TTY, attributes, editor_attributes, restore_attributes, set_attributes,
+    TTY, attributes, editor_attributes, enter_child, give_terminal, restore_attributes,
+    set_attributes,
 };
 
 pub struct Terminal {
@@ -44,21 +45,7 @@ impl Terminal {
         // The child claims the tty before exec, so it cannot read it too early.
         // The closure runs after fork and uses only async-signal-safe calls.
         unsafe {
-            command.pre_exec(|| {
-                cvt(libc::tcsetpgrp(TTY, libc::getpgrp()))?;
-                for signal in [
-                    libc::SIGTTOU,
-                    libc::SIGTTIN,
-                    libc::SIGTSTP,
-                    libc::SIGINT,
-                    libc::SIGQUIT,
-                ] {
-                    if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
-                        return Err(io::Error::last_os_error());
-                    }
-                }
-                Ok(())
-            });
+            command.pre_exec(enter_child);
         }
         let child = command.spawn()?;
         self.finish(Job(Some(child.id() as libc::pid_t)))
@@ -67,14 +54,14 @@ impl Terminal {
     pub fn resume(&self, stopped: StoppedJob) -> io::Result<Option<StoppedJob>> {
         set_attributes(&stopped.modes)?;
         let group = stopped.job.pid();
-        cvt(unsafe { libc::tcsetpgrp(TTY, group) })?;
+        give_terminal(group)?;
         cvt(unsafe { libc::kill(-group, libc::SIGCONT) })?;
         self.finish(stopped.job)
     }
 
     fn finish(&self, mut job: Job) -> io::Result<Option<StoppedJob>> {
         let status = job.wait()?;
-        cvt(unsafe { libc::tcsetpgrp(TTY, self.shell) })?;
+        give_terminal(self.shell)?;
         let stopped = if libc::WIFSTOPPED(status) {
             Some(StoppedJob {
                 job,
@@ -97,7 +84,7 @@ impl Terminal {
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        unsafe { libc::tcsetpgrp(TTY, self.shell) };
+        let _ = give_terminal(self.shell);
         restore_attributes(&self.original);
         unsafe { libc::signal(libc::SIGTTOU, self.old_ttou) };
     }

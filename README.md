@@ -6,9 +6,9 @@
 cargo run --locked -- -c 'printf "<%s>\n" "$0" "$@"' demo 'two words'
 ```
 
-This slice supports `exit` and a limited `printf` (`%s` and `%%`), quoted positional arguments and simple environment substitutions, sequential commands, and output redirection for fd 1 and 2. With redirected stdin, the shell reads commands from that stream; `read [-r] name` consumes data from the same stream and sets a session variable. Noninteractive mode runs external commands by path or by searching `PATH`. An executable file without a valid native format or shebang fails with status 126; nothing is handed off to `/bin/sh` as a fallback.
+This slice supports `exit` and a limited `printf` (`%s` and `%%`), quoted positional arguments and simple environment substitutions, sequential commands, and output redirection for fd 1 and 2. With redirected stdin, the shell reads commands from that stream; `read [-r] name` consumes data from the same stream and sets a session variable. The shell runs external commands by path or by searching `PATH`. An executable file without a valid native format or shebang fails with status 126; nothing is handed off to `/bin/sh` as a fallback.
 
-On macOS, run `target/debug/kwsh` or `target/debug/kward shell` without arguments for an interactive prompt. Both use `PS1` and `PS2`; `kward shell` also accepts a literal `PROMPT`, provides basic line editing, and runs supported commands and assignments from `.kward/kwshrc` and `.kwshrc` under your home directory. Plain `kwsh` skips those files. Prompt formatting, `ENV` startup, job control, and the `?` assistant are not wired into the interactive binaries yet.
+On macOS, run `target/debug/kwsh` or `target/debug/kward shell` without arguments for an interactive prompt. Both use `PS1` and `PS2`; `kward shell` also accepts a literal `PROMPT`, provides basic line editing, and runs supported commands and assignments from `.kward/kwshrc` and `.kwshrc` under your home directory. Plain `kwsh` skips those files. Ctrl+C interrupts a foreground command; Ctrl+Z stops it, and `fg` resumes the most recently stopped command. Pipelines, background jobs, prompt formatting, `ENV` startup, and the `?` assistant are not implemented yet.
 
 ## Development
 
@@ -47,6 +47,6 @@ cargo build --locked --bins --example terminal_spike
 ruby tests/terminal_spike_test.rb
 ```
 
-The PTY suite exercises Ctrl+Z and `fg`, restoration of the stopped job’s terminal settings and the original settings on exit, and inheritance of fd 9. It also tests a fake `?` turn over private pipes: the interpreter changes its own working directory, the provider’s draft is editable without executing, and Ctrl+C cancels and reaps a waiting provider without ending the session. A separate check runs the real Rust `kward shell`, cancels an unsubmitted line, and compares terminal settings before and after exit.
+The PTY suite exercises Ctrl+Z and `fg`, restoration of the stopped job’s terminal settings and the original settings on exit, and inheritance of fd 9. It also tests a fake `?` turn over private pipes: the interpreter changes its own working directory, the provider’s draft is editable without executing, and Ctrl+C cancels and reaps a waiting provider without ending the session. The suite also runs both Rust shell profiles to check foreground signals, stop/resume, and restoration of the original terminal settings.
 
 The example recognizes only fixed test commands. It does not parse shell syntax, run arbitrary commands, contact a provider, or change either invocation profile. Ruby runs the test harness, not the Rust example.

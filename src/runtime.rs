@@ -14,7 +14,8 @@ pub(crate) struct Invocation<'a> {
     args: &'a [String],
     variables: HashMap<String, String>,
     exported: HashSet<String>,
-    pub allow_external: bool,
+    #[cfg(target_os = "macos")]
+    pub foreground: Option<crate::foreground::Foreground>,
     pub status: u8,
     pub exited: bool,
 }
@@ -26,7 +27,8 @@ impl<'a> Invocation<'a> {
             args,
             variables: HashMap::new(),
             exported: HashSet::new(),
-            allow_external: true,
+            #[cfg(target_os = "macos")]
+            foreground: None,
             status: 0,
             exited: false,
         }
@@ -116,17 +118,27 @@ impl<'a> Invocation<'a> {
                         }
                     };
                 }
-                _ if self.allow_external => self.status = self.external(&argv, &output),
-                _ => {
-                    report(&output[1], &format!("unsupported command: {name}"));
-                    self.status = 127;
-                    return;
+                #[cfg(target_os = "macos")]
+                "fg" if self.foreground.is_some() => {
+                    self.status = if args.is_empty() {
+                        match self.foreground.as_mut().unwrap().resume() {
+                            Ok(status) => status,
+                            Err(error) => {
+                                report(&output[1], &format!("fg: {error}"));
+                                1
+                            }
+                        }
+                    } else {
+                        report(&output[1], "fg: job arguments are not supported");
+                        2
+                    };
                 }
+                _ => self.status = self.external(&argv, &output),
             }
         }
     }
 
-    fn external(&self, argv: &[String], output: &[Output; 2]) -> u8 {
+    fn external(&mut self, argv: &[String], output: &[Output; 2]) -> u8 {
         let path = self
             .variables
             .get("PATH")
@@ -149,14 +161,16 @@ impl<'a> Invocation<'a> {
                 return 1;
             }
         };
-        match process::spawn(argv, &path, env, stdout, stderr) {
-            Ok(mut child) => match child.wait() {
-                Ok(status) => process::status_code(status),
-                Err(error) => {
-                    report(&output[1], &format!("{}: {error}", argv[0]));
-                    1
-                }
-            },
+        let launch = |enter| process::spawn(argv, &path, env, stdout, stderr, enter);
+        #[cfg(target_os = "macos")]
+        let result = match &mut self.foreground {
+            Some(tty) => tty.run(|| launch(Some(crate::terminal_modes::enter_child))),
+            None => launch(None).and_then(|mut child| child.wait().map(process::status_code)),
+        };
+        #[cfg(not(target_os = "macos"))]
+        let result = launch(None).and_then(|mut child| child.wait().map(process::status_code));
+        match result {
+            Ok(status) => status,
             Err(error) => {
                 let missing = error.raw_os_error() == Some(libc::ENOENT);
                 let message = if missing {

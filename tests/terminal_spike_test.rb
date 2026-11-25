@@ -2,6 +2,7 @@ require "io/console"
 require "minitest/autorun"
 require "pty"
 require "rbconfig"
+require "shellwords"
 require "timeout"
 require "tmpdir"
 
@@ -80,6 +81,33 @@ class TerminalSpikeTest < Minitest::Test
       read_until(reader, "\r\nstill-here\r\n")
       read_until(reader, "rust> ")
       exit_spike(reader, writer, pid)
+    end
+  end
+
+  { kwsh: [], kward: ["shell"] }.each do |name, args|
+    define_method("test_#{name}_foreground_signals_and_resume") do
+      binary = File.expand_path("../target/debug/#{name}", __dir__)
+      probe = "#{Shellwords.escape(SPIKE)} --foreground-probe\n"
+      prompt = "jobs> "
+      env = { "PS1" => prompt, "PROMPT" => nil, "TERM" => "xterm" }
+      with_terminal(binary, *args, env: env, prompt: prompt) do |reader, writer, pid|
+        writer.write(probe)
+        read_until(reader, "foreground ready\r\n")
+        writer.write("\x03")
+        read_until(reader, prompt)
+
+        writer.write(probe)
+        read_until(reader, "foreground ready\r\n")
+        writer.write("\x1a")
+        read_until(reader, "Stopped\r\n")
+        read_until(reader, prompt)
+        writer.write("fg\n")
+        read_until(reader, "fg\r\n")
+        writer.write("after resume\n")
+        read_until(reader, "foreground read: after resume\r\n")
+        read_until(reader, prompt)
+        exit_spike(reader, writer, pid)
+      end
     end
   end
 

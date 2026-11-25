@@ -34,6 +34,7 @@ pub(crate) fn spawn(
     environment: impl IntoIterator<Item = (OsString, OsString)>,
     stdout: Stdio,
     stderr: Stdio,
+    foreground: Option<fn() -> io::Result<()>>,
 ) -> io::Result<Child> {
     let name = &argv[0];
     let candidates: Vec<_> = if name.contains('/') {
@@ -58,8 +59,14 @@ pub(crate) fn spawn(
     // execs or returns an error, so std's own execvp path is never reached.
     let mut command = Command::new("/");
     command.stdout(stdout).stderr(stderr);
+    if foreground.is_some() {
+        command.process_group(0);
+    }
     unsafe {
         command.pre_exec(move || {
+            if let Some(enter) = foreground {
+                enter()?;
+            }
             let mut error = libc::ENOENT;
             for candidate in &candidates {
                 libc::execve(candidate.as_ptr(), args.as_ptr(), env.as_ptr());
