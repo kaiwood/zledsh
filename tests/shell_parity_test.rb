@@ -77,6 +77,35 @@ class ShellParityTest < Minitest::Test
     assert_empty error
   end
 
+  def test_startup_style_nested_parameter_defaults
+    script = <<~'SH'
+      unset RBENV_ROOT
+      printf '%s\n' "${RBENV_ROOT:-$HOME/.rbenv}/shims"
+      RBENV_ROOT=
+      printf '<%s> <%s>\n' "${RBENV_ROOT-fallback}" "${RBENV_ROOT:-fallback}"
+    SH
+    output, error, status = capture(*COMMAND, "-c", script)
+    assert status.success?, error
+    assert_equal "#{@home}/.rbenv/shims\n<> <fallback>\n", output
+    assert_empty error
+  end
+
+  def test_simple_aliases_use_the_next_input_unit
+    script = <<~'SH'
+      alias say='printf old'
+      alias say='printf new'; say
+      say
+      alias printf='false'
+      "printf" ':literal'
+      unalias printf
+      printf ':removed'
+    SH
+    output, error, status = capture(*COMMAND, "-c", script)
+    assert status.success?, error
+    assert_equal "oldnew:literal:removed", output
+    assert_empty error
+  end
+
   def test_terminal
     executable, *args = COMMAND
     PTY.spawn(@env, [executable, executable], *args, **@spawn_options) do |reader, writer, pid|

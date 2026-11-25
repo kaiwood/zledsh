@@ -20,6 +20,12 @@ pub fn suffix(line: &str, shell: &Invocation<'_>) -> Option<String> {
                 .filter(|word| word.starts_with(token))
                 .map(ToString::to_string),
         );
+        matches.extend(
+            shell
+                .aliases()
+                .filter(|name| name.starts_with(token))
+                .map(str::to_owned),
+        );
         let path = shell
             .variable("PATH")
             .unwrap_or_else(|| "/usr/bin:/bin".into());

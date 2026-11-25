@@ -71,6 +71,7 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
             .map(|arg| syntax::Word {
                 parts: vec![syntax::Part::Literal(arg)],
                 assignment: false,
+                bare: false,
             })
             .collect(),
         redirects: Vec::new(),
@@ -125,9 +126,8 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
         .map(OsString::into_string)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| "positional arguments must be UTF-8")?;
-    let commands = syntax::parse(source).map_err(|error| error.message().to_owned())?;
     let mut invocation = runtime::Invocation::new(name, &args);
-    invocation.run(&commands, &mut input);
+    invocation.run_source(source, &mut input)?;
     Ok(invocation.status)
 }
 
@@ -143,7 +143,7 @@ fn run_input(
         if count == 0 && source.is_empty() {
             break;
         }
-        match syntax::parse(&source) {
+        match invocation.parse(&source) {
             Ok(commands) => invocation.run(&commands, input),
             Err(syntax::ParseError::Incomplete(_)) if count != 0 => continue,
             Err(error) => return Err(error.message().to_owned()),

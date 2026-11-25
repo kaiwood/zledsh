@@ -8,12 +8,13 @@ use std::rc::Rc;
 
 use crate::process;
 
-use crate::syntax::{Command, Part, Redirect, Word};
+use crate::syntax::{self, Command, ParseError, Part, Redirect, Word};
 
 pub(crate) struct Invocation<'a> {
     name: &'a str,
     args: &'a [String],
     variables: HashMap<String, String>,
+    aliases: HashMap<String, String>,
     exported: HashSet<String>,
     unset: HashSet<String>,
     #[cfg(target_os = "macos")]
@@ -30,6 +31,7 @@ impl<'a> Invocation<'a> {
             name,
             args,
             variables: HashMap::new(),
+            aliases: HashMap::new(),
             exported: HashSet::new(),
             unset: HashSet::new(),
             #[cfg(target_os = "macos")]
@@ -39,6 +41,56 @@ impl<'a> Invocation<'a> {
             status: 0,
             exited: false,
         }
+    }
+
+    pub fn parse(&self, source: &str) -> Result<Vec<Vec<Command>>, ParseError> {
+        let mut commands = syntax::parse(source)?;
+        for command in commands.iter_mut().flatten() {
+            let mut seen = HashSet::new();
+            while let Some(Word {
+                parts,
+                bare: true,
+                assignment: false,
+            }) = command.words.first()
+            {
+                let [Part::Literal(name)] = parts.as_slice() else {
+                    break;
+                };
+                let Some((name, value)) = self.aliases.get_key_value(name) else {
+                    break;
+                };
+                if !seen.insert(name) {
+                    break;
+                }
+                command.words.splice(..1, alias_words(value)?);
+            }
+        }
+        Ok(commands)
+    }
+
+    pub fn run_source(&mut self, source: &str, input: &mut impl BufRead) -> Result<(), String> {
+        let mut pending = String::new();
+        for line in source.split_inclusive('\n') {
+            pending.push_str(line);
+            match self.parse(&pending) {
+                Ok(commands) => self.run(&commands, input),
+                Err(ParseError::Incomplete(_)) => continue,
+                Err(error) => return Err(error.message().to_owned()),
+            }
+            if self.exited {
+                return Ok(());
+            }
+            pending.clear();
+        }
+        if let Err(error) = self.parse(&pending) {
+            return Err(error.message().to_owned());
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn aliases(&self) -> impl Iterator<Item = &str> {
+        self.aliases.keys().map(String::as_str)
     }
 
     #[cfg(target_os = "macos")]
@@ -169,6 +221,14 @@ impl<'a> Invocation<'a> {
                         self.unset.insert(name.clone());
                     }
                 }
+                "alias" | "unalias" => {
+                    if let Err(error) = self.update_aliases(name, args, &output[0]) {
+                        report(&output[1], &format!("{name}: {error}"));
+                        self.status = 1;
+                    } else {
+                        self.status = 0;
+                    }
+                }
                 "read" => {
                     self.status = match self.read(args, input) {
                         Ok(complete) => u8::from(!complete),
@@ -207,6 +267,61 @@ impl<'a> Invocation<'a> {
                 _ => self.status = self.external(&argv, &output),
             }
         }
+    }
+
+    fn update_aliases(
+        &mut self,
+        builtin: &str,
+        args: &[String],
+        output: &Output,
+    ) -> Result<(), String> {
+        if builtin == "unalias" {
+            if args == ["-a"] {
+                self.aliases.clear();
+            } else if args.is_empty() {
+                return Err("expected an alias name".into());
+            } else {
+                for name in args {
+                    self.aliases
+                        .remove(name)
+                        .ok_or_else(|| format!("{name}: alias not found"))?;
+                }
+            }
+            return Ok(());
+        }
+        let print = |name: &str, value: &str| {
+            output
+                .write(&format!("{name}='{}'\n", value.replace('\'', "'\\''")))
+                .map_err(|error| error.to_string())
+        };
+        if args.is_empty() {
+            let mut aliases: Vec<_> = self.aliases.iter().collect();
+            aliases.sort_unstable();
+            for (name, value) in aliases {
+                print(name, value)?;
+            }
+        }
+        for arg in args {
+            if let Some((name, value)) = arg.split_once('=') {
+                if name.is_empty()
+                    || !name
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || b"_-.!%,@".contains(&c))
+                {
+                    return Err("invalid alias name".into());
+                }
+                alias_words(value).map_err(|error| error.message().to_owned())?;
+                self.aliases.insert(name.to_owned(), value.to_owned());
+            } else {
+                print(
+                    arg,
+                    self.aliases
+                        .get(arg)
+                        .ok_or_else(|| format!("{arg}: alias not found"))?,
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn change_directory(&mut self, args: &[String], output: &Output) -> Result<(), String> {
@@ -462,11 +577,18 @@ impl<'a> Invocation<'a> {
                         field.push_str(arg);
                     }
                 }
-                Part::Variable { name, default } => {
-                    if let Some(value) = self.variable_os(name) {
+                Part::Variable {
+                    name,
+                    default,
+                    if_empty,
+                } => {
+                    if let Some(value) = self
+                        .variable_os(name)
+                        .filter(|value| !if_empty || !value.is_empty())
+                    {
                         field.push_str(&value.to_string_lossy());
                     } else if let Some(value) = default {
-                        field.push_str(value);
+                        field.push_str(&self.expand(value).join(" "));
                     }
                 }
             }
@@ -501,11 +623,26 @@ impl<'a> Invocation<'a> {
 }
 
 pub(crate) const BUILTINS: &[&str] = &[
-    "exit", "cd", "pwd", "export", "unset", "read", "printf", "fg",
+    "exit", "cd", "pwd", "export", "unset", "read", "printf", "fg", "alias", "unalias",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {
     BUILTINS.contains(&name)
+}
+
+fn alias_words(value: &str) -> Result<Vec<Word>, ParseError> {
+    let mut parsed = syntax::parse(value)?;
+    if let [pipeline] = parsed.as_mut_slice() {
+        if let [command] = pipeline.as_mut_slice() {
+            if command.redirects.is_empty()
+                && !command.words.is_empty()
+                && command.words.iter().all(|word| !word.assignment)
+            {
+                return Ok(std::mem::take(&mut command.words));
+            }
+        }
+    }
+    Err("alias replacement must be a simple command without redirects".into())
 }
 
 fn valid_name(name: &str) -> bool {

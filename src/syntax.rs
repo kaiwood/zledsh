@@ -16,6 +16,7 @@ pub(crate) struct Redirect {
 pub(crate) struct Word {
     pub parts: Vec<Part>,
     pub assignment: bool,
+    pub bare: bool,
 }
 
 pub(crate) enum Part {
@@ -25,7 +26,8 @@ pub(crate) enum Part {
     Arguments,
     Variable {
         name: String,
-        default: Option<String>,
+        default: Option<Word>,
+        if_empty: bool,
     },
 }
 
@@ -166,6 +168,7 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
     let assignment = variable_name(&mut ahead).is_some() && ahead.next_if_eq(&'=').is_some();
     let mut word = Word {
         assignment,
+        bare: true,
         ..Word::default()
     };
     let mut started = false;
@@ -174,6 +177,7 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
             break;
         }
         input.next();
+        word.bare &= !matches!(ch, '\'' | '"' | '\\');
         match ch {
             '\'' => word.parts.push(Part::Literal(single_quoted(input)?)),
             '"' => double_quoted(input, &mut word)?,
@@ -253,6 +257,13 @@ pub(crate) fn parameter_text(value: &str) -> Result<Word, String> {
 }
 
 fn parameter(input: &mut Source<'_>, word: &mut Word) -> ParseResult<()> {
+    parameter_at(input, word, 0)
+}
+
+fn parameter_at(input: &mut Source<'_>, word: &mut Word, depth: usize) -> ParseResult<()> {
+    if depth >= 32 {
+        return Err("parameter expansion nested too deeply".into());
+    }
     let part = match input.peek() {
         Some('?') => {
             input.next();
@@ -269,28 +280,39 @@ fn parameter(input: &mut Source<'_>, word: &mut Word) -> ParseResult<()> {
         Some('{') => {
             input.next();
             let name = variable_name(input).ok_or("unsupported braced parameter")?;
+            let if_empty = input.next_if_eq(&':').is_some();
             let default = if input.next_if_eq(&'-').is_some() {
-                let mut text = String::new();
+                let mut value = Word::default();
                 while let Some(ch) = input.next_if(|ch| *ch != '}') {
-                    if matches!(ch, '$' | '`' | '\\' | '\'' | '"' | '{') {
-                        return Err("unsupported syntax in parameter default".into());
+                    match ch {
+                        '$' => parameter_at(input, &mut value, depth + 1)?,
+                        '`' | '\\' | '\'' | '"' | '{' => {
+                            return Err("unsupported syntax in parameter default".into());
+                        }
+                        _ => literal(&mut value, ch),
                     }
-                    text.push(ch);
                 }
-                Some(text)
+                Some(value)
+            } else if if_empty {
+                return Err("unsupported braced parameter operator".into());
             } else {
                 None
             };
             input
                 .next_if_eq(&'}')
                 .ok_or("unsupported or unclosed braced parameter")?;
-            Part::Variable { name, default }
+            Part::Variable {
+                name,
+                default,
+                if_empty,
+            }
         }
         Some(ch) if ch.is_ascii_alphanumeric() || "_(*#?$!-".contains(*ch) => {
             let name = variable_name(input).ok_or("unsupported parameter")?;
             Part::Variable {
                 name,
                 default: None,
+                if_empty: false,
             }
         }
         _ => {

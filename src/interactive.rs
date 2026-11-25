@@ -170,7 +170,7 @@ fn run_shell(
             source.clear();
             continue;
         }
-        let parsed = syntax::parse(&source);
+        let parsed = invocation.parse(&source);
         if matches!(parsed, Err(ParseError::Incomplete(_))) {
             continue;
         }
@@ -235,7 +235,7 @@ impl AgentShell<'_, '_> {
             }
             chatgpt::Action::Run(command) | chatgpt::Action::Display(command) => command,
         };
-        let pipeline = match syntax::parse(&command) {
+        let pipeline = match self.invocation.parse(&command) {
             Ok(mut commands) if commands.len() == 1 => commands.pop().unwrap(),
             Ok(_) => return Ok(json!({"error": "expected one kwsh command or pipeline"})),
             Err(error) => return Ok(json!({"error": error.message()})),
@@ -368,6 +368,7 @@ fn ask(
                         .map(|text| syntax::Word {
                             parts: vec![syntax::Part::Literal(text.into())],
                             assignment: false,
+                            bare: false,
                         })
                         .collect(),
                     redirects: Vec::new(),
@@ -440,10 +441,11 @@ fn load_kwshrc(invocation: &mut Invocation<'_>, input: &mut impl BufRead) {
 
 fn load_rc(path: &Path, invocation: &mut Invocation<'_>, input: &mut impl BufRead) {
     match fs::read_to_string(path) {
-        Ok(source) => match syntax::parse(&source) {
-            Ok(commands) => invocation.run(&commands, input),
-            Err(error) => eprintln!("kwsh: {}: {}", path.display(), error.message()),
-        },
+        Ok(source) => {
+            if let Err(error) = invocation.run_source(&source, input) {
+                eprintln!("kwsh: {}: {error}", path.display());
+            }
+        }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => eprintln!("kwsh: {}: {error}", path.display()),
     }

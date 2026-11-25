@@ -10,6 +10,10 @@ This slice supports `cd`, `pwd`, `exit` and a limited `printf` (`%s` and `%%`), 
 
 On macOS, run `target/debug/kwsh` without arguments for an interactive prompt. It supports `PS1`, `PS2`, and a Zsh-style `PROMPT` (try `PROMPT='%~ [%?] %# '`). Interactive sessions load supported commands from `~/.kward/kwshrc` and `~/.kwshrc`, then the file named by the launch environment’s `ENV`, if set. `ENV`, `PS1`, and `PS2` allow parameter expansion, not command substitution. Ctrl+C interrupts a foreground command or pipeline; Ctrl+Z stops it, and `fg` resumes the most recently stopped job. A pipeline reports its last stage’s status, and builtin stages run separately from the live shell. Background jobs are not implemented yet.
 
+Startup files support simple aliases such as `alias ll='ls -l'`. Use the alias on the next input line after defining it. Alias bodies can contain a command and its arguments, not pipelines or redirection. `unalias ll` removes it.
+
+For rbenv shims, use `export PATH="$HOME/.rbenv/shims:$PATH"` in `~/.kwshrc` (adjust the path if you use a custom `RBENV_ROOT`). The Ruby reference's `eval "$(rbenv init - bash)"` recipe is not supported yet: it needs compound conditionals, command substitution, `eval`, functions, and programmed completion. The shims-only setup does not install `rbenv shell` support or that completion.
+
 Set `HISTFILE` before the first prompt to opt into persistent history. For example, put `export HISTFILE="$HOME/.kwsh_history"` in `~/.kwshrc`. History otherwise stays in memory; `HISTSIZE` defaults to 512. At the `kwsh` prompt, use Up and Down to recall commands, Tab to complete simple command names or paths, Ctrl+W to erase the last word, and Ctrl+U to clear the draft. Use `history pause` before entering a sensitive command, then `history resume` to start recording again. Pausing does not erase earlier history or hide your input from terminal scrollback. Unsafe files (including symlinks and files not owned by you with mode `0600`) are left untouched.
 
 ### Try ChatGPT subscription sign-in (macOS)
