@@ -324,12 +324,12 @@ impl Pipeline {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub fn poll(&mut self) -> io::Result<Option<Outcome>> {
         self.collect(true)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub fn last_pid(&self) -> libc::pid_t {
         self.children.last().unwrap().0
     }

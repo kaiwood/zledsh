@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn agent_output_with_or_without_a_final_newline_leaves_the_prompt_on_its_own_line() {
         use super::*;
-        use std::process::{Command, Stdio};
+        use std::process::Stdio;
 
         const CHILD: &str = "KWSH_TEST_AGENT_OUTPUT_CHILD";
         const TEST: &str = "transcript::tests::agent_output_with_or_without_a_final_newline_leaves_the_prompt_on_its_own_line";
@@ -366,10 +366,7 @@ mod tests {
             return;
         }
 
-        let mut child = Command::new("/usr/bin/script")
-            .args(["-q", "/dev/null"])
-            .arg(std::env::current_exe().unwrap())
-            .args(["--exact", TEST, "--nocapture"])
+        let mut child = crate::test_terminal::test_command(TEST, true)
             .env(CHILD, "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

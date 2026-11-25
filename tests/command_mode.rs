@@ -77,7 +77,5 @@ fn chatgpt_login_requires_a_terminal() {
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(output.stdout.is_empty());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("requires an interactive macOS terminal")
-    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("requires an interactive terminal"));
 }

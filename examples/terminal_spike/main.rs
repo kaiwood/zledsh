@@ -1,12 +1,12 @@
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod provider;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod terminal;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[path = "../../src/terminal_modes.rs"]
 mod terminal_modes;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn main() -> std::process::ExitCode {
     use std::io::{self, Write};
 
@@ -87,7 +87,7 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn main() -> std::process::ExitCode {
     eprintln!("terminal_spike is only supported on macOS");
     std::process::ExitCode::FAILURE

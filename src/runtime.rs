@@ -17,9 +17,9 @@ pub(crate) struct Invocation<'a> {
     aliases: HashMap<String, String>,
     exported: HashSet<String>,
     unset: HashSet<String>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub foreground: Option<crate::foreground::Foreground>,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     agent_deadline: Option<std::time::Instant>,
     pub status: u8,
     pub exited: bool,
@@ -34,9 +34,9 @@ impl<'a> Invocation<'a> {
             aliases: HashMap::new(),
             exported: HashSet::new(),
             unset: HashSet::new(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             foreground: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             agent_deadline: None,
             status: 0,
             exited: false,
@@ -88,12 +88,12 @@ impl<'a> Invocation<'a> {
         Ok(())
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub fn aliases(&self) -> impl Iterator<Item = &str> {
         self.aliases.keys().map(String::as_str)
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub fn run_agent_command(&mut self, pipeline: Vec<Command>) {
         self.agent_deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
         self.run(&[pipeline], &mut io::empty());
@@ -101,11 +101,11 @@ impl<'a> Invocation<'a> {
     }
 
     fn agent_command(&self) -> bool {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             self.agent_deadline.is_some()
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             false
         }
@@ -254,7 +254,7 @@ impl<'a> Invocation<'a> {
                         }
                     };
                 }
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 "fg" | "bg" | "jobs" | "wait" => {
                     let jobs = self
                         .foreground
@@ -378,7 +378,7 @@ impl<'a> Invocation<'a> {
     }
 
     fn pipeline(&mut self, commands: &[Command], background: bool) -> io::Result<u8> {
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         if background {
             return Err(io::Error::other(
                 "background jobs are not supported on this platform",
@@ -448,7 +448,7 @@ impl<'a> Invocation<'a> {
                 None => break,
             }
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             if background {
                 return self
@@ -486,7 +486,7 @@ impl<'a> Invocation<'a> {
             Stdio::inherit()
         };
         let launch = |enter| process::spawn(argv, &path, env, [stdin, stdout, stderr], enter);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         let result = match self.foreground.as_mut().filter(|tty| tty.has_terminal()) {
             Some(tty) => tty.run(self.agent_deadline, || {
                 use std::os::fd::AsRawFd;
@@ -500,7 +500,7 @@ impl<'a> Invocation<'a> {
             }),
             None => launch(None).and_then(|mut child| child.wait().map(process::status_code)),
         };
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         let result = launch(None::<fn() -> io::Result<()>>)
             .and_then(|mut child| child.wait().map(process::status_code));
         match result {
@@ -584,7 +584,7 @@ impl<'a> Invocation<'a> {
             .and_then(|value| value.into_string().ok())
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub fn parameter_text(&self, value: &str) -> Result<String, String> {
         crate::syntax::parameter_text(value).map(|word| self.expand(&word).join(" "))
     }
@@ -599,7 +599,7 @@ impl<'a> Invocation<'a> {
                 Part::Name => field.push_str(self.name),
                 Part::Status => field.push_str(&self.status.to_string()),
                 Part::LastBackground => {
-                    #[cfg(target_os = "macos")]
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
                     if let Some(pid) = self
                         .foreground
                         .as_ref()
@@ -765,7 +765,7 @@ fn printf(args: &[String]) -> Result<String, String> {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
     use super::*;
 
@@ -790,10 +790,7 @@ mod tests {
 
         // Re-exec this test on a controlling PTY, not Cargo's stdin.
         let work = tempfile::tempdir().unwrap();
-        let output = std::process::Command::new("/usr/bin/script")
-            .args(["-q", "/dev/null"])
-            .arg(std::env::current_exe().unwrap())
-            .args(["--exact", TEST])
+        let output = crate::test_terminal::test_command(TEST, false)
             .env(CHILD, "1")
             .current_dir(work.path())
             .stdin(Stdio::null())

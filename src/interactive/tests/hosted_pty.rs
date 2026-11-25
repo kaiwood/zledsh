@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::{Value, json};
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 #[test]
@@ -29,15 +29,9 @@ fn hosted_turns_in_a_real_terminal() {
     }
 
     let work = tempfile::tempdir().unwrap();
-    let mut child = Command::new("/usr/bin/script")
-        .args(["-q", "/dev/null"])
-        .arg(env::current_exe().unwrap())
-        .args([
-            "--exact",
-            concat!(module_path!(), "::hosted_turns_in_a_real_terminal")
-                .trim_start_matches("kwsh::"),
-            "--nocapture",
-        ])
+    let name =
+        concat!(module_path!(), "::hosted_turns_in_a_real_terminal").trim_start_matches("kwsh::");
+    let mut child = crate::test_terminal::test_command(name, true)
         .current_dir(work.path())
         .envs([
             ("HOME", work.path().to_str().unwrap()),

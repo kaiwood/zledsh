@@ -67,7 +67,11 @@ pub(super) fn authorize(
     let query = form(&fields);
     let url = format!("{ISSUER}/api/accounts/authorize?{query}");
     check_cancelled(cancelled)?;
-    let status = Command::new("/usr/bin/open")
+    #[cfg(target_os = "macos")]
+    let browser = "/usr/bin/open";
+    #[cfg(target_os = "linux")]
+    let browser = "xdg-open";
+    let status = Command::new(browser)
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())

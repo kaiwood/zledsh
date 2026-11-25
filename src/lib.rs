@@ -1,25 +1,25 @@
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod assistant;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod chatgpt;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod completion;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod foreground;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod history;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod interactive;
 mod process;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod prompt;
 mod runtime;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod shell_context;
 mod syntax;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod terminal_modes;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod transcript;
 
 use std::{
@@ -95,7 +95,7 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
         }
         let mut invocation =
             runtime::Invocation::new(name.to_str().ok_or("command name must be UTF-8")?, &[]);
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             use std::io::IsTerminal;
             if io::stdin().is_terminal() && io::stderr().is_terminal() {
@@ -104,7 +104,7 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
             }
         }
         if chatgpt {
-            return Err("--chatgpt requires an interactive macOS terminal".into());
+            return Err("--chatgpt requires an interactive terminal on macOS or Linux".into());
         }
         return run_input(&mut invocation, &mut input);
     }
@@ -112,11 +112,11 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
     match option.to_str() {
         Some("--help") => {
             println!("Usage: kwsh [-c command [name [args...]]]");
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             println!("       kwsh --chatgpt | --chatgpt-sign-out");
             return Ok(0);
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         Some("--chatgpt-sign-out") => {
             if args.next().is_some() {
                 return Err("--chatgpt-sign-out does not take arguments".into());
@@ -165,3 +165,6 @@ fn run_input(
     }
     Ok(invocation.status)
 }
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+mod test_terminal;
