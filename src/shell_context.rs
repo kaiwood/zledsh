@@ -28,3 +28,55 @@ impl ShellContext {
         }
     }
 }
+
+#[derive(Serialize)]
+pub(crate) struct VisibleDirectories {
+    count: usize,
+    names: Vec<String>,
+}
+
+pub(crate) fn visible_directories(path: &std::path::Path) -> Option<VisibleDirectories> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut result = VisibleDirectories {
+        count: 0,
+        names: Vec::new(),
+    };
+    for (index, entry) in std::fs::read_dir(path).ok()?.enumerate() {
+        // A partial scan cannot establish the count.
+        if index >= 16_384 {
+            return None;
+        }
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        if !name.as_bytes().starts_with(b".") && entry.file_type().ok()?.is_dir() {
+            result.count += 1;
+            if result.names.len() < 128 {
+                result.names.push(name.to_string_lossy().into_owned());
+            }
+        }
+    }
+    result.names.sort_unstable();
+    Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn counts_directories_from_filesystem_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path();
+        for name in ["examples", "src", "target", "tests", ".hidden"] {
+            std::fs::create_dir(path.join(name)).unwrap();
+        }
+        for name in ["README.md", "Cargo.toml", "Cargo.lock"] {
+            std::fs::File::create(path.join(name)).unwrap();
+        }
+        std::os::unix::fs::symlink(path.join("tests"), path.join("link")).unwrap();
+        let result = visible_directories(path).unwrap();
+        assert_eq!(result.count, 4);
+        assert_eq!(result.names, ["examples", "src", "target", "tests"]);
+    }
+}

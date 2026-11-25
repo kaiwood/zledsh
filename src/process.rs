@@ -32,8 +32,7 @@ pub(crate) fn spawn(
     argv: &[String],
     path: &OsStr,
     environment: impl IntoIterator<Item = (OsString, OsString)>,
-    stdout: Stdio,
-    stderr: Stdio,
+    [stdin, stdout, stderr]: [Stdio; 3],
     foreground: Option<fn() -> io::Result<()>>,
 ) -> io::Result<Child> {
     let exec = Exec::new(argv, path, environment)?;
@@ -41,7 +40,7 @@ pub(crate) fn spawn(
     // Let std wire the descriptors and reap spawn failures. The hook always
     // execs or returns an error, so std's own execvp path is never reached.
     let mut command = Command::new("/");
-    command.stdout(stdout).stderr(stderr);
+    command.stdin(stdin).stdout(stdout).stderr(stderr);
     if foreground.is_some() {
         command.process_group(0);
     }
@@ -261,6 +260,7 @@ enum Member {
 
 pub(crate) enum Outcome {
     Stopped(u8),
+    TimedOut,
     Exited { code: u8, signaled: bool },
 }
 
@@ -312,7 +312,7 @@ impl Pipeline {
         }
     }
 
-    pub fn wait(&mut self) -> io::Result<Outcome> {
+    pub fn wait(&mut self, deadline: Option<std::time::Instant>) -> io::Result<Outcome> {
         let mut stop_signal = 0;
         loop {
             let running = self
@@ -333,11 +333,19 @@ impl Pipeline {
                     signaled: status.signal().is_some(),
                 });
             };
+            let polling = if deadline.is_some() { libc::WNOHANG } else { 0 };
             let (pid, status) = if let Some(group) = self.group {
-                wait_pid(-group, libc::WUNTRACED)?
+                wait_pid(-group, libc::WUNTRACED | polling)?
             } else {
-                wait_pid(pid, 0)?
+                wait_pid(pid, polling)?
             };
+            if pid == 0 {
+                if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                    return Ok(Outcome::TimedOut);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
             let last_pid = self.children.last().unwrap().0;
             if let Some((_, member)) = self.children.iter_mut().find(|(child, _)| *child == pid) {
                 if libc::WIFSTOPPED(status) {

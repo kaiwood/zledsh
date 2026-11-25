@@ -133,33 +133,23 @@ fn run_shell(
                         input,
                     )?;
                 } else if matching_identity() {
-                    let session = chatgpt.clone();
-                    let home = env::var_os("HOME")
-                        .map(PathBuf::from)
-                        .filter(|path| path.is_absolute());
-                    let model = invocation.variable("KWSH_CHATGPT_MODEL");
-                    let effort = invocation.variable("KWSH_CHATGPT_REASONING_EFFORT");
-                    let question = instruction.trim().to_owned();
-                    match editor.chatgpt_task(input, move |cancelled| {
-                        let session = match session {
-                            Some(session) => session,
-                            None => Arc::new(chatgpt::Session::connect(
-                                home.as_deref().ok_or(chatgpt::Error::Message(
-                                    "ChatGPT requires an absolute HOME",
-                                ))?,
-                                model.as_deref(),
-                                effort.as_deref(),
-                                false,
-                                cancelled,
-                            )?),
-                        };
-                        let answer = session.answer(&question, &context, cancelled)?;
-                        Ok((session, answer))
-                    })? {
-                        Some(Ok((session, answer))) => {
-                            chatgpt = Some(session);
-                            show_answer(&answer);
-                        }
+                    let number = history.next;
+                    let mut shell = AgentShell {
+                        invocation,
+                        transcript: transcript.as_mut(),
+                        last_command: &mut last_command,
+                        draft: &mut pending_draft,
+                        command_number: number,
+                    };
+                    match ask_chatgpt(
+                        editor,
+                        input,
+                        &mut chatgpt,
+                        &mut shell,
+                        instruction.trim(),
+                        &context,
+                    )? {
+                        Some(Ok(answer)) => show_answer(&answer),
                         Some(Err(error)) => eprintln!("kwsh: ChatGPT: {error}"),
                         None => eprintln!("^C\nturn cancelled"),
                     }
@@ -217,6 +207,140 @@ fn run_shell(
         return Ok(2);
     }
     Ok(invocation.status)
+}
+
+struct AgentShell<'a, 'invocation> {
+    invocation: &'a mut Invocation<'invocation>,
+    transcript: Option<&'a mut Transcript>,
+    last_command: &'a mut Option<LastCommand>,
+    draft: &'a mut String,
+    command_number: usize,
+}
+
+impl AgentShell<'_, '_> {
+    fn act(
+        &mut self,
+        action: chatgpt::Action,
+        terminal: &mut impl Write,
+    ) -> io::Result<serde_json::Value> {
+        use serde_json::json;
+        let command = match action {
+            chatgpt::Action::Prepare(command) => {
+                *self.draft = command;
+                return Ok(json!({"prepared": true, "executed": false}));
+            }
+            chatgpt::Action::Run(_) if !self.draft.is_empty() => {
+                return Ok(json!({"error": "the prepared draft must be submitted by the user"}));
+            }
+            chatgpt::Action::Run(command) => command,
+        };
+        let pipeline = match syntax::parse(&command) {
+            Ok(mut commands) if commands.len() == 1 => commands.pop().unwrap(),
+            Ok(_) => return Ok(json!({"error": "expected one kwsh command or pipeline"})),
+            Err(error) => return Ok(json!({"error": error.message()})),
+        };
+        let prompt = crate::prompt::render(self.invocation, false, self.command_number);
+        writeln!(terminal, "{prompt}{command}")?;
+        terminal.flush()?;
+        if let Some(capture) = &mut self.transcript {
+            // This handshake flushes the command echo on the real terminal before execution.
+            capture.begin(transcript::input_pending())?;
+        }
+        self.invocation.run_agent_command(pipeline);
+        let output = match &mut self.transcript {
+            Some(capture) => capture.finish()?,
+            None => None,
+        };
+        let status = self.invocation.status;
+        let result = json!({
+            "exit_status": status,
+            "cwd": env::current_dir().ok().map(|path| path.to_string_lossy().into_owned()),
+            "output": output,
+        });
+        *self.last_command = Some(LastCommand {
+            source: command,
+            output,
+            status,
+        });
+        Ok(result)
+    }
+}
+
+fn ask_chatgpt(
+    editor: &EditorTerminal,
+    input: &mut impl BufRead,
+    session: &mut Option<Arc<chatgpt::Session>>,
+    shell: &mut AgentShell<'_, '_>,
+    instruction: &str,
+    context: &ShellContext,
+) -> io::Result<Option<Result<String, chatgpt::Error>>> {
+    let mut turn = match chatgpt::Turn::new(instruction, context) {
+        Ok(turn) => turn,
+        Err(error) => return Ok(Some(Err(error))),
+    };
+    if session.is_none() {
+        let home = env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute());
+        let model = shell.invocation.variable("KWSH_CHATGPT_MODEL");
+        let effort = shell.invocation.variable("KWSH_CHATGPT_REASONING_EFFORT");
+        match editor.chatgpt_task(input, move |cancelled| {
+            chatgpt::Session::connect(
+                home.as_deref()
+                    .ok_or(chatgpt::Error::Message("ChatGPT requires an absolute HOME"))?,
+                model.as_deref(),
+                effort.as_deref(),
+                false,
+                cancelled,
+            )
+        })? {
+            Some(Ok(connected)) => *session = Some(Arc::new(connected)),
+            Some(Err(error)) => return Ok(Some(Err(error))),
+            None => return Ok(None),
+        }
+    }
+    let session = session.as_ref().unwrap();
+    loop {
+        let session = Arc::clone(session);
+        // Move the stateless request history to the worker and back; only
+        // the interactive thread can act on a completed tool call.
+        let Some(response) = editor.chatgpt_task(input, move |cancelled| {
+            let reply = session.respond(&turn, cancelled)?;
+            Ok((turn, reply))
+        })?
+        else {
+            return Ok(None);
+        };
+        let (mut previous, reply) = match response {
+            Ok(result) => result,
+            Err(error) => return Ok(Some(Err(error))),
+        };
+        let mut io_error = None;
+        let mut interrupted = false;
+        let result = previous.advance(reply, |action| {
+            match shell.act(action, &mut io::stderr().lock()) {
+                Ok(result) => {
+                    interrupted = result["exit_status"] == 130;
+                    result
+                }
+                Err(error) => {
+                    io_error = Some(error);
+                    serde_json::Value::Null
+                }
+            }
+        });
+        if let Some(error) = io_error {
+            return Err(error);
+        }
+        if interrupted {
+            return Ok(None);
+        }
+        match result {
+            Ok(None) => turn = previous,
+            Ok(Some(answer)) => return Ok(Some(Ok(answer))),
+            Err(error) => return Ok(Some(Err(error))),
+        }
+    }
 }
 
 fn ask(
@@ -390,7 +514,9 @@ fn run_chatgpt_task<T: Send + 'static>(
             if ready.send(guard.is_ok()).is_err() || guard.is_err() {
                 return;
             }
-            let _ = tx.send(task(&worker_flag));
+            let result = task(&worker_flag);
+            drop(guard);
+            let _ = tx.send(result);
         })?;
     if !started.recv().unwrap_or(false) {
         return Ok(Some(Err(chatgpt::Error::Message(
@@ -563,6 +689,79 @@ fn read_key_byte(input: &mut impl BufRead) -> io::Result<Option<u8>> {
             Ok(_) => return Ok(Some(byte[0])),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_tool_prints_before_execution_and_drafts_do_not_execute() {
+        let work = tempfile::tempdir().unwrap();
+        let path = work.path().join("foo.txt");
+        let command = format!("/usr/bin/touch '{}'", path.display());
+        let mut invocation = Invocation::new("kwsh", &[]);
+        let mut draft = String::new();
+        let mut last_command = None;
+        let mut shell = AgentShell {
+            invocation: &mut invocation,
+            transcript: None,
+            last_command: &mut last_command,
+            draft: &mut draft,
+            command_number: 1,
+        };
+        let mut display = BeforeExecution {
+            path: &path,
+            text: Vec::new(),
+            flushed: false,
+        };
+        let prepared = shell
+            .act(chatgpt::Action::Prepare(command.clone()), &mut display)
+            .unwrap();
+        assert_eq!(prepared["executed"], false);
+        assert!(!path.exists());
+        assert!(display.text.is_empty());
+        assert_eq!(*shell.draft, command);
+        let blocked = shell
+            .act(chatgpt::Action::Run(command.clone()), &mut display)
+            .unwrap();
+        assert!(blocked["error"].is_string());
+        assert!(!path.exists());
+        shell.draft.clear();
+        let run = shell
+            .act(chatgpt::Action::Run(command.clone()), &mut display)
+            .unwrap();
+        assert_eq!(run["exit_status"], 0);
+        assert!(display.flushed);
+        assert!(
+            String::from_utf8(display.text)
+                .unwrap()
+                .ends_with(&format!("{command}\n"))
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        assert_eq!(last_command.unwrap().source, command);
+    }
+
+    struct BeforeExecution<'a> {
+        path: &'a Path,
+        text: Vec<u8>,
+        flushed: bool,
+    }
+
+    impl Write for BeforeExecution<'_> {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.text.write(bytes)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            assert!(
+                !self.path.exists(),
+                "command ran before its echo was flushed"
+            );
+            self.flushed = true;
+            Ok(())
         }
     }
 }

@@ -1,5 +1,6 @@
 use std::io;
 use std::process::Child;
+use std::time::Instant;
 
 use crate::process::{Outcome, Pipeline, Stage};
 
@@ -22,13 +23,21 @@ impl Foreground {
         })
     }
 
-    pub fn run(&mut self, spawn: impl FnOnce() -> io::Result<Child>) -> io::Result<u8> {
+    pub fn run(
+        &mut self,
+        deadline: Option<Instant>,
+        spawn: impl FnOnce() -> io::Result<Child>,
+    ) -> io::Result<u8> {
         let terminal = ShellTerminal::save(self.shell_group)?;
         let child = spawn()?;
-        self.wait(Pipeline::from_foreground_child(child), terminal)
+        self.wait(Pipeline::from_foreground_child(child), terminal, deadline)
     }
 
-    pub fn run_pipeline(&mut self, stages: Vec<Stage>) -> io::Result<u8> {
+    pub fn run_pipeline(
+        &mut self,
+        stages: Vec<Stage>,
+        deadline: Option<Instant>,
+    ) -> io::Result<u8> {
         let terminal = ShellTerminal::save(self.shell_group)?;
         let (job, gate) = Pipeline::start(stages, true)?;
         if let Err(error) = give_terminal(job.group.unwrap()) {
@@ -36,7 +45,7 @@ impl Foreground {
             return Err(error);
         }
         drop(gate);
-        self.wait(job, terminal)
+        self.wait(job, terminal, deadline)
     }
 
     pub fn resume(&mut self) -> io::Result<u8> {
@@ -50,11 +59,28 @@ impl Foreground {
         give_terminal(group)?;
         cvt(unsafe { libc::kill(-group, libc::SIGCONT) })?;
         job.resumed();
-        self.wait(job, terminal)
+        self.wait(job, terminal, None)
     }
 
-    fn wait(&mut self, mut job: Pipeline, terminal: ShellTerminal) -> io::Result<u8> {
-        match job.wait()? {
+    fn wait(
+        &mut self,
+        mut job: Pipeline,
+        terminal: ShellTerminal,
+        deadline: Option<Instant>,
+    ) -> io::Result<u8> {
+        match job.wait(deadline)? {
+            Outcome::TimedOut => {
+                drop(job);
+                terminal.restore()?;
+                eprintln!("kwsh: shell agent command timed out");
+                Ok(124)
+            }
+            Outcome::Stopped(code) if deadline.is_some() => {
+                drop(job);
+                terminal.restore()?;
+                eprintln!("kwsh: shell agent command stopped and was cancelled");
+                Ok(code)
+            }
             Outcome::Stopped(code) => {
                 let modes = attributes()?;
                 terminal.restore()?;

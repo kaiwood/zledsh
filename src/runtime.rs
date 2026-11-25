@@ -18,6 +18,8 @@ pub(crate) struct Invocation<'a> {
     unset: HashSet<String>,
     #[cfg(target_os = "macos")]
     pub foreground: Option<crate::foreground::Foreground>,
+    #[cfg(target_os = "macos")]
+    agent_deadline: Option<std::time::Instant>,
     pub status: u8,
     pub exited: bool,
 }
@@ -32,8 +34,28 @@ impl<'a> Invocation<'a> {
             unset: HashSet::new(),
             #[cfg(target_os = "macos")]
             foreground: None,
+            #[cfg(target_os = "macos")]
+            agent_deadline: None,
             status: 0,
             exited: false,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn run_agent_command(&mut self, pipeline: Vec<Command>) {
+        self.agent_deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+        self.run(&[pipeline], &mut io::empty());
+        self.agent_deadline = None;
+    }
+
+    fn agent_command(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.agent_deadline.is_some()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
         }
     }
 
@@ -79,6 +101,11 @@ impl<'a> Invocation<'a> {
                 self.status = 0;
                 continue;
             };
+            if self.agent_command() && matches!(name.as_str(), "exit" | "fg") {
+                report(&output[1], "exit and fg must be submitted by the user");
+                self.status = 2;
+                continue;
+            }
             match name.as_str() {
                 "exit" => {
                     self.exited = true;
@@ -223,7 +250,11 @@ impl<'a> Invocation<'a> {
 
     fn pipeline(&mut self, commands: &[Command]) -> io::Result<u8> {
         let (path, env) = self.execution_environment();
-        let mut stdin = process::duplicate(libc::STDIN_FILENO)?;
+        let mut stdin = if self.agent_command() {
+            File::open("/dev/null")?.into()
+        } else {
+            process::duplicate(libc::STDIN_FILENO)?
+        };
         let mut stages = Vec::new();
         for (index, command) in commands.iter().enumerate() {
             let next = if index + 1 == commands.len() {
@@ -281,12 +312,13 @@ impl<'a> Invocation<'a> {
         }
         #[cfg(target_os = "macos")]
         if let Some(tty) = &mut self.foreground {
-            return tty.run_pipeline(stages);
+            return tty.run_pipeline(stages, self.agent_deadline);
         }
         let (mut job, gate) = process::Pipeline::start(stages, false)?;
         drop(gate);
-        match job.wait()? {
+        match job.wait(None)? {
             process::Outcome::Exited { code, .. } | process::Outcome::Stopped(code) => Ok(code),
+            process::Outcome::TimedOut => Ok(124),
         }
     }
 
@@ -302,10 +334,17 @@ impl<'a> Invocation<'a> {
                 return 1;
             }
         };
-        let launch = |enter| process::spawn(argv, &path, env, stdout, stderr, enter);
+        let stdin = if self.agent_command() {
+            Stdio::null()
+        } else {
+            Stdio::inherit()
+        };
+        let launch = |enter| process::spawn(argv, &path, env, [stdin, stdout, stderr], enter);
         #[cfg(target_os = "macos")]
         let result = match &mut self.foreground {
-            Some(tty) => tty.run(|| launch(Some(crate::terminal_modes::enter_child))),
+            Some(tty) => tty.run(self.agent_deadline, || {
+                launch(Some(crate::terminal_modes::enter_child))
+            }),
             None => launch(None).and_then(|mut child| child.wait().map(process::status_code)),
         };
         #[cfg(not(target_os = "macos"))]
