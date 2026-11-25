@@ -1558,14 +1558,37 @@ impl<'a> Invocation<'a> {
         status: &mut Option<u8>,
     ) -> Result<(), String> {
         for redirect in redirects {
-            if self.agent_command() && matches!(redirect.kind, RedirectKind::Read) {
+            let (fd, target, kind) = match redirect {
+                Redirect::File { fd, target, kind } => (*fd, target, *kind),
+                Redirect::Here(document) => {
+                    if self.agent_command() {
+                        return Err("here-documents must be submitted by the user".into());
+                    }
+                    let text = document.text.borrow();
+                    let expanded;
+                    let text = if document.expand {
+                        expanded = self.expand(&syntax::here_word(&text)?, status)?.join(" ");
+                        &expanded
+                    } else {
+                        &text
+                    };
+                    // Use an anonymous file so big bodies cannot fill an unconsumed pipe.
+                    let mut file = tempfile::tempfile().map_err(here_document_error)?;
+                    file.write_all(text.as_bytes())
+                        .map_err(here_document_error)?;
+                    file.rewind().map_err(here_document_error)?;
+                    *input = Some(file);
+                    continue;
+                }
+            };
+            if self.agent_command() && matches!(kind, RedirectKind::Read) {
                 return Err("input redirection must be submitted by the user".into());
             }
-            let targets = self.expand(&redirect.target, status)?;
+            let targets = self.expand(target, status)?;
             let [target] = targets.as_slice() else {
                 return Err("ambiguous redirection".into());
             };
-            match redirect.kind {
+            match kind {
                 RedirectKind::Read => {
                     *input =
                         Some(File::open(target).map_err(|error| format!("{target}: {error}"))?);
@@ -1573,10 +1596,10 @@ impl<'a> Invocation<'a> {
                 RedirectKind::Write => {
                     let file =
                         File::create(target).map_err(|error| format!("{target}: {error}"))?;
-                    output[redirect.fd - 1] = Output::File(Rc::new(file));
+                    output[fd - 1] = Output::File(Rc::new(file));
                 }
                 RedirectKind::Duplicate => {
-                    output[redirect.fd - 1] = match target.as_str() {
+                    output[fd - 1] = match target.as_str() {
                         "1" => output[0].clone(),
                         "2" => output[1].clone(),
                         _ => return Err("only output descriptors 1 and 2 are supported".into()),
@@ -1586,6 +1609,10 @@ impl<'a> Invocation<'a> {
         }
         Ok(())
     }
+}
+
+fn here_document_error(error: io::Error) -> String {
+    format!("here-document: {error}")
 }
 
 pub(crate) const BUILTINS: &[&str] = &[

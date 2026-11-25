@@ -85,6 +85,29 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
+  def test_here_document_prompts_for_input_and_can_be_cancelled
+    prompt = "here> "
+    continuation = "body> "
+    env = { "PROMPT" => prompt, "PS2" => continuation, "TERM" => "xterm" }
+    with_terminal(KWSH, "-i", env: env, prompt: prompt) do |reader, writer, pid, work|
+      writer.write("printf wrong > marker <<END\n")
+      read_until(reader, continuation)
+      writer.write("not submitted\n")
+      read_until(reader, continuation)
+      writer.write("\x03")
+      read_until(reader, prompt)
+      refute_path_exists File.join(work, "marker")
+      writer.write("cat <<'END'\n")
+      read_until(reader, continuation)
+      writer.write("actual body\n")
+      read_until(reader, continuation)
+      writer.write("END\n")
+      read_until(reader, "\r\nactual body\r\n")
+      read_until(reader, prompt)
+      exit_spike(reader, writer, pid)
+    end
+  end
+
   def test_foreground_signals_and_resume
     probe = "#{Shellwords.escape(SPIKE)} --foreground-probe\n"
     prompt = "jobs> "

@@ -1,4 +1,4 @@
-use std::{iter::Peekable, str::Chars};
+use std::{cell::RefCell, iter::Peekable, rc::Rc, str::Chars};
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Command {
@@ -8,10 +8,26 @@ pub(crate) struct Command {
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Redirect {
-    pub fd: usize,
-    pub target: Word,
-    pub kind: RedirectKind,
+pub(crate) enum Redirect {
+    File {
+        fd: usize,
+        target: Word,
+        kind: RedirectKind,
+    },
+    Here(HereDocument),
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct HereDocument {
+    pub text: Rc<RefCell<String>>,
+    pub expand: bool,
+}
+
+#[derive(Clone)]
+struct PendingHere {
+    delimiter: String,
+    strip_tabs: bool,
+    document: HereDocument,
 }
 
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -65,6 +81,7 @@ struct Source<'a> {
     chars: Peekable<Chars<'a>>,
     offset: usize,
     substitutions: Option<usize>,
+    pending_here: Vec<PendingHere>,
 }
 
 impl<'a> Source<'a> {
@@ -74,6 +91,7 @@ impl<'a> Source<'a> {
             chars: source.chars().peekable(),
             offset: 0,
             substitutions,
+            pending_here: Vec::new(),
         }
     }
 
@@ -89,6 +107,60 @@ impl<'a> Source<'a> {
 
     fn next_if_eq(&mut self, expected: &char) -> Option<char> {
         self.next_if(|ch| ch == expected)
+    }
+
+    fn read_here_documents(&mut self) -> ParseResult<()> {
+        // Newlines end the command header. The queued bodies are data, not tokens.
+        for pending in std::mem::take(&mut self.pending_here) {
+            let body = pending.read(self)?;
+            *pending.document.text.borrow_mut() = body;
+        }
+        Ok(())
+    }
+
+    fn physical_line(&mut self) -> Option<&'a str> {
+        let line = self.source[self.offset..].split_inclusive('\n').next()?;
+        self.offset += line.len();
+        self.chars = self.source[self.offset..].chars().peekable();
+        Some(line)
+    }
+
+    fn require_here_documents(&self) -> ParseResult<()> {
+        if self.pending_here.is_empty() {
+            Ok(())
+        } else {
+            Err(ParseError::Incomplete("expected here-document body"))
+        }
+    }
+}
+
+impl PendingHere {
+    fn read(&self, source: &mut Source<'_>) -> ParseResult<String> {
+        let mut body = String::new();
+        let mut line = String::new();
+        while let Some(physical) = source.physical_line() {
+            if self.document.expand {
+                if let Some(text) = physical.strip_suffix('\n') {
+                    let slashes = text.bytes().rev().take_while(|&byte| byte == b'\\').count();
+                    if slashes % 2 != 0 {
+                        line.push_str(&text[..text.len() - 1]);
+                        continue;
+                    }
+                }
+            }
+            line.push_str(physical);
+            let text = if self.strip_tabs {
+                line.trim_start_matches('\t')
+            } else {
+                &line
+            };
+            if text.strip_suffix('\n').unwrap_or(text) == self.delimiter {
+                return Ok(body);
+            }
+            body.push_str(text);
+            line.clear();
+        }
+        Err(ParseError::Incomplete("missing here-document delimiter"))
     }
 }
 
@@ -167,7 +239,10 @@ pub(crate) enum CasePattern {
 }
 
 pub(crate) fn parse(source: &str) -> ParseResult<Script> {
-    list(&mut Source::new(source, Some(0)), &[], 0)
+    let mut input = Source::new(source, Some(0));
+    let script = list(&mut input, &[], 0)?;
+    input.require_here_documents()?;
+    Ok(script)
 }
 
 fn skip_space(input: &mut Source<'_>) {
@@ -195,6 +270,7 @@ fn list(input: &mut Source<'_>, stops: &[&str], depth: usize) -> ParseResult<Scr
     loop {
         skip_space(input);
         if input.next_if_eq(&'\n').is_some() {
+            input.read_here_documents()?;
             continue;
         }
         if input.peek().is_none() {
@@ -219,7 +295,8 @@ fn list(input: &mut Source<'_>, stops: &[&str], depth: usize) -> ParseResult<Scr
                 Statement::Pipeline(stages) => stages.last_mut().unwrap().background = true,
                 _ => return Err("background compound commands are not supported".into()),
             },
-            Some(';' | '\n') | None => {}
+            Some('\n') => input.read_here_documents()?,
+            Some(';') | None => {}
             _ => return Err("expected a command separator".into()),
         }
         script.push(statement);
@@ -247,7 +324,7 @@ fn and_or(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
             _ => break,
         };
         *input = ahead;
-        skip_newlines(input);
+        skip_newlines(input)?;
         if input.peek().is_none() {
             return Err(ParseError::Incomplete("expected a command after && or ||"));
         }
@@ -263,12 +340,13 @@ fn and_or(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
     })
 }
 
-fn skip_newlines(input: &mut Source<'_>) {
+fn skip_newlines(input: &mut Source<'_>) -> ParseResult<()> {
     loop {
         skip_space(input);
         if input.next_if_eq(&'\n').is_none() {
-            break;
+            return Ok(());
         }
+        input.read_here_documents()?;
     }
 }
 
@@ -293,7 +371,7 @@ fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
     } else if let Some((name, local)) = array_header(input) {
         let mut words = Vec::new();
         loop {
-            skip_newlines(input);
+            skip_newlines(input)?;
             match input.peek() {
                 Some(')') => {
                     input.next();
@@ -308,7 +386,7 @@ fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
         if depth >= 32 {
             return Err("compound commands nested too deeply".into());
         }
-        skip_newlines(input);
+        skip_newlines(input)?;
         expect_keyword(input, "{", "expected { after function header")?;
         let body = list(input, &["}"], depth + 1)?;
         expect_keyword(input, "}", "expected } after function body")?;
@@ -443,10 +521,11 @@ fn for_loop(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
     };
     match input.next() {
         None => return Err(ParseError::Incomplete("expected do in for loop")),
-        Some(';' | '\n') => {}
+        Some('\n') => input.read_here_documents()?,
+        Some(';') => {}
         _ => return Err("expected a separator before do".into()),
     }
-    skip_newlines(input);
+    skip_newlines(input)?;
     Ok(Statement::For {
         name,
         words,
@@ -470,11 +549,11 @@ fn case_statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement
         return Err(ParseError::Incomplete("expected a case word"));
     }
     let subject = word(input)?;
-    skip_newlines(input);
+    skip_newlines(input)?;
     expect_keyword(input, "in", "expected in after case word")?;
     let mut clauses = Vec::new();
     loop {
-        skip_newlines(input);
+        skip_newlines(input)?;
         if head(input) == "esac" {
             break;
         }
@@ -573,7 +652,7 @@ fn pipeline(input: &mut Source<'_>) -> ParseResult<Vec<Command>> {
             return Ok(stages);
         }
         *input = ahead;
-        skip_newlines(input);
+        skip_newlines(input)?;
     }
 }
 
@@ -587,6 +666,22 @@ fn redirect(input: &mut Source<'_>) -> ParseResult<Option<Redirect>> {
         Some('<') => {
             if !matches!(digits.as_str(), "" | "0") {
                 return Err("only input descriptor 0 is supported".into());
+            }
+            if ahead.next_if_eq(&'<').is_some() {
+                let strip_tabs = ahead.next_if_eq(&'-').is_some();
+                while ahead.next_if(|ch| matches!(ch, ' ' | '\t')).is_some() {}
+                let (delimiter, expand) = here_delimiter(&mut ahead)?;
+                let document = HereDocument {
+                    text: Rc::default(),
+                    expand,
+                };
+                ahead.pending_here.push(PendingHere {
+                    delimiter,
+                    strip_tabs,
+                    document: document.clone(),
+                });
+                *input = ahead;
+                return Ok(Some(Redirect::Here(document)));
             }
             (0, RedirectKind::Read)
         }
@@ -616,7 +711,60 @@ fn redirect(input: &mut Source<'_>) -> ParseResult<Option<Redirect>> {
         }
     }
     *input = ahead;
-    Ok(Some(Redirect { fd, target, kind }))
+    Ok(Some(Redirect::File { fd, target, kind }))
+}
+
+// Parse the delimiter literally: quote removal, but no word expansion.
+fn here_delimiter(input: &mut Source<'_>) -> ParseResult<(String, bool)> {
+    let mut text = String::new();
+    let mut quoted = false;
+    while let Some(ch) = input.next_if(|&ch| !boundary(ch) && ch != '(') {
+        match ch {
+            '\'' => {
+                quoted = true;
+                text.push_str(&single_quoted(input)?);
+            }
+            '"' => {
+                quoted = true;
+                loop {
+                    match input.next() {
+                        Some('"') => break,
+                        Some('\\') => {
+                            match input.next_if(|ch| matches!(ch, '$' | '`' | '"' | '\\' | '\n')) {
+                                Some('\n') => {}
+                                Some(ch) => text.push(ch),
+                                None => text.push('\\'),
+                            }
+                        }
+                        Some(ch) => text.push(ch),
+                        None => {
+                            return Err(ParseError::Incomplete(
+                                "unclosed here-document delimiter quote",
+                            ));
+                        }
+                    }
+                }
+            }
+            '\\' => match input.next() {
+                Some('\n') => {}
+                Some(ch) => {
+                    quoted = true;
+                    text.push(ch);
+                }
+                None => {
+                    return Err(ParseError::Incomplete(
+                        "trailing backslash in here-document delimiter",
+                    ));
+                }
+            },
+            '#' if text.is_empty() && !quoted => break,
+            ch => text.push(ch),
+        }
+    }
+    if text.is_empty() && !quoted {
+        return Err("missing here-document delimiter".into());
+    }
+    Ok((text, !quoted))
 }
 
 fn word(input: &mut Source<'_>) -> ParseResult<Word> {
@@ -703,8 +851,16 @@ fn double_quoted(input: &mut Source<'_>, word: &mut Word) -> ParseResult<()> {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) fn parameter_text(value: &str) -> Result<Word, String> {
+    expansion_text(value, None)
+}
+
+pub(crate) fn here_word(value: &str) -> Result<Word, String> {
+    expansion_text(value, Some(0))
+}
+
+fn expansion_text(value: &str, substitutions: Option<usize>) -> Result<Word, String> {
     let mut word = Word::default();
-    let mut input = Source::new(value, None);
+    let mut input = Source::new(value, substitutions);
     while let Some(ch) = input.next() {
         match ch {
             '$' => parameter(&mut input, &mut word).map_err(|error| error.message().to_owned())?,
@@ -845,7 +1001,10 @@ fn substitution(input: &mut Source<'_>, word: &mut Word, split: bool) -> ParseRe
     }
     let start = input.offset;
     input.substitutions = Some(depth + 1);
+    let pending = std::mem::take(&mut input.pending_here);
     list(input, &[")"], 0)?;
+    input.require_here_documents()?;
+    input.pending_here = pending;
     input.substitutions = Some(depth);
     let end = input.offset;
     if input.next_if_eq(&')').is_none() {

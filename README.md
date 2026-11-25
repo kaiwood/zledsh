@@ -30,6 +30,17 @@ Use `kwsh -i` to force interactive input even on a pipe. It loads startup files,
 
 Use the same syntax in your startup files, `kwsh -c`, redirected stdin, or at the prompt. `&&` and `||` short-circuit, and `!` reverses a pipeline’s exit status. `for`, `while`, and `until` support `break` and `continue`. Basic `case` supports exact patterns, `|` alternatives, and a `*` catch-all. Functions declared as `name() { ...; }` support positional arguments, `local`, `shift`, and `return` for standalone calls, not pipeline stages.
 
+Pass inline input to a command with a here-document:
+
+```sh
+name=world
+cat <<EOF
+Hello, $name.
+EOF
+```
+
+Use `<<'EOF'` to keep the body literal, or `<<-EOF` to strip leading tabs, not spaces. Unquoted bodies support the shell's parameter and `$(…)` expansions. At the prompt, Ctrl+C cancels an unfinished here-document without running its command.
+
 `$(...)` captures stdout in an isolated `kwsh` process. Quote it to keep the result as one argument. `eval`, `.` and `source` execute native `kwsh` syntax in the current shell. For example, `. ./setup.kwsh` loads a script into an existing session. This is a scripting subset, not a Bash interpreter: backticks, arithmetic expansion, and associative arrays are unsupported.
 
 The completion subset supports indexed array literals, `"${name[@]}"`, `"${name[index]}"`, and `unset 'name[0]'`. Register a trusted callback with `complete -F function command`. On simple unquoted drafts, it receives `COMP_WORDS` and `COMP_CWORD` as data and returns candidates in `COMPREPLY`. `compgen -W wordlist -- prefix` matches a whitespace-separated list. A callback can run local commands, but runs in a separate, time-limited shell so its changes to shell variables and cwd do not carry back to the prompt.
