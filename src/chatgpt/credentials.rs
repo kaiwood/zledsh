@@ -58,6 +58,21 @@ impl Store {
         self.path.parent().expect("session path has a parent")
     }
 
+    pub fn forget(home: &Path, cancelled: &AtomicBool) -> Result<bool> {
+        let legacy = home.join(".kwsh-chatgpt-session");
+        if !exists(&home.join(".kwsh"))? && !exists(&legacy)? {
+            return Ok(false);
+        }
+        let store = Self::lock(home, cancelled)?;
+        let legacy_removed = if exists(&legacy)? {
+            let _legacy_lock = lock_file(&home.join(".kwsh-chatgpt-session.lock"), cancelled)?;
+            remove_session(&legacy)?
+        } else {
+            false
+        };
+        Ok(remove_session(&store.path)? || legacy_removed)
+    }
+
     pub fn load(&self) -> Result<Option<Credentials>> {
         let file = match options().open(&self.path) {
             Ok(file) => file,
@@ -96,6 +111,17 @@ impl Store {
         temp.persist(&self.path).map_err(|_| STORE_ERROR)?;
         Ok(())
     }
+}
+
+fn remove_session(path: &Path) -> Result<bool> {
+    let file = match options().open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(STORE_ERROR),
+    };
+    validate(&file)?;
+    fs::remove_file(path).map_err(|_| STORE_ERROR)?;
+    Ok(true)
 }
 
 fn prepare_directory(path: &Path) -> Result<()> {

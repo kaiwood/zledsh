@@ -16,6 +16,19 @@ use crate::shell_context::ShellContext;
 const MAX_BODY: usize = 2 * 1024 * 1024;
 const MAX_ANSWER: usize = 64 * 1024;
 
+pub(crate) fn sign_out() -> Result<bool> {
+    if unsafe { libc::getuid() != libc::geteuid() || libc::getgid() != libc::getegid() } {
+        return Err(Error::Message(
+            "ChatGPT sign-out requires matching real and effective IDs",
+        ));
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or(Error::Message("ChatGPT sign-out requires an absolute HOME"))?;
+    credentials::Store::forget(&home, &AtomicBool::new(false))
+}
+
 type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]

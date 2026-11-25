@@ -113,7 +113,19 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
         Some("--help") => {
             println!("Usage: kwsh [-c command [name [args...]]]");
             #[cfg(target_os = "macos")]
-            println!("       kwsh --chatgpt");
+            println!("       kwsh --chatgpt | --chatgpt-sign-out");
+            return Ok(0);
+        }
+        #[cfg(target_os = "macos")]
+        Some("--chatgpt-sign-out") => {
+            if args.next().is_some() {
+                return Err("--chatgpt-sign-out does not take arguments".into());
+            }
+            if chatgpt::sign_out().map_err(|error| error.to_string())? {
+                println!("Signed out of ChatGPT on this machine.");
+            } else {
+                println!("No saved ChatGPT session.");
+            }
             return Ok(0);
         }
         Some("-c") => {}
