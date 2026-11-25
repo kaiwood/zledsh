@@ -29,6 +29,7 @@ use std::{
     process::ExitCode,
 };
 
+const SUBSTITUTION: &str = "--kwsh-substitution";
 const PIPELINE_BUILTIN: &str = "--kwsh-pipeline-builtin";
 
 /// Launch the standalone `kwsh` shell.
@@ -39,7 +40,12 @@ pub fn launch() -> ExitCode {
     if args.next_if(|arg| arg == PIPELINE_BUILTIN).is_some() {
         return run_pipeline_builtin(args);
     }
-    match run_command(name, args) {
+    let result = if args.next_if(|arg| arg == SUBSTITUTION).is_some() {
+        runtime::Invocation::run_substitution()
+    } else {
+        run_command(name, args)
+    };
+    match result {
         Ok(status) => status.into(),
         Err(error) => {
             eprintln!("kwsh: {error}");

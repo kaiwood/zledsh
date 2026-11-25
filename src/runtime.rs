@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Seek, Write};
 use std::os::fd::OwnedFd;
 use std::process::Stdio;
 use std::rc::Rc;
@@ -17,12 +17,26 @@ pub(crate) struct Invocation<'a> {
     aliases: HashMap<String, String>,
     exported: HashSet<String>,
     unset: HashSet<String>,
+    substitution_depth: u8,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub foreground: Option<crate::foreground::Foreground>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     agent_deadline: Option<std::time::Instant>,
     pub status: u8,
     pub exited: bool,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Substitution {
+    source: String,
+    name: String,
+    args: Vec<String>,
+    variables: HashMap<String, String>,
+    aliases: HashMap<String, String>,
+    exported: HashSet<String>,
+    unset: HashSet<String>,
+    depth: u8,
+    status: u8,
 }
 
 impl<'a> Invocation<'a> {
@@ -34,6 +48,7 @@ impl<'a> Invocation<'a> {
             aliases: HashMap::new(),
             exported: HashSet::new(),
             unset: HashSet::new(),
+            substitution_depth: 0,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             foreground: None,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -210,30 +225,40 @@ impl<'a> Invocation<'a> {
         }
         let command = &pipeline[0];
         let mut output = original.clone();
-        if let Err(error) = self.redirect(&command.redirects, &mut output) {
+        let mut substitution_status = None;
+        if let Err(error) = self.redirect(&command.redirects, &mut output, &mut substitution_status)
+        {
             report(&output[1], &error);
             self.status = 1;
             return;
         }
         if !command.words.is_empty() && command.words.iter().all(|word| word.assignment) {
-            self.status = 0;
             for word in &command.words {
-                let fields = self.expand(word);
-                if let [field] = fields.as_slice() {
-                    self.assign(field);
-                } else {
-                    report(&output[1], "assignment must expand to one value");
-                    self.status = 2;
-                    break;
+                match self.expand(word, &mut substitution_status) {
+                    Ok(fields) if fields.len() == 1 => self.assign(&fields[0]),
+                    result => {
+                        report(
+                            &output[1],
+                            &result
+                                .err()
+                                .unwrap_or_else(|| "assignment must expand to one value".into()),
+                        );
+                        self.status = 2;
+                        return;
+                    }
                 }
             }
+            self.status = substitution_status.unwrap_or(0);
             return;
         }
-        let argv: Vec<_> = command
-            .words
-            .iter()
-            .flat_map(|word| self.expand(word))
-            .collect();
+        let argv = match self.expand_words(&command.words, &mut substitution_status) {
+            Ok(argv) => argv,
+            Err(error) => {
+                report(&output[1], &error);
+                self.status = 2;
+                return;
+            }
+        };
         let mut argv = argv.as_slice();
         while let [prefix, rest @ ..] = argv {
             if prefix != "command" {
@@ -254,7 +279,7 @@ impl<'a> Invocation<'a> {
             }
         }
         let Some((name, args)) = argv.split_first() else {
-            self.status = 0;
+            self.status = substitution_status.unwrap_or(0);
             return;
         };
         if self.agent_command() && matches!(name.as_str(), "exit" | "fg" | "bg" | "wait") {
@@ -511,6 +536,11 @@ impl<'a> Invocation<'a> {
                 "background jobs are not supported on this platform",
             ));
         }
+        if background && self.substitution_depth != 0 {
+            return Err(io::Error::other(
+                "background jobs are not supported in command substitution",
+            ));
+        }
         if background && self.agent_command() {
             return Err(io::Error::other("agent cannot start background jobs"));
         }
@@ -532,17 +562,24 @@ impl<'a> Invocation<'a> {
                 None => (Output::Stdout, None),
             };
             let mut output = [stdout, Output::Stderr];
-            let mut argv: Vec<_> = command
-                .words
-                .iter()
-                .flat_map(|word| self.expand(word))
-                .collect();
-            if let Err(error) = self.redirect(&command.redirects, &mut output) {
-                report(&output[1], &error);
-                argv = vec!["exit".into(), "1".into()];
-            } else if argv.is_empty() || command.words.iter().all(|word| word.assignment) {
-                argv = vec!["exit".into(), "0".into()];
-            }
+            let mut status = None;
+            let argv = match self.expand_words(&command.words, &mut status) {
+                Err(error) => {
+                    report(&output[1], &error);
+                    vec!["exit".into(), "2".into()]
+                }
+                Ok(argv) => {
+                    if let Err(error) = self.redirect(&command.redirects, &mut output, &mut status)
+                    {
+                        report(&output[1], &error);
+                        vec!["exit".into(), "1".into()]
+                    } else if argv.is_empty() || command.words.iter().all(|word| word.assignment) {
+                        vec!["exit".into(), status.unwrap_or(0).to_string()]
+                    } else {
+                        argv
+                    }
+                }
+            };
             let name = argv[0].clone();
             let exec = if is_builtin(&name) {
                 let executable = std::env::current_exe()?;
@@ -713,10 +750,98 @@ impl<'a> Invocation<'a> {
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub fn parameter_text(&self, value: &str) -> Result<String, String> {
-        crate::syntax::parameter_text(value).map(|word| self.expand(&word).join(" "))
+        self.expand(&crate::syntax::parameter_text(value)?, &mut None)
+            .map(|fields| fields.join(" "))
     }
 
-    fn expand(&self, word: &Word) -> Vec<String> {
+    fn expand_words(&self, words: &[Word], status: &mut Option<u8>) -> Result<Vec<String>, String> {
+        let mut fields = Vec::new();
+        for word in words {
+            fields.extend(self.expand(word, status)?);
+        }
+        Ok(fields)
+    }
+
+    pub fn run_substitution() -> Result<u8, String> {
+        let saved: Substitution = serde_json::from_reader(process::Stdin)
+            .map_err(|_| "invalid command substitution state")?;
+        let mut shell = Invocation::new(&saved.name, &saved.args);
+        shell.variables = saved.variables;
+        shell.aliases = saved.aliases;
+        shell.exported = saved.exported;
+        shell.unset = saved.unset;
+        shell.substitution_depth = saved.depth;
+        shell.status = saved.status;
+        process::null_stdin().map_err(|error| error.to_string())?;
+        shell.run_source(&saved.source, &mut io::empty())?;
+        Ok(shell.status)
+    }
+
+    fn substitute(&self, source: &str) -> Result<(String, u8), String> {
+        const MAX_OUTPUT: u64 = 16 * 1024 * 1024;
+        if self.agent_command() {
+            return Err("command substitutions must be submitted by the user".into());
+        }
+        if self.substitution_depth >= 16 {
+            return Err("command substitutions nested too deeply".into());
+        }
+        let saved = Substitution {
+            source: source.into(),
+            name: self.name.into(),
+            args: self.args.to_vec(),
+            variables: self.variables.clone(),
+            aliases: self.aliases.clone(),
+            exported: self.exported.clone(),
+            unset: self.unset.clone(),
+            depth: self.substitution_depth + 1,
+            status: self.status,
+        };
+        let capture = || -> io::Result<_> {
+            // Send private shell variables via an anonymous fd, not argv or the environment.
+            let mut payload = tempfile::tempfile()?;
+            serde_json::to_writer(&mut payload, &saved)?;
+            payload.rewind()?;
+            let mut command = std::process::Command::new(std::env::current_exe()?);
+            command
+                .arg(crate::SUBSTITUTION)
+                .stdin(payload)
+                .stdout(Stdio::piped());
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            if let Some(tty) = self.foreground.as_ref().filter(|tty| tty.has_terminal()) {
+                return tty.capture(command, MAX_OUTPUT);
+            }
+            let mut child = command.spawn()?;
+            let mut bytes = Vec::new();
+            let read = child
+                .stdout
+                .take()
+                .unwrap()
+                .take(MAX_OUTPUT + 1)
+                .read_to_end(&mut bytes);
+            if read.is_err() || bytes.len() as u64 > MAX_OUTPUT {
+                let _ = child.kill();
+            }
+            let status = child.wait().map(process::status_code)?;
+            read?;
+            Ok((bytes, status))
+        };
+        let (mut bytes, status) =
+            capture().map_err(|error| format!("command substitution: {error}"))?;
+        if bytes.len() as u64 > MAX_OUTPUT {
+            return Err("command substitution exceeds 16 MiB".into());
+        }
+        if bytes.contains(&0) {
+            return Err("command substitution contains a NUL byte".into());
+        }
+        while bytes.last() == Some(&b'\n') {
+            bytes.pop();
+        }
+        let text =
+            String::from_utf8(bytes).map_err(|_| "command substitution output is not UTF-8")?;
+        Ok((text, status))
+    }
+
+    fn expand(&self, word: &Word, status: &mut Option<u8>) -> Result<Vec<String>, String> {
         let mut fields = Vec::new();
         let mut field = String::new();
         let mut present = false;
@@ -745,6 +870,25 @@ impl<'a> Invocation<'a> {
                         field.push_str(arg);
                     }
                 }
+                Part::Substitution { source, split } => {
+                    let (text, code) = self.substitute(source)?;
+                    *status = Some(code);
+                    if *split {
+                        for ch in text.chars() {
+                            if matches!(ch, ' ' | '\t' | '\n') {
+                                if present {
+                                    fields.push(std::mem::take(&mut field));
+                                }
+                                present = false;
+                            } else {
+                                field.push(ch);
+                                present = true;
+                            }
+                        }
+                        continue;
+                    }
+                    field.push_str(&text);
+                }
                 Part::Variable {
                     name,
                     default,
@@ -756,7 +900,7 @@ impl<'a> Invocation<'a> {
                     {
                         field.push_str(&value.to_string_lossy());
                     } else if let Some(value) = default {
-                        field.push_str(&self.expand(value).join(" "));
+                        field.push_str(&self.expand(value, status)?.join(" "));
                     }
                 }
             }
@@ -765,12 +909,17 @@ impl<'a> Invocation<'a> {
         if present {
             fields.push(field);
         }
-        fields
+        Ok(fields)
     }
 
-    fn redirect(&self, redirects: &[Redirect], output: &mut [Output; 2]) -> Result<(), String> {
+    fn redirect(
+        &self,
+        redirects: &[Redirect],
+        output: &mut [Output; 2],
+        status: &mut Option<u8>,
+    ) -> Result<(), String> {
         for redirect in redirects {
-            let targets = self.expand(&redirect.target);
+            let targets = self.expand(&redirect.target, status)?;
             let [target] = targets.as_slice() else {
                 return Err("ambiguous redirection".into());
             };

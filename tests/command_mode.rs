@@ -44,7 +44,7 @@ fn redirections_are_resolved_left_to_right_and_do_not_leak() {
 #[test]
 fn unsupported_syntax_is_rejected_before_execution() {
     for tail in [
-        r#"printf '%s' "$(printf wrong)""#,
+        r#"printf '%s' "$((2 + 2))""#,
         "printf wrong || ; printf wrong",
         "printf 'unclosed",
         "if /usr/bin/false; then printf wrong",
@@ -57,6 +57,41 @@ fn unsupported_syntax_is_rejected_before_execution() {
         assert!(output.stdout.is_empty(), "{script}");
         assert!(!output.stderr.is_empty(), "{script}");
     }
+}
+
+#[test]
+fn command_substitution_isolates_state_and_captures_status_and_stdout() {
+    let output = run(
+        r#"
+        value=parent
+        false
+        result=$(printf '%s:%s:%s\n\n' "$value" "$0" "$?"; value=child; cd /; exit 7)
+        printf '%s|%s|%s\n' "$?" "$result" "$value"
+        printf '<%s>' $(printf ' a b\n') "$(printf '%s' "$(printf '%s' ')')")"
+        test=$(printf '%s' '$(printf not-code)')
+        printf '%s' "$test"
+    "#,
+        &["fixture"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.stdout,
+        b"7|parent:fixture:1|parent\n<a><b><)>$(printf not-code)"
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn substitution_drains_pipes_and_rejects_binary_output() {
+    let output = run(
+        r#"printf '%s' "$(/usr/bin/yes a | /usr/bin/head -n 40000)""#,
+        &[],
+    );
+    assert!(output.status.success());
+    assert_eq!(output.stdout.len(), 79999);
+    let output = run(r#"value=$(/usr/bin/printf '\000')"#, &[]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("NUL byte"));
 }
 
 #[test]

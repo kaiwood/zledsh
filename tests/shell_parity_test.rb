@@ -213,6 +213,21 @@ class ShellParityTest < Minitest::Test
     refute File.exist?(File.join(@work, "skipped"))
   end
 
+  def test_substitution_captures_output_and_does_not_execute_a_skipped_default
+    script = <<~'SH'
+      word=parent
+      result=$(word=child; printf '%s\n\n' "$word"; exit 7)
+      printf '%s:%s:%s\n' "$?" "$result" "$word"
+      printf '<%s>' $(printf 'a b') "$(printf '%s' "$(printf '%s' ')')")"
+      printf '%s' "${word:-$(printf wrong > skipped)}"
+    SH
+    output, error, status = capture(*COMMAND, "-c", script)
+    assert status.success?, error
+    assert_equal "7:child:parent\n<a><b><)>parent", output
+    assert_empty error
+    refute File.exist?(File.join(@work, "skipped"))
+  end
+
   def test_terminal
     executable, *args = COMMAND
     PTY.spawn(@env, [executable, executable], *args, **@spawn_options) do |reader, writer, pid|

@@ -26,6 +26,10 @@ pub(crate) enum Part {
     Status,
     LastBackground,
     Arguments,
+    Substitution {
+        source: String,
+        split: bool,
+    },
     Variable {
         name: String,
         default: Option<Word>,
@@ -33,7 +37,46 @@ pub(crate) enum Part {
     },
 }
 
-type Source<'a> = Peekable<Chars<'a>>;
+#[derive(Clone)]
+struct Source<'a> {
+    source: &'a str,
+    chars: Peekable<Chars<'a>>,
+    offset: usize,
+    substitutions: Option<usize>,
+}
+
+impl<'a> Source<'a> {
+    fn new(source: &'a str, substitutions: Option<usize>) -> Self {
+        Self {
+            source,
+            chars: source.chars().peekable(),
+            offset: 0,
+            substitutions,
+        }
+    }
+
+    fn peek(&mut self) -> Option<&char> {
+        self.chars.peek()
+    }
+
+    fn next_if(&mut self, test: impl FnOnce(&char) -> bool) -> Option<char> {
+        let ch = self.chars.next_if(test)?;
+        self.offset += ch.len_utf8();
+        Some(ch)
+    }
+
+    fn next_if_eq(&mut self, expected: &char) -> Option<char> {
+        self.next_if(|ch| ch == expected)
+    }
+}
+
+impl Iterator for Source<'_> {
+    type Item = char;
+
+    fn next(&mut self) -> Option<char> {
+        self.next_if(|_| true)
+    }
+}
 type ParseResult<T> = Result<T, ParseError>;
 
 pub(crate) enum ParseError {
@@ -72,7 +115,7 @@ pub(crate) enum Statement {
 }
 
 pub(crate) fn parse(source: &str) -> ParseResult<Script> {
-    list(&mut source.chars().peekable(), &[], 0)
+    list(&mut Source::new(source, Some(0)), &[], 0)
 }
 
 fn skip_space(input: &mut Source<'_>) {
@@ -88,7 +131,7 @@ fn skip_space(input: &mut Source<'_>) {
 }
 
 fn boundary(ch: char) -> bool {
-    matches!(ch, ' ' | '\t' | '\n' | ';' | '>' | '|' | '&')
+    matches!(ch, ' ' | '\t' | '\n' | ';' | '>' | '|' | '&' | ')')
 }
 
 fn head(input: &Source<'_>) -> String {
@@ -105,12 +148,19 @@ fn list(input: &mut Source<'_>, stops: &[&str], depth: usize) -> ParseResult<Scr
         if input.peek().is_none() {
             break;
         }
+        if input.peek() == Some(&')') && stops.contains(&")") {
+            break;
+        }
         let name = head(input);
         if stops.contains(&name.as_str()) {
             break;
         }
         let mut statement = and_or(input, depth)?;
         skip_space(input);
+        if input.peek() == Some(&')') && stops.contains(&")") {
+            script.push(statement);
+            break;
+        }
         let separator = input.next();
         match separator {
             Some('&') => match &mut statement {
@@ -252,7 +302,7 @@ fn pipeline(input: &mut Source<'_>) -> ParseResult<Vec<Command>> {
             let Some(&next) = input.peek() else {
                 break;
             };
-            if matches!(next, '\n' | ';' | '&' | '|') {
+            if matches!(next, '\n' | ';' | '&' | '|' | ')') {
                 break;
             }
             if let Some(fd) = redirect_fd(input)? {
@@ -355,7 +405,11 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
                 Some(ch) => literal(&mut word, ch),
                 None => return Err("trailing backslash".into()),
             },
-            '<' | '(' | ')' | '{' | '}' | '`' | '$' | '*' | '?' | '[' | '~' => {
+            '$' if input.peek() == Some(&'(') => {
+                let split = !word.assignment;
+                substitution(input, &mut word, split)?;
+            }
+            '<' | '(' | '{' | '}' | '`' | '$' | '*' | '?' | '[' | '~' => {
                 return Err(ParseError::Invalid(format!(
                     "unsupported unquoted syntax: {ch}"
                 )));
@@ -406,7 +460,7 @@ fn double_quoted(input: &mut Source<'_>, word: &mut Word) -> ParseResult<()> {
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) fn parameter_text(value: &str) -> Result<Word, String> {
     let mut word = Word::default();
-    let mut input = value.chars().peekable();
+    let mut input = Source::new(value, None);
     while let Some(ch) = input.next() {
         match ch {
             '$' => parameter(&mut input, &mut word).map_err(|error| error.message().to_owned())?,
@@ -434,6 +488,7 @@ fn parameter_at(input: &mut Source<'_>, word: &mut Word, depth: usize) -> ParseR
         return Err("parameter expansion nested too deeply".into());
     }
     let part = match input.peek() {
+        Some('(') => return substitution(input, word, false),
         Some('!') => {
             input.next();
             Part::LastBackground
@@ -494,6 +549,32 @@ fn parameter_at(input: &mut Source<'_>, word: &mut Word, depth: usize) -> ParseR
         }
     };
     word.parts.push(part);
+    Ok(())
+}
+
+fn substitution(input: &mut Source<'_>, word: &mut Word, split: bool) -> ParseResult<()> {
+    let Some(depth) = input.substitutions else {
+        return Err("command substitution is not supported here".into());
+    };
+    if depth >= 16 {
+        return Err("command substitutions nested too deeply".into());
+    }
+    input.next(); // '('
+    if input.peek() == Some(&'(') {
+        return Err("arithmetic expansion is not supported".into());
+    }
+    let start = input.offset;
+    input.substitutions = Some(depth + 1);
+    list(input, &[")"], 0)?;
+    input.substitutions = Some(depth);
+    let end = input.offset;
+    if input.next_if_eq(&')').is_none() {
+        return Err(ParseError::Incomplete("unclosed command substitution"));
+    }
+    word.parts.push(Part::Substitution {
+        source: input.source[start..end].into(),
+        split,
+    });
     Ok(())
 }
 

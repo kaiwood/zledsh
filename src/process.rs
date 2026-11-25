@@ -20,6 +20,14 @@ impl Read for Stdin {
     }
 }
 
+pub(crate) fn null_stdin() -> io::Result<()> {
+    let null = std::fs::File::open("/dev/null")?;
+    if unsafe { libc::dup2(null.as_raw_fd(), libc::STDIN_FILENO) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 pub(crate) fn duplicate(fd: RawFd) -> io::Result<OwnedFd> {
     let copy = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
     if copy < 0 {

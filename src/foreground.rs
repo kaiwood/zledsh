@@ -185,6 +185,57 @@ impl Foreground {
         self.wait(Pipeline::from_foreground_child(child), terminal, deadline)
     }
 
+    pub fn capture(
+        &self,
+        mut command: std::process::Command,
+        limit: u64,
+    ) -> io::Result<(Vec<u8>, u8)> {
+        use std::{io::Read, os::fd::AsRawFd, os::unix::process::CommandExt};
+
+        let terminal = self.terminal()?;
+        let fd = crate::process::duplicate(TTY)?;
+        command.process_group(0);
+        unsafe {
+            command.pre_exec(move || crate::terminal_modes::enter_child(fd.as_raw_fd()));
+        }
+        let mut child = command.spawn()?;
+        let stdout = child.stdout.take().unwrap();
+        let group = child.id() as libc::pid_t;
+        let mut job = Pipeline::from_foreground_child(child);
+        let (bytes, status) = std::thread::scope(|scope| -> io::Result<_> {
+            let reader = scope.spawn(move || {
+                let mut bytes = Vec::new();
+                let result = stdout.take(limit + 1).read_to_end(&mut bytes);
+                if result.is_err() || bytes.len() as u64 > limit {
+                    unsafe { libc::kill(-group, libc::SIGKILL) };
+                }
+                result.map(|_| bytes)
+            });
+            let result = job.wait(None);
+            let code = match result {
+                Ok(Outcome::Exited { code, signaled }) => {
+                    if signaled {
+                        unsafe { libc::kill(-group, libc::SIGKILL) };
+                    }
+                    code
+                }
+                Ok(Outcome::Stopped(code)) => code,
+                Ok(Outcome::TimedOut) => unreachable!(),
+                Err(_) => 2,
+            };
+            drop(job);
+            result?;
+            Ok((
+                reader
+                    .join()
+                    .map_err(|_| io::Error::other("capture worker failed"))??,
+                code,
+            ))
+        })?;
+        terminal.restore()?;
+        Ok((bytes, status))
+    }
+
     pub fn run_pipeline(
         &mut self,
         stages: Vec<Stage>,
