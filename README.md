@@ -24,7 +24,7 @@ For `rbenv shell` and Tab completion, use `eval "$(rbenv init - bash)"` instead 
 
 ### Script with `kwsh`
 
-Run a script with `kwsh ./setup.kwsh arg1 arg2`. The script path becomes `$0`; its arguments become `$1`, `$2`, and so on. The script need not be executable, and its commands can still read from stdin. Use `kwsh -- script-name` if the name starts with `-`.
+Run a script with `kwsh ./setup.kwsh arg1 arg2`. The script path becomes `$0`; its arguments become `$1`, `$2`, and so on. The script need not be executable, and its commands can still read from stdin. Use `kwsh -- script-name` if the name starts with `-`. To read the script itself from stdin and pass it arguments, use `kwsh -s arg1 arg2 < setup.kwsh`.
 
 Use the same syntax in your startup files, `kwsh -c`, redirected stdin, or at the prompt. `&&` and `||` short-circuit, and `!` reverses a pipeline’s exit status. `for`, `while`, and `until` support `break` and `continue`. Basic `case` supports exact patterns, `|` alternatives, and a `*` catch-all. Functions declared as `name() { ...; }` support positional arguments, `local`, `shift`, and `return` for standalone calls, not pipeline stages.
 

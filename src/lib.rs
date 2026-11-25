@@ -102,13 +102,28 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
         .filter(|_| !end_options);
     // The next bytes may belong to a child reading fd 0 directly.
     let mut input = BufReader::with_capacity(1, process::Stdin);
-    if option.is_none() || flag == Some("--chatgpt") {
-        let chatgpt = flag.is_some();
+    if option.is_none() || matches!(flag, Some("-s" | "--chatgpt")) {
+        let chatgpt = flag == Some("--chatgpt");
         if chatgpt && args.next().is_some() {
             return Err("--chatgpt does not take arguments".into());
         }
+        let args = if flag == Some("-s") {
+            let mut args = args.peekable();
+            match args.peek() {
+                Some(arg) if arg == "--" || arg == "-" => {
+                    args.next();
+                }
+                Some(arg) if arg.as_encoded_bytes().starts_with(b"-") => {
+                    return Err(format!("unsupported option: {arg:?}"));
+                }
+                _ => {}
+            }
+            positional_args(args)?
+        } else {
+            Vec::new()
+        };
         let mut invocation =
-            runtime::Invocation::new(name.to_str().ok_or("command name must be UTF-8")?, &[]);
+            runtime::Invocation::new(name.to_str().ok_or("command name must be UTF-8")?, &args);
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             use std::io::IsTerminal;
@@ -127,6 +142,7 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
         Some("--help") => {
             println!("Usage: kwsh [-c command [name [args...]]]");
             println!("       kwsh [--] script [args...]");
+            println!("       kwsh -s [--] [args...]");
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             println!("       kwsh --chatgpt | --chatgpt-sign-out");
             Ok(0)

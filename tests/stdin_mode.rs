@@ -45,6 +45,24 @@ fn quoted_script_words_can_span_physical_lines() {
     assert_eq!(output.stdout, b"line one\nline two");
 }
 
+// POSIX sh: OPTIONS (-s), OPERANDS (argument), and STDIN.
+#[test]
+fn s_flag_reads_commands_from_stdin_and_treats_operands_as_arguments() {
+    let output = from_pipe(
+        &["-s", "--", "-first", "two words"],
+        b"printf '<%s>\\n' \"$0\" \"$#\" \"$1\" \"$2\"\nread -r data\nstdin data\nprintf '%s\\n' \"$data\"\n",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "<{}>\n<2>\n<-first>\n<two words>\nstdin data\n",
+            env!("CARGO_BIN_EXE_kwsh")
+        )
+    );
+    assert!(output.stderr.is_empty());
+}
+
 // POSIX sh: OPERANDS (command_file, argument) and STDIN.
 #[test]
 fn named_script_preserves_arguments_and_separates_commands_from_stdin() {
