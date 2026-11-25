@@ -25,6 +25,7 @@ mod transcript;
 use std::{
     env,
     ffi::OsString,
+    fs::File,
     io::{self, BufRead, BufReader},
     process::ExitCode,
 };
@@ -90,12 +91,19 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
 }
 
 fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Result<u8, String> {
-    let option = args.next();
+    let first = args.next();
+    let end_options = first
+        .as_deref()
+        .is_some_and(|arg| arg == "--" || arg == "-");
+    let option = if end_options { args.next() } else { first };
+    let flag = option
+        .as_deref()
+        .and_then(|arg| arg.to_str())
+        .filter(|_| !end_options);
     // The next bytes may belong to a child reading fd 0 directly.
     let mut input = BufReader::with_capacity(1, process::Stdin);
-    if option.is_none() || option.as_deref().and_then(|option| option.to_str()) == Some("--chatgpt")
-    {
-        let chatgpt = option.is_some();
+    if option.is_none() || flag == Some("--chatgpt") {
+        let chatgpt = flag.is_some();
         if chatgpt && args.next().is_some() {
             return Err("--chatgpt does not take arguments".into());
         }
@@ -112,15 +120,16 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
         if chatgpt {
             return Err("--chatgpt requires an interactive terminal on macOS or Linux".into());
         }
-        return run_input(&mut invocation, &mut input);
+        return run_input(&mut invocation, &mut input, None);
     }
-    let option = option.unwrap();
-    match option.to_str() {
+    let option = option.as_ref().unwrap();
+    match flag {
         Some("--help") => {
             println!("Usage: kwsh [-c command [name [args...]]]");
+            println!("       kwsh [--] script [args...]");
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             println!("       kwsh --chatgpt | --chatgpt-sign-out");
-            return Ok(0);
+            Ok(0)
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         Some("--chatgpt-sign-out") => {
@@ -132,33 +141,48 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
             } else {
                 println!("No saved ChatGPT session.");
             }
-            return Ok(0);
+            Ok(0)
         }
-        Some("-c") => {}
-        _ => return Err("unsupported invocation; use -c or read commands from stdin".into()),
+        Some("-c") => {
+            let source = args.next().ok_or("-c requires a command")?;
+            let source = source.to_str().ok_or("-c command must be UTF-8")?;
+            let name = args.next().unwrap_or(name);
+            let name = name.to_str().ok_or("command name must be UTF-8")?;
+            let args = positional_args(args)?;
+            let mut invocation = runtime::Invocation::new(name, &args);
+            invocation.run_source(source, &mut input)?;
+            Ok(invocation.status)
+        }
+        _ if end_options || !option.as_encoded_bytes().starts_with(b"-") => {
+            let path = option.to_str().ok_or("script name must be UTF-8")?;
+            let args = positional_args(args)?;
+            let script = File::open(path).map_err(|error| format!("{path}: {error}"))?;
+            let mut invocation = runtime::Invocation::new(path, &args);
+            run_input(&mut invocation, &mut input, Some(BufReader::new(script)))
+                .map_err(|error| format!("{path}: {error}"))
+        }
+        _ => Err(format!("unsupported option: {}", option.to_string_lossy())),
     }
-    let source = args.next().ok_or("-c requires a command")?;
-    let source = source.to_str().ok_or("-c command must be UTF-8")?;
-    let name = args.next().unwrap_or(name);
-    let name = name.to_str().ok_or("command name must be UTF-8")?;
-    let args = args
-        .map(OsString::into_string)
+}
+
+fn positional_args(args: impl Iterator<Item = OsString>) -> Result<Vec<String>, String> {
+    args.map(OsString::into_string)
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| "positional arguments must be UTF-8")?;
-    let mut invocation = runtime::Invocation::new(name, &args);
-    invocation.run_source(source, &mut input)?;
-    Ok(invocation.status)
+        .map_err(|_| "positional arguments must be UTF-8".into())
 }
 
 fn run_input(
     invocation: &mut runtime::Invocation<'_>,
     input: &mut impl BufRead,
+    mut script: Option<BufReader<File>>,
 ) -> Result<u8, String> {
     let mut source = String::new();
     while !invocation.exited {
-        let count = input
-            .read_line(&mut source)
-            .map_err(|error| error.to_string())?;
+        let count = match &mut script {
+            Some(script) => script.read_line(&mut source),
+            None => input.read_line(&mut source),
+        }
+        .map_err(|error| error.to_string())?;
         if count == 0 && source.is_empty() {
             break;
         }

@@ -24,9 +24,11 @@ For `rbenv shell` and Tab completion, use `eval "$(rbenv init - bash)"` instead 
 
 ### Script with `kwsh`
 
+Run a script with `kwsh ./setup.kwsh arg1 arg2`. The script path becomes `$0`; its arguments become `$1`, `$2`, and so on. The script need not be executable, and its commands can still read from stdin. Use `kwsh -- script-name` if the name starts with `-`.
+
 Use the same syntax in your startup files, `kwsh -c`, redirected stdin, or at the prompt. `&&` and `||` short-circuit, and `!` reverses a pipeline’s exit status. `for`, `while`, and `until` support `break` and `continue`. Basic `case` supports exact patterns, `|` alternatives, and a `*` catch-all. Functions declared as `name() { ...; }` support positional arguments, `local`, `shift`, and `return` for standalone calls, not pipeline stages.
 
-`$(...)` captures stdout in an isolated `kwsh` process. Quote it to keep the result as one argument. `eval`, `.` and `source` execute native `kwsh` syntax in the current shell. For example, `kwsh < setup.kwsh` runs a script and `. ./setup.kwsh` loads it into an existing session. This is a scripting subset, not a Bash interpreter: backticks, arithmetic expansion, and associative arrays are unsupported.
+`$(...)` captures stdout in an isolated `kwsh` process. Quote it to keep the result as one argument. `eval`, `.` and `source` execute native `kwsh` syntax in the current shell. For example, `. ./setup.kwsh` loads a script into an existing session. This is a scripting subset, not a Bash interpreter: backticks, arithmetic expansion, and associative arrays are unsupported.
 
 The completion subset supports indexed array literals, `"${name[@]}"`, `"${name[index]}"`, and `unset 'name[0]'`. Register a trusted callback with `complete -F function command`. On simple unquoted drafts, it receives `COMP_WORDS` and `COMP_CWORD` as data and returns candidates in `COMPREPLY`. `compgen -W wordlist -- prefix` matches a whitespace-separated list. A callback can run local commands, but runs in a separate, time-limited shell so its changes to shell variables and cwd do not carry back to the prompt.
 
