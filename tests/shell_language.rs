@@ -374,3 +374,25 @@ printf '%s:%s\n' "$?" "$value"
     assert!(!home.path().join("skipped").exists());
     assert_eq!(fs::read(home.path().join("result")).unwrap(), b"child");
 }
+
+#[test]
+fn case_fallthrough_runs_bodies_without_expanding_their_patterns() {
+    let home = tempfile::tempdir().unwrap();
+    let source = r#"
+case yes in
+  no) printf wrong ;&
+  yes) printf first ;&
+  "$(printf wrong > skipped)") printf ':next'; false ;&
+  unused) ;;
+  *) printf wrong ;;
+esac
+printf ':%s\n' "$?"
+"#;
+    assert_output(
+        shell(home.path()).args(["-c", source]).output().unwrap(),
+        0,
+        "first:next:1\n",
+        "",
+    );
+    assert!(!home.path().join("skipped").exists());
+}

@@ -9,8 +9,8 @@ use std::rc::Rc;
 use crate::process;
 
 use crate::syntax::{
-    self, ArrayIndex, Command, ParameterOperator, ParseError, Part, Redirect, RedirectKind, Script,
-    Statement, Word, WordPart,
+    self, ArrayIndex, CaseClause, Command, ParameterOperator, ParseError, Part, Redirect,
+    RedirectKind, Script, Statement, Word, WordPart,
 };
 
 const DEFAULT_IFS: &str = " \t\n";
@@ -253,8 +253,8 @@ impl<'a> Invocation<'a> {
                     self.expand_aliases(body)?;
                 }
                 Statement::Case { clauses, .. } => {
-                    for (_, body) in clauses {
-                        self.expand_aliases(body)?;
+                    for clause in clauses {
+                        self.expand_aliases(&mut clause.body)?;
                     }
                 }
                 Statement::If {
@@ -499,8 +499,14 @@ impl<'a> Invocation<'a> {
                     self.status = last;
                 }
                 Statement::Case { word, clauses } => match self.select_case(word, clauses) {
-                    Ok(Some(body)) if !body.is_empty() => {
-                        self.run_with_descriptors(body, input, descriptors)
+                    Ok(Some(index)) => {
+                        self.status = 0;
+                        for clause in &clauses[index..] {
+                            self.run_with_descriptors(&clause.body, input, descriptors);
+                            if !clause.fallthrough || self.interrupted() {
+                                break;
+                            }
+                        }
                     }
                     Ok(_) => self.status = 0,
                     Err(error) => {
@@ -533,19 +539,19 @@ impl<'a> Invocation<'a> {
         }
     }
 
-    fn select_case<'b>(
+    fn select_case(
         &mut self,
         word: &Word,
-        clauses: &'b [(Vec<Word>, Script)],
-    ) -> Result<Option<&'b Script>, String> {
+        clauses: &[CaseClause],
+    ) -> Result<Option<usize>, String> {
         let word = self.expand(word, &mut None)?.join(" ");
-        for (patterns, body) in clauses {
-            for pattern in patterns {
+        for (index, clause) in clauses.iter().enumerate() {
+            for pattern in &clause.patterns {
                 if self
                     .expand_pattern(pattern, &mut None)?
                     .matches(word.as_bytes())
                 {
-                    return Ok(Some(body));
+                    return Ok(Some(index));
                 }
             }
         }

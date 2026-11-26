@@ -277,12 +277,19 @@ pub(crate) enum Statement {
     },
     Case {
         word: Word,
-        clauses: Vec<(Vec<Word>, Script)>,
+        clauses: Vec<CaseClause>,
     },
     If {
         branches: Vec<(Script, Script)>,
         otherwise: Script,
     },
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CaseClause {
+    pub patterns: Vec<Word>,
+    pub body: Script,
+    pub fallthrough: bool,
 }
 
 pub(crate) fn parse(source: &str) -> ParseResult<Script> {
@@ -357,6 +364,7 @@ fn list(input: &mut Source<'_>, stops: &[&str], depth: usize) -> ParseResult<Scr
 fn at_operator_stop(input: &mut Source<'_>, stops: &[&str]) -> bool {
     (stops.contains(&")") && input.peek() == Some(&')'))
         || (stops.contains(&";;") && input.clone().take(2).eq([';', ';']))
+        || (stops.contains(&";&") && input.clone().take(2).eq([';', '&']))
 }
 
 fn and_or(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
@@ -702,9 +710,14 @@ fn case_statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement
                 _ => return Err("expected | or ) after case pattern".into()),
             }
         }
-        let body = list(input, &[";;", "esac"], depth)?;
-        clauses.push((patterns, body));
-        if at_operator_stop(input, &[";;"]) {
+        let body = list(input, &[";;", ";&", "esac"], depth)?;
+        let fallthrough = at_operator_stop(input, &[";&"]);
+        clauses.push(CaseClause {
+            patterns,
+            body,
+            fallthrough,
+        });
+        if at_operator_stop(input, &[";;", ";&"]) {
             input.next();
             input.next();
         } else {
