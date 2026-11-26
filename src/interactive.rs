@@ -707,6 +707,9 @@ fn read_keys(
     (draft, cooked, raw): (String, &libc::termios, &libc::termios),
 ) -> io::Result<Line> {
     let primary = history.is_some();
+    // Only the last prompt row belongs to the editable line. Reprint the
+    // header only when drawing a fresh prompt, not for each edit.
+    let (header, input_prompt) = prompt.split_at(prompt.rfind('\n').map_or(0, |end| end + 1));
     let mut consecutive_cut = false;
     let mut yank = None;
     let mut undo = VecDeque::new();
@@ -751,6 +754,7 @@ fn read_keys(
                 shell,
                 key == Key::Byte(18),
                 history_index,
+                header,
             )?
             else {
                 return Ok(Line::End);
@@ -760,7 +764,7 @@ fn read_keys(
                 cursor = position;
                 history_index = None;
             }
-            redraw(echo, prompt, &line, cursor)?;
+            redraw(echo, input_prompt, &line, cursor)?;
             echo.flush()?;
             key = result.next;
         }
@@ -802,7 +806,10 @@ fn read_keys(
                 (line, cursor) = previous;
                 history_index = None;
             }
-            Key::Byte(12) => echo.write_all(b"\x1b[H\x1b[2J")?,
+            Key::Byte(12) => {
+                echo.write_all(b"\x1b[H\x1b[2J")?;
+                echo.write_all(header.as_bytes())?;
+            }
             Key::Byte(21) => {
                 consecutive_cut = cut(
                     &mut line,
@@ -947,6 +954,7 @@ fn read_keys(
                     Err(error) => writeln!(echo, "zledsh: edit draft: {error}")?,
                 }
                 echo.write_all(b"\x1b[?2004h")?;
+                echo.write_all(header.as_bytes())?;
             }
             Key::LastArgument => {
                 let Some(history) = history.as_deref_mut().filter(|history| !history.paused) else {
@@ -1017,7 +1025,7 @@ fn read_keys(
             }
             _ => continue,
         }
-        redraw(echo, prompt, &line, cursor)?;
+        redraw(echo, input_prompt, &line, cursor)?;
         echo.flush()?;
     }
     if let Some(down) = completion.and_then(|cycle| cycle.menu_offset) {
@@ -1127,6 +1135,7 @@ fn search_history<'a>(
     shell: &mut Invocation<'_>,
     mut backward: bool,
     anchor: Option<usize>,
+    header: &str,
 ) -> io::Result<Option<SearchExit<'a>>> {
     let mut query = Vec::new();
     let mut found = None;
@@ -1158,6 +1167,7 @@ fn search_history<'a>(
             }
             Key::Byte(12) => {
                 echo.write_all(b"\x1b[H\x1b[2J")?;
+                echo.write_all(header.as_bytes())?;
                 continue;
             }
             Key::Byte(7) => {

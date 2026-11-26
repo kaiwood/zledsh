@@ -186,6 +186,23 @@ fn word_deletion_and_tab_complete_a_name_with_spaces() {
 }
 
 #[test]
+fn erasing_a_completion_does_not_repeat_the_multiline_prompt_header() {
+    let mut tty = Terminal::start("prompt header\n$ ", &[], |home| {
+        fs::write(home.join("report"), "").unwrap();
+    });
+    tty.expect("prompt header\r\n$ ");
+    tty.send("printf '%s\\n' rep\t");
+    tty.expect("report ");
+    tty.send("\x7f\x7f\x7f\x7f\x7f\x7f\x7freplacement\n");
+    let output = tty.expect("\r\nreplacement\r\n");
+    assert!(!output.contains("prompt header"), "{output:?}");
+    tty.expect("prompt header\r\n$ ");
+    tty.send("\x0c");
+    tty.expect("\x1b[H\x1b[2Jprompt header\r\n\r\x1b[2K$ ");
+    tty.finish();
+}
+
+#[test]
 fn completion_uses_live_home_without_replacing_the_tilde() {
     let mut tty = Terminal::start("home> ", &[], |home| {
         let notes = home.join("other home/notes");
