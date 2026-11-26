@@ -1,6 +1,7 @@
 [package]
 name = "zledsh"
 version = "0.1.0"
+license = "MIT"
 edition = "2024"
 rust-version = "1.85"
 

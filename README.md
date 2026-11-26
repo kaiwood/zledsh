@@ -2,13 +2,20 @@
 
 `zledsh` is a work-in-progress standalone Rust port of Kward’s shell for macOS and Linux. `zledsh` is the only executable. Run it without arguments for an interactive shell or use `zledsh -c` to run a command. No Ruby or Kward installation is required.
 
+## Install
+
+From a checkout on macOS or Linux, with Rust 1.85 or newer:
+
 ```sh
-cargo run --locked -- -c 'printf "<%s>\n" "$0" "$@"' demo 'two words'
+cargo install --locked --path .
+zledsh -c 'printf "<%s>\n" "$0" "$@"' demo 'two words'
 ```
+
+Make sure Cargo’s bin directory (usually `~/.cargo/bin`) is on `PATH`.
 
 This slice supports `cd`, `pwd`, `exit` and a limited `printf` (`%s` and `%%`), quoted positional arguments and simple environment substitutions, sequential commands, foreground pipelines such as `ls | grep pattern`, and redirection on file descriptors 0–9. Use `cat < input` or `read -r line < input` to redirect a command without changing the shell’s own input. When `zledsh` itself reads from redirected stdin, it reads commands from that stream; `read [-r] name [name ...]` consumes a line from the same stream. It splits fields using `IFS`, leaves the unsplit remainder in the last variable, and treats backslashes literally with `-r`. Use `read -d : name` to stop at a colon, or `read -r -d '' name` for NUL-delimited input. The shell runs external commands by path or by searching `PATH`. A command that cannot be found fails with status 127. If the operating system rejects a file’s executable format (`ENOEXEC`), `zledsh` returns 126 rather than interpreting it automatically. To run shell text without a shebang, invoke it explicitly with `zledsh ./script`. There is no `/bin/sh` fallback.
 
-On macOS or Linux, run `target/debug/zledsh` without arguments for an interactive prompt. It supports `PS1`, `PS2`, and a Zsh-style `PROMPT` (try `PROMPT='%~ [%?] %# '`). Interactive sessions load supported commands from `~/.kward/zledshrc` and `~/.zledshrc`, then the file named by the launch environment’s `ENV`, if set. `ENV`, `PS1`, and `PS2` allow parameter expansion, not command substitution. Ctrl+C interrupts a foreground command or pipeline; Ctrl+Z stops it, and `fg` resumes the most recently stopped job. By default a pipeline reports its last stage’s status. Each stage expands arguments, applies redirections, and runs in an isolated shell environment. Stages can read shell variables and functions, but only exported variables are passed to external commands. Use `command &` or `first && second &` to start a background job, `jobs` to list jobs, `bg %1` to resume a stopped job in the background, and `fg %1` to bring it to the foreground. Use `%%` or `%+` for the current job and `%-` for the previous one; stopped jobs take precedence. Background commands do not read from the keyboard.
+Run `zledsh` without arguments for an interactive prompt. It supports `PS1`, `PS2`, and a Zsh-style `PROMPT` (try `PROMPT='%~ [%?] %# '`). Interactive sessions load supported commands from `~/.kward/zledshrc` and `~/.zledshrc`, then the file named by the launch environment’s `ENV`, if set. `ENV`, `PS1`, and `PS2` allow parameter expansion, not command substitution. Ctrl+C interrupts a foreground command or pipeline; Ctrl+Z stops it, and `fg` resumes the most recently stopped job. By default a pipeline reports its last stage’s status. Each stage expands arguments, applies redirections, and runs in an isolated shell environment. Stages can read shell variables and functions, but only exported variables are passed to external commands. Use `command &` or `first && second &` to start a background job, `jobs` to list jobs, `bg %1` to resume a stopped job in the background, and `fg %1` to bring it to the foreground. Use `%%` or `%+` for the current job and `%-` for the previous one; stopped jobs take precedence. Background commands do not read from the keyboard.
 
 Save `pid=$!` after starting a background job, then use `wait "$pid"` to collect its exit status. `wait "$first" "$second"` collects both statuses and returns the second. `wait -n` collects one completed job, optionally restricted to the supplied job IDs or PIDs; it returns 127 when none are eligible. A stopped job is not finished: `wait` keeps waiting until it exits. The interactive shell prints completion notices before a prompt without consuming the status. Explicitly listing a completed job with `jobs %1` reports and consumes its status.
 
@@ -156,6 +163,8 @@ The experimental `?` prompt is available in interactive `zledsh` with the line e
 
 ## Current limits
 
+`zledsh` is not a drop-in replacement for POSIX `sh` or Bash. It does not claim POSIX conformance. Non-UTF-8 inputs are not supported in several expansion paths, and patterns use the C locale. Some alias replacements inside `$(...)` cannot affect how the shell finds the closing delimiter or reads here-documents. There is no automatic fallback for executable text without a shebang.
+
 Shell startup files are loaded only for interactive invocations and are skipped when real and effective user or group IDs differ. Named scripts are opened from the supplied path, not searched for on `PATH`.
 
 Shell input has no fixed line-length cap. Redirection descriptors are limited to 0–9. Compound command and parameter expansion nesting are limited to 32 levels, command substitutions to 16 levels, and captured substitution output to 16 MiB. These guards are separate from operating-system limits on launching programs.
@@ -191,3 +200,7 @@ cargo test --locked --test terminal git_switch_completes_a_real_local_branch -- 
 ```
 
 These tests drive the built `zledsh` binary in isolated temporary homes. They cover foreground signals and job control, restoration of terminal settings, startup and editing, completion, history privacy, and assistant turns with fake local providers.
+
+## License
+
+[MIT](LICENSE).
