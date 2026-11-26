@@ -313,3 +313,40 @@ pwd
         "",
     );
 }
+
+// POSIX.1-2024 2.9.4.1 and 2.13: a subshell inherits the live environment
+// and open descriptors, but its changes and exit do not escape the group.
+#[test]
+fn parenthesized_group_isolates_state_and_exit() {
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(home.path().join("child")).unwrap();
+    let source = r#"
+value=outer
+send() { printf '%s\n' "$value" >&3; }
+run() {
+    ( value=inner; cd child; send; printf 'pwd:%s\n' "$(pwd)"; printf 'redirected\n' 3>local-file >&3; exit 17; printf wrong )
+    printf 'status:%s value:%s\n' "$?" "$value"
+    send
+}
+run 3>shared
+pwd
+printf 'captured:%s\n' "$( (printf nested) )"
+"#;
+    let output = shell(home.path()).args(["-c", source]).output().unwrap();
+    let root = home.path().canonicalize().unwrap();
+    assert_output(
+        output,
+        0,
+        &format!(
+            "pwd:{}/child\nstatus:17 value:outer\n{}\ncaptured:nested\n",
+            root.display(),
+            root.display()
+        ),
+        "",
+    );
+    assert_eq!(fs::read(root.join("shared")).unwrap(), b"inner\nouter\n");
+    assert_eq!(
+        fs::read(root.join("child/local-file")).unwrap(),
+        b"redirected\n"
+    );
+}

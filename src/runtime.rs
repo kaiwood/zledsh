@@ -177,6 +177,7 @@ struct Substitution {
 #[derive(serde::Serialize, serde::Deserialize)]
 enum WorkerTask {
     Script(String),
+    List(Script),
     Complete {
         function: String,
         words: Vec<String>,
@@ -237,7 +238,8 @@ impl<'a> Invocation<'a> {
                 }
                 Statement::For { body, .. }
                 | Statement::Function { body, .. }
-                | Statement::Group(body) => self.expand_aliases(body)?,
+                | Statement::Group(body)
+                | Statement::Subshell(body) => self.expand_aliases(body)?,
                 Statement::While {
                     condition, body, ..
                 } => {
@@ -363,6 +365,18 @@ impl<'a> Invocation<'a> {
                     self.run_pipeline_with_descriptors(pipeline, input, descriptors)
                 }
                 Statement::Group(body) => self.run_with_descriptors(body, input, descriptors),
+                Statement::Subshell(body) => {
+                    self.status = match self
+                        .subshell_stage(body, descriptors)
+                        .and_then(|stage| self.start_stages(vec![stage], false))
+                    {
+                        Ok(status) => status,
+                        Err(error) => {
+                            report(&descriptors[2], &format!("subshell: {error}"));
+                            2
+                        }
+                    };
+                }
                 Statement::Negated(inner) => {
                     self.run_with_descriptors(
                         std::slice::from_ref(inner.as_ref()),
@@ -1491,8 +1505,16 @@ impl<'a> Invocation<'a> {
     }
 
     pub fn run_substitution() -> Result<u8, String> {
-        let saved: Substitution = serde_json::from_reader(process::Stdin)
-            .map_err(|_| "invalid command substitution state")?;
+        Self::run_worker(process::Stdin, None)
+    }
+
+    pub fn run_subshell(state: File, closed: u8) -> Result<u8, String> {
+        Self::run_worker(state, Some(closed))
+    }
+
+    fn run_worker(state: impl Read, closed: Option<u8>) -> Result<u8, String> {
+        let saved: Substitution =
+            serde_json::from_reader(state).map_err(|_| "invalid shell worker state")?;
         let mut shell = Invocation::new(&saved.name, &saved.args);
         shell.variables = saved.variables;
         shell.arrays = saved.arrays;
@@ -1502,6 +1524,20 @@ impl<'a> Invocation<'a> {
         shell.unset = saved.unset;
         shell.substitution_depth = saved.depth;
         shell.status = saved.status;
+        if let Some(closed) = closed {
+            let WorkerTask::List(body) = saved.task else {
+                return Err("invalid subshell task".into());
+            };
+            let mut descriptors = inherited_descriptors();
+            for (fd, descriptor) in descriptors[..3].iter_mut().enumerate() {
+                if (closed & (1 << fd)) != 0 {
+                    *descriptor = Descriptor::Closed;
+                }
+            }
+            let mut input = BufReader::with_capacity(1, process::Stdin);
+            shell.run_with_descriptors(&body, &mut input, &descriptors);
+            return Ok(shell.status);
+        }
         process::null_stdin().map_err(|error| error.to_string())?;
         match saved.task {
             WorkerTask::Script(source) => {
@@ -1509,6 +1545,7 @@ impl<'a> Invocation<'a> {
                 Ok(shell.status)
             }
             WorkerTask::Complete { function, words } => shell.complete_in_worker(&function, words),
+            WorkerTask::List(_) => Err("invalid command substitution task".into()),
         }
     }
 
@@ -1565,8 +1602,8 @@ impl<'a> Invocation<'a> {
         Some(crate::completion::run_callback(command).unwrap_or_default())
     }
 
-    fn worker_command(&self, task: WorkerTask) -> io::Result<std::process::Command> {
-        let saved = Substitution {
+    fn worker_state(&self, task: WorkerTask) -> Substitution {
+        Substitution {
             task,
             name: self.name.into(),
             args: self.args.clone(),
@@ -1578,12 +1615,43 @@ impl<'a> Invocation<'a> {
             unset: self.unset.clone(),
             depth: self.substitution_depth + 1,
             status: self.status,
-        };
+        }
+    }
+
+    fn worker_command(&self, task: WorkerTask) -> io::Result<std::process::Command> {
+        let saved = self.worker_state(task);
         let mut command = std::process::Command::new(std::env::current_exe()?);
         command
             .arg(crate::SUBSTITUTION)
             .stdin(worker_payload(&saved)?);
         Ok(command)
+    }
+
+    fn subshell_stage(
+        &self,
+        body: &Script,
+        descriptors: &Descriptors,
+    ) -> io::Result<process::Stage> {
+        if self.substitution_depth >= 32 {
+            return Err(io::Error::other("subshells nested too deeply"));
+        }
+        let state = worker_payload(&self.worker_state(WorkerTask::List(body.clone())))?;
+        let state_fd = process::duplicate(state.as_raw_fd())?;
+        let executable = std::env::current_exe()?;
+        let args = [
+            executable
+                .to_str()
+                .ok_or_else(|| io::Error::other("shell path must be UTF-8"))?
+                .into(),
+            crate::SUBSHELL.into(),
+            closed_stdio(descriptors).to_string(),
+            state_fd.as_raw_fd().to_string(),
+        ];
+        let (path, env) = self.execution_environment();
+        let exec = process::Exec::new(&args, &path, env)?;
+        let mut child = stage(exec, "subshell", descriptors)?;
+        child.worker_state = Some(state_fd);
+        Ok(child)
     }
 
     fn substitute(&self, source: &str) -> Result<(String, u8), String> {

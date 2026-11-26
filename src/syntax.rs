@@ -243,6 +243,7 @@ pub(crate) type Script = Vec<Statement>;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Statement {
     Group(Script),
+    Subshell(Script),
     Pipeline(Vec<Command>),
     Array {
         name: String,
@@ -397,7 +398,16 @@ fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
         skip_space(input);
     }
     let name = head(input);
-    let statement = if matches!(
+    let statement = if input.next_if_eq(&'(').is_some() {
+        if depth >= 32 {
+            return Err("compound commands nested too deeply".into());
+        }
+        let body = list(input, &[")"], depth + 1)?;
+        input
+            .next_if_eq(&')')
+            .ok_or(ParseError::Incomplete("expected ) after subshell"))?;
+        Statement::Subshell(require_list(body, "empty subshell")?)
+    } else if matches!(
         name.as_str(),
         "if" | "for" | "while" | "until" | "case" | "{"
     ) {

@@ -35,6 +35,7 @@ use std::{
 };
 
 const SHELL_FDS: usize = 10;
+const SUBSHELL: &str = "--zledsh-subshell";
 const SUBSTITUTION: &str = "--zledsh-substitution";
 const PIPELINE_BUILTIN: &str = "--zledsh-pipeline-builtin";
 
@@ -48,6 +49,8 @@ pub fn launch() -> ExitCode {
     }
     let result = if args.next_if(|arg| arg == SUBSTITUTION).is_some() {
         runtime::Invocation::run_substitution()
+    } else if args.next_if(|arg| arg == SUBSHELL).is_some() {
+        run_subshell(args)
     } else {
         run_command(name, args)
     };
@@ -58,6 +61,23 @@ pub fn launch() -> ExitCode {
             2.into()
         }
     }
+}
+
+fn run_subshell(mut args: impl Iterator<Item = OsString>) -> Result<u8, String> {
+    let mut number = || {
+        args.next()
+            .and_then(|value| value.to_str()?.parse::<RawFd>().ok())
+    };
+    let Some(closed @ 0..=7) = number() else {
+        return Err("invalid subshell descriptor mask".into());
+    };
+    let Some(fd) =
+        number().filter(|&fd| fd >= SHELL_FDS as RawFd && process::inherited_descriptor(fd))
+    else {
+        return Err("missing subshell worker state".into());
+    };
+    // SAFETY: the launcher passes an inherited state descriptor owned by the worker.
+    runtime::Invocation::run_subshell(unsafe { File::from_raw_fd(fd) }, closed as u8)
 }
 
 fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
