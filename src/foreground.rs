@@ -192,6 +192,17 @@ impl Foreground {
 
     pub fn wait_background(&mut self, selectors: &[String]) -> io::Result<u8> {
         self.refresh()?;
+        if let Some(selectors) = selectors.strip_prefix(&[String::from("-n")]) {
+            let candidates = if selectors.is_empty() {
+                (0..self.jobs.len()).collect::<Vec<_>>()
+            } else {
+                selectors
+                    .iter()
+                    .filter_map(|selector| self.select(Some(selector), true).ok())
+                    .collect()
+            };
+            return self.wait_next(&candidates);
+        }
         let mut status = 0;
         if selectors.is_empty() {
             while !self.jobs.is_empty() {
@@ -212,6 +223,30 @@ impl Foreground {
             }
         }
         Ok(status)
+    }
+
+    fn wait_next(&mut self, candidates: &[usize]) -> io::Result<u8> {
+        if candidates.is_empty() {
+            return Ok(127);
+        }
+        loop {
+            if let Some(signal) = crate::traps::pending() {
+                return Ok(128 + signal as u8);
+            }
+            for &index in candidates {
+                let job = &mut self.jobs[index];
+                let code = match job.done {
+                    Some(code) => code,
+                    None => match job.pipeline.poll()? {
+                        Some(Outcome::Exited { code, .. }) => code,
+                        _ => continue,
+                    },
+                };
+                self.jobs.remove(index);
+                return Ok(code);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     // Distinguish a trap interrupt from a child's signal-derived exit status.

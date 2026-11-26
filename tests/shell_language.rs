@@ -1174,3 +1174,32 @@ loop
         "",
     );
 }
+
+#[test]
+fn wait_n_selects_one_eligible_completion() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+exit 17 & first=$!
+exit 23 & second=$!
+wait -n "$second"
+printf 'selected=%s\n' "$?"
+wait -n "$second"
+printf 'consumed=%s\n' "$?"
+wait -n
+printf 'remaining=%s\n' "$?"
+wait -n
+printf 'empty=%s\n' "$?"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        0,
+        "selected=23\nconsumed=127\nremaining=17\nempty=127\n",
+        "",
+    );
+}
