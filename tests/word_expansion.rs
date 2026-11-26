@@ -279,3 +279,46 @@ BODY
         "argc=5\n<7>\n<a b>\n<a>\n<b>\n<a b>\nargc=1\n<<nested>>\ndocument value\n`literal`\nargc=1\n<quoted $value>\n",
     );
 }
+
+// POSIX.1-2024 2.6.4: integer expressions retain assignment side effects.
+#[test]
+fn arithmetic_expands_operands_and_short_circuits_without_side_effects() {
+    assert_expansion(
+        r#"n=-2; offset=2
+show "$((n * 3 + 010 + 0xA))" "$((($offset + 1) << 2))" "$((n))" "$(( $n ))"
+show "$((a = 4, a += 3))" "$a" "$((a > 5 && a < 9))"
+show "$((0 && (a = 90)))" "$((1 || (1 / 0)))" "$((0 ? (a = 80) : 6))" "$a"
+show "$(( $(printf 9) + $((1 + 2)) ))"
+/bin/cat <<END
+sum=$((a + 1))
+END
+"#,
+        &[],
+        "argc=4\n<12>\n<12>\n<-2>\n<-2>\nargc=3\n<7>\n<7>\n<1>\nargc=4\n<0>\n<1>\n<6>\n<7>\nargc=1\n<12>\nsum=8\n",
+    );
+}
+
+#[test]
+fn arithmetic_reports_invalid_variables_and_division() {
+    for (script, message) in [
+        (
+            "printf '%s' $((1 / 0)); printf wrong",
+            "invalid arithmetic division",
+        ),
+        (
+            "n=bad; printf '%s' $((n + 1)); printf wrong",
+            "arithmetic variable is not an integer",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
+            .args(["-c", script])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!("zledsh: arithmetic expansion: {message}\n")
+        );
+    }
+}

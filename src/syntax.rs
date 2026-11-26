@@ -89,6 +89,7 @@ pub(crate) enum Part {
         index: ArrayIndex,
     },
     Substitution(String),
+    Arithmetic(Word),
     Length(String),
     Trim {
         name: String,
@@ -1055,7 +1056,17 @@ fn parameter_at(
         return Err("parameter expansion nested too deeply".into());
     }
     let part = match input.peek() {
-        Some('(') => return substitution(input, word, quoted),
+        Some('(') => {
+            let mut ahead = input.clone();
+            ahead.next();
+            if ahead.next_if_eq(&'(').is_some() {
+                *input = ahead;
+                let expression = arithmetic_word(input, depth + 1)?;
+                word.push(Part::Arithmetic(expression), quoted);
+                return Ok(());
+            }
+            return substitution(input, word, quoted);
+        }
         Some('!') => {
             input.next();
             Part::LastBackground
@@ -1236,6 +1247,34 @@ fn parameter_word(input: &mut Source<'_>, quoted: bool, depth: usize) -> ParseRe
     Ok(word)
 }
 
+fn arithmetic_word(input: &mut Source<'_>, depth: usize) -> ParseResult<Word> {
+    let mut expression = Word::default();
+    let mut parentheses = 0usize;
+    while let Some(ch) = input.next() {
+        match ch {
+            ')' if parentheses == 0 => {
+                if input.next_if_eq(&')').is_some() {
+                    return Ok(expression);
+                }
+                return Err("expected )) after arithmetic expression".into());
+            }
+            '(' => {
+                parentheses += 1;
+                literal(&mut expression, ch, true);
+            }
+            ')' => {
+                parentheses -= 1;
+                literal(&mut expression, ch, true);
+            }
+            '$' => parameter_at(input, &mut expression, true, depth)?,
+            '`' => backquoted(input, &mut expression, true)?,
+            '\\' if input.next_if_eq(&'\n').is_some() => {}
+            _ => literal(&mut expression, ch, true),
+        }
+    }
+    Err(ParseError::Incomplete("unclosed arithmetic expansion"))
+}
+
 fn backquoted(input: &mut Source<'_>, word: &mut Word, quoted: bool) -> ParseResult<()> {
     let depth = input
         .substitutions
@@ -1276,9 +1315,6 @@ fn substitution(input: &mut Source<'_>, word: &mut Word, quoted: bool) -> ParseR
         return Err("command substitutions nested too deeply".into());
     }
     input.next(); // '('
-    if input.peek() == Some(&'(') {
-        return Err("arithmetic expansion is not supported".into());
-    }
     let start = input.offset;
     input.substitutions = Some(depth + 1);
     let pending = std::mem::take(&mut input.pending_here);

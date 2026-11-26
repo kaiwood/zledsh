@@ -1,3 +1,4 @@
+mod arithmetic;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod assistant;
 #[cfg(any(target_os = "macos", target_os = "linux"))]

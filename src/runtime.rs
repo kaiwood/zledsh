@@ -1798,6 +1798,21 @@ impl<'a> Invocation<'a> {
                         }
                     }
                 }
+                Part::Arithmetic(expression) => {
+                    let expression = self.expand(expression, status)?.join(" ");
+                    let value = crate::arithmetic::evaluate(&expression, |name, assignment| {
+                        if let Some(value) = assignment {
+                            self.variables.insert(name.into(), value.to_string());
+                            None
+                        } else {
+                            self.variable(name)
+                        }
+                    })
+                    .map_err(|error| {
+                        self.parameter_error(format!("arithmetic expansion: {error}"))
+                    })?;
+                    field.push(fragment(value.to_string()));
+                }
                 Part::Substitution(source) => {
                     let (text, code) = self.substitute(source)?;
                     *status = Some(code);
