@@ -1,7 +1,8 @@
 mod completion_menu;
 
 use std::collections::VecDeque;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -528,7 +529,7 @@ impl EditorTerminal {
                     primary.then_some(history),
                     kills,
                     shell,
-                    draft,
+                    (draft, &self.original, &self.editor),
                 )
             });
         stderr.write_all(b"\x1b[?2004l")?;
@@ -703,7 +704,7 @@ fn read_keys(
     mut history: Option<&mut History>,
     mut kills: Option<&mut KillRing>,
     shell: &mut Invocation<'_>,
-    draft: String,
+    (draft, cooked, raw): (String, &libc::termios, &libc::termios),
 ) -> io::Result<Line> {
     let primary = history.is_some();
     let mut consecutive_cut = false;
@@ -924,6 +925,26 @@ fn read_keys(
                     }
                 }
             }
+            Key::ExternalEdit => {
+                if history.as_deref().is_none_or(|history| history.paused) {
+                    continue;
+                }
+                echo.write_all(b"\x1b[?2004l\n")?;
+                echo.flush()?;
+                set_attributes(cooked)?;
+                let edited = edit_draft(shell, &line);
+                set_attributes(raw)?;
+                match edited {
+                    Ok(Some(text)) => {
+                        line = text;
+                        cursor = line.len();
+                        history_index = None;
+                    }
+                    Ok(None) => {}
+                    Err(error) => writeln!(echo, "zledsh: edit draft: {error}")?,
+                }
+                echo.write_all(b"\x1b[?2004h")?;
+            }
             Key::LastArgument => {
                 let Some(history) = history.as_deref_mut().filter(|history| !history.paused) else {
                     continue;
@@ -1020,6 +1041,7 @@ enum Key {
     BackwardKillWord,
     YankPop,
     LastArgument,
+    ExternalEdit,
     Ignored,
 }
 
@@ -1028,6 +1050,7 @@ impl Key {
         matches!(self,
             Self::Byte(b' '..=b'~' | 128..=255 | b'\t' | 4 | 8 | 11 | 18 | 19 | 21 | 23 | 25 | 127)
             | Self::Delete | Self::Paste | Self::KillWord | Self::BackwardKillWord | Self::YankPop | Self::BackTab
+            | Self::LastArgument | Self::ExternalEdit
         )
     }
 }
@@ -1035,8 +1058,58 @@ impl Key {
 fn read_key(input: &mut impl BufRead, shell: &mut Invocation<'_>) -> io::Result<Option<Key>> {
     match read_editor_byte(input, shell)? {
         Some(27) => read_escape(input).map(Some),
+        Some(24) => Ok(Some(if read_editor_byte(input, shell)? == Some(5) {
+            Key::ExternalEdit
+        } else {
+            Key::Ignored
+        })),
         byte => Ok(byte.map(Key::Byte)),
     }
+}
+
+fn edit_draft(shell: &mut Invocation<'_>, draft: &[u8]) -> io::Result<Option<Vec<u8>>> {
+    const LIMIT: u64 = 1024 * 1024;
+    if draft.len() as u64 > LIMIT {
+        return Err(io::Error::other("draft is too large"));
+    }
+    let directory = tempfile::tempdir()?;
+    let mut file = tempfile::NamedTempFile::new_in(directory.path())?;
+    file.write_all(draft)?;
+    file.flush()?;
+    let editor = shell
+        .variable("VISUAL")
+        .filter(|editor| !editor.is_empty())
+        .or_else(|| shell.variable("EDITOR").filter(|editor| !editor.is_empty()))
+        .unwrap_or_else(|| "vi".into());
+    let path = file
+        .path()
+        .to_str()
+        .ok_or_else(|| io::Error::other("draft path is not UTF-8"))?;
+    if !shell.run_editor(&[editor, path.into()]) {
+        return Ok(None);
+    }
+    // Some editors replace the file on save. Reopen the path in the private directory.
+    let mut edited = Vec::new();
+    let edited_file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(file.path())?;
+    if !edited_file.metadata()?.is_file() {
+        return Err(io::Error::other("edited draft is not a regular file"));
+    }
+    edited_file.take(LIMIT + 1).read_to_end(&mut edited)?;
+    if edited.len() as u64 > LIMIT
+        || !std::str::from_utf8(&edited).is_ok_and(|text| {
+            text.chars()
+                .all(|ch| !ch.is_control() || matches!(ch, '\n' | '\t'))
+        })
+    {
+        return Err(io::Error::other("edited draft contains unsupported text"));
+    }
+    if edited.last() == Some(&b'\n') {
+        edited.pop();
+    }
+    Ok(Some(edited))
 }
 
 struct SearchExit<'a> {

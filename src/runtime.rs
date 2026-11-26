@@ -1414,6 +1414,11 @@ impl<'a> Invocation<'a> {
         }
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn run_editor(&mut self, argv: &[String]) -> bool {
+        self.external(argv, inherited_descriptors()) == 0
+    }
+
     fn external(&mut self, argv: &[String], mut descriptors: Descriptors) -> u8 {
         let (path, env) = self.execution_environment();
         let name = &argv[0];

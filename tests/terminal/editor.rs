@@ -547,3 +547,38 @@ fn last_argument_recall_keeps_quoting_and_excludes_private_commands() {
     tty.expect("arg> ");
     tty.finish();
 }
+
+#[test]
+fn external_editor_returns_a_draft_and_keeps_original_on_interrupt() {
+    let mut tty = Terminal::start("external-edit> ", &[("EDITOR", "./edit-draft")], |home| {
+        executable(
+            &home.join("edit-draft"),
+            r#"#!/bin/sh
+case "$(/bin/cat "$1")" in
+  *cancel*) printf 'editor ready\n'; exec /bin/sleep 30;;
+esac
+printf 'printf saved > edited\n' > "$1"
+"#,
+        );
+    });
+    tty.expect("external-edit> ");
+    tty.send("printf original\x18\x05");
+    tty.expect("external-edit> printf saved > edited");
+    assert!(!tty.home().join("edited").exists());
+    tty.send("\n");
+    tty.expect("\x1b[?2004hexternal-edit> ");
+    assert_eq!(fs::read(tty.home().join("edited")).unwrap(), b"saved");
+    tty.send("/bin/echo cancel\x18\x05");
+    tty.expect("editor ready\r\n");
+    tty.send("\x03");
+    tty.expect("external-edit> /bin/echo cancel");
+    tty.send("\n");
+    tty.expect("\r\ncancel\r\n");
+    tty.expect("external-edit> ");
+    tty.send("history pause\n");
+    tty.expect("[private] external-edit> ");
+    tty.send("/bin/echo private\x18\x05\n");
+    tty.expect("\r\nprivate\r\n");
+    tty.expect("[private] external-edit> ");
+    tty.finish();
+}
