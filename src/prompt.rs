@@ -4,6 +4,14 @@ use crate::runtime::Invocation;
 
 pub fn render(shell: &mut Invocation<'_>, continuation: bool, number: usize) -> String {
     if let Some(template) = shell.variable("PROMPT").filter(|_| !continuation) {
+        let template = if shell.options.promptsubst {
+            shell.expand_prompt(&template).unwrap_or_else(|error| {
+                eprintln!("zledsh: PROMPT: {error}");
+                template
+            })
+        } else {
+            template
+        };
         return formatted(shell, &template);
     }
     let (name, default) = if continuation {

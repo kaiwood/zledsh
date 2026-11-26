@@ -2370,6 +2370,12 @@ impl<'a> Invocation<'a> {
             .map(|fields| fields.join(" "))
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn expand_prompt(&mut self, value: &str) -> Result<String, String> {
+        self.expand(&syntax::here_word(value)?, &mut None)
+            .map(|fields| fields.join(" "))
+    }
+
     fn expand_words(
         &mut self,
         words: &[Word],

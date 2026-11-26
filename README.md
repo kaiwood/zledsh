@@ -17,6 +17,16 @@ This slice supports `cd`, `pwd`, `exit` and a limited `printf` (`%s` and `%%`), 
 
 Run `zledsh` without arguments for an interactive prompt. It supports `PS1`, `PS2`, and a Zsh-style `PROMPT` (try `PROMPT='%~ [%?] %# '`). Interactive sessions load supported commands from `~/.kward/zledshrc` and `~/.zledshrc`, then the file named by the launch environment’s `ENV`, if set. `ENV`, `PS1`, and `PS2` allow parameter expansion, not command substitution. Ctrl+C interrupts a foreground command or pipeline; Ctrl+Z stops it, and `fg` resumes the most recently stopped job. By default a pipeline reports its last stage’s status. Each stage expands arguments, applies redirections, and runs in an isolated shell environment. Stages can read shell variables and functions, but only exported variables are passed to external commands. Use `command &` or `first && second &` to start a background job, `jobs` to list jobs, `bg %1` to resume a stopped job in the background, and `fg %1` to bring it to the foreground. Use `%%` or `%+` for the current job and `%-` for the previous one; stopped jobs take precedence. Background commands do not read from the keyboard.
 
+To show the Git branch in your prompt, add this to `~/.zledshrc`:
+
+```sh
+set -o promptsubst
+git_branch() { git branch --show-current 2>/dev/null; }
+PROMPT='%n@%m %~ ‹$(git_branch)› %# '
+```
+
+If you already define `git_branch` and set `PROMPT`, just add `set -o promptsubst`. Keep the prompt assignment single-quoted so `$(git_branch)` runs when the prompt is drawn, not when it is assigned. This option enables parameter, arithmetic, and command expansion in `PROMPT` only. It is off by default: enable it only for a trusted prompt, since the commands run with your permissions.
+
 With a multiline prompt, the line editor keeps the header in place while you edit the command. Press Ctrl+L to clear the screen and redraw the whole prompt.
 
 Save `pid=$!` after starting a background job, then use `wait "$pid"` to collect its exit status. `wait "$first" "$second"` collects both statuses and returns the second. `wait -n` collects one completed job, optionally restricted to the supplied job IDs or PIDs; it returns 127 when none are eligible. A stopped job is not finished: `wait` keeps waiting until it exits. The interactive shell prints completion notices before a prompt without consuming the status. Explicitly listing a completed job with `jobs %1` reports and consumes its status.

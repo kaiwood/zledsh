@@ -44,6 +44,30 @@ fn startup_prompt_and_cancelled_conditional() {
 }
 
 #[test]
+fn prompt_substitution_is_opt_in_and_runs_functions_without_changing_status() {
+    let mut tty = Terminal::start("‹$(git_branch)› [%?]> ", &[], |home| {
+        fs::write(
+            home.join(".zledshrc"),
+            r#"branch=main
+git_branch() { printf '%s\n' "$branch"; branch=worker; return 7; }
+"#,
+        )
+        .unwrap();
+    });
+    tty.expect("‹$(git_branch)› [0]> ");
+    tty.send("set -o promptsubst\n");
+    tty.expect("‹main› [0]> ");
+    tty.send("branch=topic; false\n");
+    tty.expect("‹topic› [1]> ");
+    tty.send("printf 'status:%s branch:%s\\n' \"$?\" \"$branch\"\n");
+    tty.expect("\r\nstatus:1 branch:topic\r\n");
+    tty.expect("‹topic› [0]> ");
+    tty.send("set +o promptsubst\n");
+    tty.expect("‹$(git_branch)› [0]> ");
+    tty.finish();
+}
+
+#[test]
 fn command_lookup_guards_startup_path() {
     for mode in [0o644, 0o755] {
         let mut tty = Terminal::start("lookup> ", &[], |home| {

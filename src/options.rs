@@ -6,6 +6,7 @@ pub(crate) struct ShellOptions {
     pub noglob: bool,
     pub globstar: bool,
     pub noclobber: bool,
+    pub promptsubst: bool,
 }
 
 impl ShellOptions {
@@ -16,6 +17,7 @@ impl ShellOptions {
             "globstar" => self.globstar = enabled,
             "noglob" => self.noglob = enabled,
             "noclobber" => self.noclobber = enabled,
+            "promptsubst" => self.promptsubst = enabled,
             _ => return Err(format!("unsupported option: {name}")),
         }
         Ok(())
@@ -28,6 +30,7 @@ impl ShellOptions {
             ("noclobber", self.noclobber),
             ("noglob", self.noglob),
             ("pipefail", self.pipefail),
+            ("promptsubst", self.promptsubst),
         ]
         .into_iter()
     }
