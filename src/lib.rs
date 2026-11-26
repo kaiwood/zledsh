@@ -1,6 +1,7 @@
 mod arithmetic;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod assistant;
+mod brace;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod chatgpt;
 #[cfg(any(target_os = "macos", target_os = "linux"))]

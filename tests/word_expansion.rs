@@ -322,3 +322,25 @@ fn arithmetic_reports_invalid_variables_and_division() {
         );
     }
 }
+
+#[test]
+fn brace_expansion_is_lexical_and_preserves_literal_braces() {
+    let home = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_zledsh"))
+        .current_dir(home.path())
+        .env_clear()
+        .env("HOME", home.path())
+        .args([
+            "-c",
+            r#"
+value='{x,y}'
+printf '<%s>\n' pre{a,{b,c}}{1,2} '{q,r}' \{e,f\} {literal} "$value" {,z}
+printf '<%s>\n' {03..01..2} {x..z}
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"<prea1>\n<prea2>\n<preb1>\n<preb2>\n<prec1>\n<prec2>\n<{q,r}>\n<{e,f}>\n<{literal}>\n<{x,y}>\n<>\n<z>\n<03>\n<01>\n<x>\n<y>\n<z>\n");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}

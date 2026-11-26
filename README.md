@@ -99,6 +99,8 @@ After field splitting, unquoted `*`, `?`, and bracket patterns such as `[a-z]` e
 
 Enable `set -o globstar` to match across directories with `**`, as in `printf '%s\n' **/*.rs`. Recursive walking skips hidden entries and does not descend into symlinks it encounters. Use `set +o globstar` to turn it off.
 
+Brace expansion generates arguments before parameter and pathname expansion: `printf '%s\n' src/{lib,main}.rs` yields two paths, and `{01..05..2}` yields `01`, `03`, and `05`. Quote or escape braces to keep them literal. Braces produced by a variable are not expanded.
+
 Use `"$@"` to forward each positional argument unchanged, including empty arguments. `"$*"` instead joins them into one argument using the first character of `IFS` (a space if unset, no separator if empty). Unquoted `$@` and `$*` split each positional argument separately.
 
 `$(...)` captures stdout in an isolated `zledsh` process. Quote it to keep the result as one argument. `eval`, `.` and `source` execute native `zledsh` syntax in the current shell. For example, `. ./setup.zledsh` loads a script into an existing session. This is a scripting subset, not a Bash interpreter: associative arrays are unsupported. Use `$((expression))` for signed integer arithmetic, including assignments and short-circuit operators. Invalid arithmetic reports an expansion error. As a command, `((expression))` uses the same operators, writes no result, and succeeds only when the value is nonzero. Backquoted command substitution also runs natively; prefer `$(...)` when nesting substitutions.

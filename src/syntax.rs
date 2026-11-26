@@ -1101,7 +1101,7 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
             }
             '(' if word.assignment => return Err("array literals are not supported".into()),
             '`' => backquoted(input, &mut word, false)?,
-            '<' | '(' | '{' | '}' => {
+            '<' | '(' => {
                 return Err(ParseError::Invalid(format!(
                     "unsupported unquoted syntax: {ch}"
                 )));

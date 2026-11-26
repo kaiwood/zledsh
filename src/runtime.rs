@@ -2292,6 +2292,24 @@ impl<'a> Invocation<'a> {
         status: &mut Option<u8>,
         output: &mut Vec<String>,
     ) -> Result<(), String> {
+        if let Some(alternatives) = crate::brace::alternatives(word)? {
+            if self.agent_command() {
+                return Err("brace expansion must be submitted by the user".into());
+            }
+            for alternative in alternatives {
+                self.expand_argument_fields(&alternative, status, output)?;
+            }
+            return Ok(());
+        }
+        self.expand_argument_fields(word, status, output)
+    }
+
+    fn expand_argument_fields(
+        &mut self,
+        word: &Word,
+        status: &mut Option<u8>,
+        output: &mut Vec<String>,
+    ) -> Result<(), String> {
         let ifs = self.variable("IFS");
         for field in self.expand_parts(word, status, true, false)? {
             for field in split_field(field, ifs.as_deref().unwrap_or(DEFAULT_IFS)) {
