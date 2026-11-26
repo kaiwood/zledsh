@@ -582,3 +582,24 @@ printf 'printf saved > edited\n' > "$1"
     tty.expect("[private] external-edit> ");
     tty.finish();
 }
+
+#[test]
+fn completion_keeps_paths_inside_quotes_and_respects_typed_escapes() {
+    let mut tty = Terminal::start("quote-tab> ", &[], |home| {
+        fs::create_dir(home.join("some directory")).unwrap();
+        fs::write(home.join("some directory/file name"), b"escaped path\n").unwrap();
+        fs::write(home.join("a'b.txt"), b"single quote\n").unwrap();
+        fs::write(home.join("x$y.txt"), b"double quote\n").unwrap();
+    });
+    tty.expect("quote-tab> ");
+    for (command, expected) in [
+        ("/bin/cat some\\ directory/fi\t\n", "escaped path"),
+        ("/bin/cat 'a\t\n", "single quote"),
+        ("/bin/cat \"x\t\n", "double quote"),
+    ] {
+        tty.send(command);
+        tty.expect(&format!("\r\n{expected}\r\n"));
+        tty.expect("quote-tab> ");
+    }
+    tty.finish();
+}

@@ -9,26 +9,26 @@ use std::{
 use crate::runtime::{BUILTINS, Invocation};
 
 pub(crate) fn matches(line: &str, shell: &Invocation<'_>) -> Option<Matches> {
-    // Leave quoted and structured command lines to a later, parser-aware completer.
-    if line.contains(['\'', '"', '\\', '$', ';', '|', '&', '<', '>', '\n']) {
-        return None;
-    }
-    let (before, token) = line.rsplit_once(char::is_whitespace).unwrap_or(("", line));
-    let command = before.trim().is_empty();
+    let Draft {
+        mut words,
+        token,
+        quote,
+        expand_home,
+    } = Draft::parse(line)?;
+    let command = words.is_empty();
     let programmed = if command {
         None
     } else {
-        let mut words: Vec<_> = before.split_whitespace().map(str::to_owned).collect();
-        words.push(token.into());
+        words.push(token.clone());
         shell.programmed_completion(words)
     };
     let mut matches = programmed.unwrap_or_default();
     matches.retain(|candidate| {
         !candidate.is_empty()
-            && candidate.starts_with(token)
+            && candidate.starts_with(&token)
             && !candidate.chars().any(char::is_control)
     });
-    if token == "~" && matches.is_empty() {
+    if token == "~" && expand_home && matches.is_empty() {
         if shell
             .variable("HOME")
             .is_some_and(|home| Path::new(&home).is_dir())
@@ -42,13 +42,13 @@ pub(crate) fn matches(line: &str, shell: &Invocation<'_>) -> Option<Matches> {
         matches.extend(
             BUILTINS
                 .iter()
-                .filter(|word| word.starts_with(token))
+                .filter(|word| word.starts_with(&token))
                 .map(ToString::to_string),
         );
         matches.extend(
             shell
                 .aliases()
-                .filter(|name| name.starts_with(token))
+                .filter(|name| name.starts_with(&token))
                 .map(str::to_owned),
         );
         let path = shell
@@ -60,12 +60,12 @@ pub(crate) fn matches(line: &str, shell: &Invocation<'_>) -> Option<Matches> {
             } else {
                 &directory
             };
-            collect(directory, "", token, true, &mut matches);
+            collect(directory, "", &token, true, &mut matches);
         }
     } else if matches.is_empty() {
         let (parent, prefix) = token
             .rsplit_once('/')
-            .map_or(("", token), |(parent, prefix)| (parent, prefix));
+            .map_or(("", token.as_str()), |(parent, prefix)| (parent, prefix));
         let original = &token[..token.len() - prefix.len()];
         let directory = if original.is_empty() {
             "."
@@ -75,8 +75,9 @@ pub(crate) fn matches(line: &str, shell: &Invocation<'_>) -> Option<Matches> {
             parent
         };
         // Expand only the lookup path; candidates must keep the typed `~/`.
-        let home_directory = original
-            .strip_prefix("~/")
+        let home_directory = expand_home
+            .then(|| original.strip_prefix("~/"))
+            .flatten()
             .and_then(|rest| shell.variable("HOME").map(|home| format!("{home}/{rest}")));
         collect(
             Path::new(home_directory.as_deref().unwrap_or(directory)),
@@ -91,12 +92,87 @@ pub(crate) fn matches(line: &str, shell: &Invocation<'_>) -> Option<Matches> {
     (!matches.is_empty()).then_some(Matches {
         token_len: token.len(),
         candidates: matches,
+        quote,
     })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Quote {
+    Bare,
+    Single,
+    Double,
+}
+
+struct Draft {
+    words: Vec<String>,
+    token: String,
+    quote: Quote,
+    expand_home: bool,
+}
+
+impl Draft {
+    // Decode only literal words, never shell syntax or expansions. Quotes may
+    // be open at the cursor; the suffix is encoded for the current quote mode.
+    fn parse(line: &str) -> Option<Self> {
+        let mut words = Vec::new();
+        let mut token = String::new();
+        let mut quote = Quote::Bare;
+        let mut started = false;
+        let mut expand_home = false;
+        let mut chars = line.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match (quote, ch) {
+                (_, '\n' | '\r') => return None,
+                (Quote::Bare, ' ' | '\t') => {
+                    if started {
+                        words.push(std::mem::take(&mut token));
+                    }
+                    started = false;
+                    expand_home = false;
+                    continue;
+                }
+                (Quote::Bare, '\'') => quote = Quote::Single,
+                (Quote::Bare, '"') => quote = Quote::Double,
+                (Quote::Single, '\'') | (Quote::Double, '"') => quote = Quote::Bare,
+                (Quote::Bare, '\\') => token.push(chars.next().filter(|&ch| ch != '\n')?),
+                (Quote::Double, '\\') => {
+                    if chars
+                        .peek()
+                        .is_some_and(|ch| matches!(ch, '$' | '`' | '"' | '\\'))
+                    {
+                        token.push(chars.next()?);
+                    } else {
+                        token.push('\\');
+                    }
+                }
+                (
+                    Quote::Bare,
+                    '$' | '`' | ';' | '|' | '&' | '<' | '>' | '(' | ')' | '*' | '?' | '[' | '{'
+                    | '}',
+                )
+                | (Quote::Double, '$' | '`') => return None,
+                (Quote::Bare, '#') if !started => return None,
+                (Quote::Bare, '~') if !started => {
+                    expand_home = chars.peek().is_none_or(|ch| *ch == '/');
+                    token.push('~');
+                }
+                (_, ch) => token.push(ch),
+            }
+            started = true;
+        }
+        Some(Self {
+            words,
+            token,
+            quote,
+            expand_home,
+        })
+    }
 }
 
 pub(crate) struct Matches {
     token_len: usize,
     candidates: Vec<String>,
+    quote: Quote,
 }
 
 impl Matches {
@@ -127,8 +203,27 @@ impl Matches {
                     .unwrap_or(0);
             }
         }
-        let mut suffix = escape(&word[self.token_len..end]);
+        let text = &word[self.token_len..end];
+        let mut suffix = match self.quote {
+            Quote::Bare => escape(text),
+            Quote::Single => text.replace('\'', "'\\''"),
+            Quote::Double => {
+                let mut suffix = String::new();
+                for ch in text.chars() {
+                    if "\\\"$`".contains(ch) {
+                        suffix.push('\\');
+                    }
+                    suffix.push(ch);
+                }
+                suffix
+            }
+        };
         if self.len() == 1 && !word.ends_with('/') {
+            match self.quote {
+                Quote::Single => suffix.push('\''),
+                Quote::Double => suffix.push('"'),
+                Quote::Bare => {}
+            }
             suffix.push(' ');
         }
         suffix
