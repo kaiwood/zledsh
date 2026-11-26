@@ -1737,14 +1737,11 @@ fn variable_name(input: &mut Source<'_>) -> Option<String> {
 }
 
 fn literal(word: &mut Word, ch: char, quoted: bool) {
-    if let Some(WordPart {
-        kind: Part::Literal(text),
-        quoted: previous,
-    }) = word.parts.last_mut()
-        && *previous == quoted
-    {
-        text.push(ch);
-    } else {
-        word.push(Part::Literal(String::from(ch)), quoted);
+    match word.parts.last_mut() {
+        Some(WordPart {
+            kind: Part::Literal(text),
+            quoted: previous,
+        }) if *previous == quoted => text.push(ch),
+        _ => word.push(Part::Literal(String::from(ch)), quoted),
     }
 }
