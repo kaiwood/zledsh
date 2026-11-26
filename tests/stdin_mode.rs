@@ -225,3 +225,34 @@ read a b c; printf '%s:<%s>:<%s>:<%s>\n' "$?" "$a" "$b" "$c"
     assert_eq!(output.stdout, b"<one>\n<>\n<two : three>\n<left:side>\n<right>\n<beginend>\n<last>\n<  raw\\:line  >\n<>\n1:<partial>:<tail>:<>\n");
     assert!(output.stderr.is_empty(), "{output:?}");
 }
+
+#[test]
+fn read_d_handles_nul_and_single_byte_delimiters_without_reading_ahead() {
+    let home = tempfile::tempdir().unwrap();
+    let input = home.path().join("data");
+    std::fs::write(&input, b"first\0second\0joined\\:record:remaining\npartial").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
+        .env_clear()
+        .env("HOME", home.path())
+        .current_dir(home.path())
+        .stdin(std::fs::File::open(input).unwrap())
+        .args([
+            "-c",
+            r#"
+read -r -d '' first
+read -rd '' second
+read -d : third
+read -r fourth
+read -d : fifth
+printf '%s:<%s>:<%s>:<%s>:<%s>:<%s>\n' "$?" "$first" "$second" "$third" "$fourth" "$fifth"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        output.stdout,
+        b"1:<first>:<second>:<joinedrecord>:<remaining>:<partial>\n"
+    );
+    assert!(output.stderr.is_empty(), "{output:?}");
+}

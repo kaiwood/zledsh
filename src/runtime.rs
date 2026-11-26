@@ -1879,34 +1879,60 @@ impl<'a> Invocation<'a> {
     }
 
     fn read(&mut self, args: &[String], input: &mut dyn BufRead) -> Result<bool, String> {
-        let (raw, names) = match args {
-            [flag, rest @ ..] if flag == "-r" => (true, rest),
-            _ => (false, args),
-        };
-        let names = names.strip_prefix(&[String::from("--")]).unwrap_or(names);
+        let mut raw = false;
+        let mut delimiter = b'\n';
+        let mut names = args;
+        while let [flag, rest @ ..] = names {
+            match flag.as_str() {
+                "-r" => raw = true,
+                "-d" | "-rd" | "-dr" => {
+                    raw |= flag != "-d";
+                    let (value, rest) = rest.split_first().ok_or("-d requires a delimiter")?;
+                    delimiter = match value.as_bytes() {
+                        [] => 0,
+                        [byte] => *byte,
+                        _ => return Err("-d requires one byte or an empty delimiter".into()),
+                    };
+                    names = rest;
+                    continue;
+                }
+                "--" => {
+                    names = rest;
+                    break;
+                }
+                _ => break,
+            }
+            names = rest;
+        }
         if names.is_empty() || names.iter().any(|name| !valid_name(name)) {
-            return Err("expected read [-r] name [name ...]".into());
+            return Err("expected read [-r] [-d delimiter] name [name ...]".into());
         }
         let mut characters = Vec::new();
-        let mut line = String::new();
+        let mut line = Vec::new();
         let complete = 'lines: loop {
             line.clear();
             input
-                .read_line(&mut line)
+                .read_until(delimiter, &mut line)
                 .map_err(|error| error.to_string())?;
-            let mut chars = line.chars();
+            let terminated = line.last() == Some(&delimiter);
+            if terminated {
+                line.pop();
+            }
+            let mut chars = std::str::from_utf8(&line)
+                .map_err(|_| "input is not UTF-8")?
+                .chars();
             while let Some(ch) = chars.next() {
-                match ch {
-                    '\n' => break 'lines true,
-                    '\\' if !raw => match chars.next() {
-                        Some('\n') => continue 'lines,
+                if ch == '\\' && !raw {
+                    match chars.next() {
                         Some(escaped) => characters.push((escaped, true)),
+                        None if terminated => continue 'lines,
                         None => break 'lines false,
-                    },
-                    ch => characters.push((ch, false)),
+                    }
+                } else {
+                    characters.push((ch, false));
                 }
             }
-            break false;
+            break terminated;
         };
         let ifs = self.variable("IFS");
         let fields = crate::read_fields::split(
