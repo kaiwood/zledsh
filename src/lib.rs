@@ -116,6 +116,7 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
             .collect(),
         redirects: Vec::new(),
         background: false,
+        compound: None,
     };
     let mut input = BufReader::with_capacity(1, process::Stdin);
     runtime::Invocation::run_pipeline_builtin(&command, &mut input, closed, state)

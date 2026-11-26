@@ -224,7 +224,11 @@ impl<'a> Invocation<'a> {
                 Statement::Array { .. } => {}
                 Statement::Pipeline(stages) => {
                     for command in stages {
-                        self.expand_alias(command)?;
+                        if let Some(compound) = &mut command.compound {
+                            self.expand_aliases(std::slice::from_mut(compound.as_mut()))?;
+                        } else {
+                            self.expand_alias(command)?;
+                        }
                     }
                 }
                 Statement::Negated(inner) | Statement::Redirected { command: inner, .. } => {
@@ -1256,6 +1260,20 @@ impl<'a> Invocation<'a> {
             let mut descriptors = original.clone();
             descriptors[0] = stdin;
             descriptors[1] = stdout;
+            if let Some(compound) = &command.compound {
+                if self.agent_command() {
+                    return Err(io::Error::other(
+                        "compound commands must be submitted by the user",
+                    ));
+                }
+                stages.push(
+                    self.subshell_stage(std::slice::from_ref(compound.as_ref()), &descriptors)?,
+                );
+                stdin = next_input.map_or(Descriptor::Closed, |read| {
+                    Descriptor::File(Rc::new(File::from(read)))
+                });
+                continue;
+            }
             let mut status = None;
             let argv = match self.expand_command_words(&command.words, &mut status) {
                 Err(error) => {
@@ -1290,9 +1308,21 @@ impl<'a> Invocation<'a> {
             }
             let name = argv[0].clone();
             if self.functions.contains_key(&name) && name != "command" {
-                return Err(io::Error::other(
-                    "shell functions are not supported in pipeline stages; use command to bypass them",
-                ));
+                if self.agent_command() {
+                    return Err(io::Error::other(
+                        "shell functions must be submitted by the user",
+                    ));
+                }
+                let command = Command {
+                    words: argv.into_iter().map(Word::literal).collect(),
+                    ..Command::default()
+                };
+                let body = [Statement::Pipeline(vec![command])];
+                stages.push(self.subshell_stage(&body, &descriptors)?);
+                stdin = next_input.map_or(Descriptor::Closed, |read| {
+                    Descriptor::File(Rc::new(File::from(read)))
+                });
+                continue;
             }
             let (exec, worker_state) = if is_builtin(&name) {
                 let executable = std::env::current_exe()?;
@@ -1642,13 +1672,13 @@ impl<'a> Invocation<'a> {
 
     fn subshell_stage(
         &self,
-        body: &Script,
+        body: &[Statement],
         descriptors: &Descriptors,
     ) -> io::Result<process::Stage> {
         if self.substitution_depth >= 32 {
             return Err(io::Error::other("subshells nested too deeply"));
         }
-        let state = worker_payload(&self.worker_state(WorkerTask::List(body.clone())))?;
+        let state = worker_payload(&self.worker_state(WorkerTask::List(body.to_vec())))?;
         let state_fd = process::duplicate(state.as_raw_fd())?;
         let executable = std::env::current_exe()?;
         let args = [

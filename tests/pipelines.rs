@@ -63,3 +63,32 @@ fn rejects_missing_commands_and_does_not_confuse_quoted_pipes_with_operators() {
     assert_eq!(invalid.status.code(), Some(2));
     assert!(invalid.stdout.is_empty());
 }
+
+#[test]
+fn compound_and_function_stages_inherit_pipes_but_isolate_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
+        .current_dir(dir.path())
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("PATH", "/usr/bin:/bin")
+        .args([
+            "-c",
+            r#"
+value=outer
+transform() { read -r line; value=inner; printf '%s:%s\n' "$line" "$value"; return 7; }
+{ value=left; printf '%s\n' "$value"; } | transform
+printf 'status:%s value:%s\n' "$?" "$value"
+( printf 'subshell\n' ) | if read -r line; then printf '<%s>\n' "$line"; fi
+printf '%s\n' "${line-unset}"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        output.stdout,
+        b"left:inner\nstatus:7 value:outer\n<subshell>\nunset\n"
+    );
+    assert!(output.stderr.is_empty(), "{output:?}");
+}

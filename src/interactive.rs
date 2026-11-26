@@ -394,6 +394,7 @@ fn ask(
                         .collect(),
                     redirects: Vec::new(),
                     background: false,
+                    compound: None,
                 };
                 invocation.run_pipeline(&[command], input);
             }

@@ -5,6 +5,7 @@ pub(crate) struct Command {
     pub words: Vec<Word>,
     pub background: bool,
     pub redirects: Vec<Redirect>,
+    pub compound: Option<Box<Statement>>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -401,6 +402,48 @@ fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
         input.next();
         skip_space(input);
     }
+    let first = command_form(input, depth)?;
+    let statement = if pipeline_separator(input)? {
+        let mut stages = vec![pipeline_stage(first)];
+        loop {
+            stages.push(pipeline_stage(command_form(input, depth)?));
+            if !pipeline_separator(input)? {
+                break;
+            }
+        }
+        Statement::Pipeline(stages)
+    } else {
+        first
+    };
+    Ok(if negated {
+        Statement::Negated(Box::new(statement))
+    } else {
+        statement
+    })
+}
+
+fn pipeline_stage(statement: Statement) -> Command {
+    match statement {
+        Statement::Pipeline(mut commands) => commands.pop().expect("single simple command"),
+        compound => Command {
+            compound: Some(Box::new(compound)),
+            ..Command::default()
+        },
+    }
+}
+
+fn pipeline_separator(input: &mut Source<'_>) -> ParseResult<bool> {
+    skip_space(input);
+    let mut ahead = input.clone();
+    if ahead.next() != Some('|') || ahead.peek() == Some(&'|') {
+        return Ok(false);
+    }
+    *input = ahead;
+    skip_newlines(input)?;
+    Ok(true)
+}
+
+fn command_form(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
     let name = head(input);
     let statement = if input.next_if_eq(&'(').is_some() {
         if depth >= 32 {
@@ -457,7 +500,7 @@ fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
             body: require_list(body, "empty function body")?,
         }
     } else {
-        Statement::Pipeline(pipeline(input)?)
+        Statement::Pipeline(vec![simple_command(input)?])
     };
     let statement = match statement {
         Statement::Pipeline(_) | Statement::Array { .. } => statement,
@@ -467,11 +510,7 @@ fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
         },
         compound => compound_redirects(input, compound)?,
     };
-    Ok(if negated {
-        Statement::Negated(Box::new(statement))
-    } else {
-        statement
-    })
+    Ok(statement)
 }
 
 fn compound_redirects(input: &mut Source<'_>, command: Statement) -> ParseResult<Statement> {
@@ -678,66 +717,57 @@ fn case_statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement
     })
 }
 
-fn pipeline(input: &mut Source<'_>) -> ParseResult<Vec<Command>> {
-    let mut stages = Vec::new();
+fn simple_command(input: &mut Source<'_>) -> ParseResult<Command> {
+    let mut command = Command::default();
     loop {
-        let mut command = Command::default();
-        loop {
-            skip_space(input);
-            let Some(&next) = input.peek() else {
-                break;
-            };
-            if matches!(next, '\n' | ';' | '&' | '|' | ')') {
-                break;
-            }
-            if let Some(redirect) = redirect(input)? {
-                command.redirects.push(redirect);
-            } else {
-                if command.words.is_empty() {
-                    let name = head(input);
-                    if matches!(
-                        name.as_str(),
-                        "if" | "then"
-                            | "elif"
-                            | "else"
-                            | "fi"
-                            | "for"
-                            | "while"
-                            | "until"
-                            | "do"
-                            | "done"
-                            | "case"
-                            | "esac"
-                            | "select"
-                            | "function"
-                            | "!"
-                            | "[["
-                            | "]]"
-                            | "time"
-                    ) {
-                        return Err(ParseError::Invalid(format!(
-                            "unexpected or unsupported shell keyword: {name}"
-                        )));
-                    }
+        skip_space(input);
+        let Some(&next) = input.peek() else {
+            break;
+        };
+        if matches!(next, '\n' | ';' | '&' | '|' | ')') {
+            break;
+        }
+        if let Some(redirect) = redirect(input)? {
+            command.redirects.push(redirect);
+        } else {
+            if command.words.is_empty() {
+                let name = head(input);
+                if matches!(
+                    name.as_str(),
+                    "if" | "then"
+                        | "elif"
+                        | "else"
+                        | "fi"
+                        | "for"
+                        | "while"
+                        | "until"
+                        | "do"
+                        | "done"
+                        | "case"
+                        | "esac"
+                        | "select"
+                        | "function"
+                        | "!"
+                        | "[["
+                        | "]]"
+                        | "time"
+                ) {
+                    return Err(ParseError::Invalid(format!(
+                        "unexpected or unsupported shell keyword: {name}"
+                    )));
                 }
-                command.words.push(word(input)?);
             }
+            command.words.push(word(input)?);
         }
-        if command.words.is_empty() && command.redirects.is_empty() {
-            return if input.peek().is_none() {
-                Err(ParseError::Incomplete("missing pipeline command"))
-            } else {
-                Err("missing pipeline command or unexpected separator".into())
-            };
-        }
-        stages.push(command);
-        let mut ahead = input.clone();
-        if ahead.next() != Some('|') || ahead.peek() == Some(&'|') {
-            return Ok(stages);
-        }
-        *input = ahead;
-        skip_newlines(input)?;
     }
+    if command.words.is_empty() && command.redirects.is_empty() {
+        return if input.peek().is_none() {
+            Err(ParseError::Incomplete("missing pipeline command"))
+        } else {
+            Err("missing pipeline command or unexpected separator".into())
+        };
+    }
+    Ok(command)
 }
 
 fn redirect(input: &mut Source<'_>) -> ParseResult<Option<Redirect>> {
