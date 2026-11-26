@@ -2110,12 +2110,15 @@ impl<'a> Invocation<'a> {
                     } else {
                         &text
                     };
-                    // Use an anonymous file so big bodies cannot fill an unconsumed pipe.
-                    let mut file = tempfile::tempfile().map_err(here_document_error)?;
-                    file.write_all(text.as_bytes())
-                        .map_err(here_document_error)?;
-                    file.rewind().map_err(here_document_error)?;
-                    descriptors[*fd] = Descriptor::File(Rc::new(file));
+                    descriptors[*fd] = here_input(text.as_bytes(), false)?;
+                    continue;
+                }
+                Redirect::HereString { fd, word } => {
+                    if self.agent_command() {
+                        return Err("here-strings must be submitted by the user".into());
+                    }
+                    let text = self.expand(word, status)?.join(" ");
+                    descriptors[*fd] = here_input(text.as_bytes(), true)?;
                     continue;
                 }
             };
@@ -2183,6 +2186,17 @@ fn worker_payload(state: &impl serde::Serialize) -> io::Result<File> {
     serde_json::to_writer(&mut payload, state)?;
     payload.rewind()?;
     Ok(payload)
+}
+
+fn here_input(text: &[u8], newline: bool) -> Result<Descriptor, String> {
+    // An anonymous file avoids blocking before the reader starts.
+    let mut file = tempfile::tempfile().map_err(here_document_error)?;
+    file.write_all(text).map_err(here_document_error)?;
+    if newline {
+        file.write_all(b"\n").map_err(here_document_error)?;
+    }
+    file.rewind().map_err(here_document_error)?;
+    Ok(Descriptor::File(Rc::new(file)))
 }
 
 fn here_document_error(error: io::Error) -> String {

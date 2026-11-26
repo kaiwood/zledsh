@@ -430,3 +430,34 @@ printf 'restored\n'
         assert_eq!(fs::read_to_string(dir.path().join(file)).unwrap(), expected);
     }
 }
+
+#[test]
+fn here_strings_preserve_the_value_and_follow_redirection_order() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("glob.txt"), b"wrong").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
+        .current_dir(dir.path())
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("PATH", "/usr/bin:/bin")
+        .args([
+            "-c",
+            r#"
+value='two words *.txt'
+/bin/cat <<<$value
+true | /bin/cat <<<"$(printf 'pipeline\n')"
+/bin/cat 3<<<'fd three' <&3
+read -r result <<<"$value"
+printf '<%s>\n' "$result"
+/bin/cat <<<''
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        output.stdout,
+        b"two words *.txt\npipeline\nfd three\n<two words *.txt>\n\n"
+    );
+    assert!(output.stderr.is_empty(), "{output:?}");
+}

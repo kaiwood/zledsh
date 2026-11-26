@@ -51,6 +51,8 @@ Hello, $name.
 EOF
 ```
 
+For a single word or value, use a here-string: `cat <<< "$value"`. It supplies the expanded value followed by a newline, without field splitting or pathname expansion.
+
 Use `<<'EOF'` to keep the body literal, or `<<-EOF` to strip leading tabs, not spaces. Unquoted bodies support the shell's parameter and `$(…)` expansions. At the prompt, Ctrl+C cancels an unfinished here-document without running its command.
 
 Unquoted `~` uses `HOME`; `~login` looks up the account’s initial directory. In assignments, both forms work just after `=` or an unquoted `:`, as in `PATH=~/bin:~root/bin`. Unknown logins and quoted tildes stay literal.

@@ -19,6 +19,10 @@ pub(crate) enum Redirect {
         fd: usize,
         document: HereDocument,
     },
+    HereString {
+        fd: usize,
+        word: Word,
+    },
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -832,6 +836,15 @@ fn redirect(input: &mut Source<'_>) -> ParseResult<Option<Redirect>> {
     };
     let kind = if operator == '<' {
         if ahead.next_if_eq(&'<').is_some() {
+            if ahead.next_if_eq(&'<').is_some() {
+                while ahead.next_if(|ch| matches!(ch, ' ' | '\t')).is_some() {}
+                if matches!(ahead.peek(), None | Some('#')) {
+                    return Err("missing here-string word".into());
+                }
+                let word = word(&mut ahead)?;
+                *input = ahead;
+                return Ok(Some(Redirect::HereString { fd, word }));
+            }
             let strip_tabs = ahead.next_if_eq(&'-').is_some();
             while ahead.next_if(|ch| matches!(ch, ' ' | '\t')).is_some() {}
             let (delimiter, expand) = here_delimiter(&mut ahead)?;
