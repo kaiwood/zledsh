@@ -26,6 +26,7 @@ mod syntax;
 mod terminal_modes;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod transcript;
+mod umask;
 
 use std::{
     env,

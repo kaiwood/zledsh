@@ -50,6 +50,8 @@ Prefix a command with an assignment to override a variable for that command, for
 
 Use `while getopts 'ab:' opt; do …; done` to parse script flags; `b:` requires a value and puts it in `$OPTARG`. After the loop, run `shift "$((OPTIND - 1))"` to leave only operands. Set `OPTIND=1` before parsing a new argument list.
 
+Use `umask 077` to restrict new files to their owner. `umask -S` shows permitted bits as `u=…,g=…,o=…`; those symbolic forms also work as input. Changes apply to subsequent file creation in the shell and its children, but not to the parent shell if made in a subshell or pipeline stage.
+
 A direct special builtin can terminate a noninteractive script on a usage or redirection error, even without `set -e`. Use `command` to handle the error as a status instead: `command export 'bad-name' || printf 'export failed\n'`. A nonzero result from successfully executed code, such as `eval false`, is not itself a builtin error.
 
 Use `zledsh -i` to force interactive input even on a pipe. It loads startup files, prints prompts, and keeps reading after a syntax error. Raw editing and terminal job control still require a terminal.

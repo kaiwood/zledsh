@@ -816,6 +816,7 @@ impl<'a> Invocation<'a> {
                     | "complete"
                     | "set"
                     | "readonly"
+                    | "umask"
             )
         {
             report(
@@ -990,6 +991,15 @@ impl<'a> Invocation<'a> {
                     Ok(()) => 0,
                     Err(error) => {
                         report(&descriptors[2], &format!("{name}: {error}"));
+                        1
+                    }
+                };
+            }
+            "umask" => {
+                self.status = match umask(args, &descriptors[1]) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        report(&descriptors[2], &format!("umask: {error}"));
                         1
                     }
                 };
@@ -1600,7 +1610,7 @@ impl<'a> Invocation<'a> {
             if self.agent_command()
                 && matches!(
                     direct_name(&argv),
-                    Some("eval" | "." | "source" | "complete" | "set" | "readonly")
+                    Some("eval" | "." | "source" | "complete" | "set" | "readonly" | "umask")
                 )
             {
                 return Err(io::Error::other(
@@ -2570,6 +2580,33 @@ fn worker_payload(state: &impl serde::Serialize) -> io::Result<File> {
     Ok(payload)
 }
 
+fn umask(args: &[String], output: &Descriptor) -> Result<(), String> {
+    let (symbolic, args) = match args {
+        [flag, rest @ ..] if flag == "-S" => (true, rest),
+        _ => (false, args),
+    };
+    let operands = args.strip_prefix(&[String::from("--")]);
+    match operands.unwrap_or(args) {
+        [] => {
+            let mask = crate::umask::current();
+            let value = if symbolic {
+                crate::umask::symbolic(mask)
+            } else {
+                format!("{mask:04o}")
+            };
+            output
+                .write(&format!("{value}\n"))
+                .map_err(|error| error.to_string())
+        }
+        [value] if operands.is_some() || !value.starts_with('-') => {
+            let mask = crate::umask::parse(value, crate::umask::current()).ok_or("invalid mask")?;
+            unsafe { libc::umask(mask) };
+            Ok(())
+        }
+        _ => Err("expected umask [-S] [mask]".into()),
+    }
+}
+
 fn open_noclobber(target: &str) -> io::Result<File> {
     let exists = match OpenOptions::new().write(true).create_new(true).open(target) {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => error,
@@ -2605,7 +2642,7 @@ fn here_document_error(error: io::Error) -> String {
 pub(crate) const BUILTINS: &[&str] = &[
     "exit", "cd", "pwd", "export", "readonly", "unset", "read", "printf", "fg", "alias", "unalias",
     "jobs", "bg", "wait", "command", ":", "true", "false", "eval", "break", "continue", ".",
-    "source", "local", "set", "shift", "getopts", "return", "complete", "compgen",
+    "source", "local", "set", "shift", "getopts", "umask", "return", "complete", "compgen",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {

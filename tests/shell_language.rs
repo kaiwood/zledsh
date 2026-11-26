@@ -704,3 +704,51 @@ printf 'status=%s\n' "$?"
         "zledsh: demo: getopts: unknown option: -x\nzledsh: demo: getopts: option -b requires an argument\nzledsh: demo: getopts: opt: read-only variable\n",
     );
 }
+
+#[test]
+fn umask_applies_to_builtins_and_children_without_leaking_from_subshells() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+umask 077
+umask
+umask -S
+: > private
+( umask u=rwx,g=rx,o=; /usr/bin/touch shared )
+true | umask 000
+umask 089 || printf 'invalid\n'
+/usr/bin/touch still-private
+umask a=rx,ug+w
+umask
+: > group-writable
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        0,
+        "0077\nu=rwx,g=,o=\ninvalid\n0002\n",
+        "zledsh: umask: invalid mask\n",
+    );
+    for (path, mode) in [
+        ("private", 0o600),
+        ("shared", 0o640),
+        ("still-private", 0o600),
+        ("group-writable", 0o664),
+    ] {
+        assert_eq!(
+            fs::metadata(home.path().join(path))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            mode,
+            "{path}"
+        );
+    }
+}
