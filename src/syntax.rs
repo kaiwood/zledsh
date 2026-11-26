@@ -88,12 +88,21 @@ pub(crate) enum Part {
         index: ArrayIndex,
     },
     Substitution(String),
+    Length(String),
     Variable {
         name: String,
         default: Option<Word>,
         if_empty: bool,
-        alternate: bool,
+        operator: ParameterOperator,
     },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum ParameterOperator {
+    Default,
+    Alternate,
+    Assign,
+    Error,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -830,7 +839,7 @@ fn parse_word(input: &mut Source<'_>, allow_glob: bool) -> ParseResult<Word> {
         word.bare &= !matches!(ch, '\'' | '"' | '\\');
         match ch {
             '\'' => word.push(Part::Literal(single_quoted(input)?), true),
-            '"' => double_quoted(input, &mut word)?,
+            '"' => double_quoted(input, &mut word, 0)?,
             '\\' => match input.next() {
                 Some(ch) => literal(&mut word, ch, true),
                 None => return Err("trailing backslash".into()),
@@ -902,7 +911,7 @@ fn single_quoted(input: &mut Source<'_>) -> ParseResult<String> {
     Err(ParseError::Incomplete("unclosed single quote"))
 }
 
-fn double_quoted(input: &mut Source<'_>, word: &mut Word) -> ParseResult<()> {
+fn double_quoted(input: &mut Source<'_>, word: &mut Word, depth: usize) -> ParseResult<()> {
     // Keep even an empty quoted word, but not an empty "$@".
     if input.next_if_eq(&'"').is_some() {
         word.push(Part::Literal(String::new()), true);
@@ -911,7 +920,7 @@ fn double_quoted(input: &mut Source<'_>, word: &mut Word) -> ParseResult<()> {
     while let Some(ch) = input.next() {
         match ch {
             '"' => return Ok(()),
-            '$' => parameter_at(input, word, true, 0)?,
+            '$' => parameter_at(input, word, true, depth)?,
             '`' => return Err("command substitution is not supported".into()),
             '\\' => match input.next_if(|ch| matches!(ch, '$' | '`' | '"' | '\\' | '\n')) {
                 Some('\n') => {}
@@ -982,7 +991,7 @@ fn parameter_at(
             name: input.next().unwrap().to_string(),
             default: None,
             if_empty: false,
-            alternate: false,
+            operator: ParameterOperator::Default,
         },
         Some('@' | '*') => Part::Positional {
             star: input.next() == Some('*'),
@@ -1001,11 +1010,27 @@ fn parameter_at(
                 );
                 return Ok(());
             }
-            let name = if input.peek().is_some_and(char::is_ascii_digit) {
-                std::iter::from_fn(|| input.next_if(char::is_ascii_digit)).collect()
-            } else {
-                variable_name(input).ok_or("unsupported braced parameter")?
-            };
+            if input.next_if_eq(&'#').is_some() {
+                if input.next_if_eq(&'}').is_none() {
+                    let name = parameter_name(input).ok_or("expected a parameter after ${#")?;
+                    input
+                        .next_if_eq(&'}')
+                        .ok_or("expected } after parameter length")?;
+                    word.push(Part::Length(name), quoted);
+                } else {
+                    word.push(
+                        Part::Variable {
+                            name: "#".into(),
+                            default: None,
+                            if_empty: false,
+                            operator: ParameterOperator::Default,
+                        },
+                        quoted,
+                    );
+                }
+                return Ok(());
+            }
+            let name = parameter_name(input).ok_or("unsupported braced parameter")?;
             if input.next_if_eq(&'[').is_some() {
                 let index = if input.next_if_eq(&'@').is_some() {
                     ArrayIndex::All
@@ -1030,19 +1055,9 @@ fn parameter_at(
                 return Ok(());
             }
             let if_empty = input.next_if_eq(&':').is_some();
-            let operator = input.next_if(|ch| matches!(ch, '-' | '+'));
+            let operator = input.next_if(|ch| matches!(ch, '-' | '+' | '=' | '?'));
             let default = if operator.is_some() {
-                let mut value = Word::default();
-                while let Some(ch) = input.next_if(|ch| *ch != '}') {
-                    match ch {
-                        '$' => parameter_at(input, &mut value, quoted, depth + 1)?,
-                        '`' | '\\' | '\'' | '"' | '{' => {
-                            return Err("unsupported syntax in parameter default".into());
-                        }
-                        _ => literal(&mut value, ch, quoted),
-                    }
-                }
-                Some(value)
+                Some(parameter_word(input, quoted, depth + 1)?)
             } else if if_empty {
                 return Err("unsupported braced parameter operator".into());
             } else {
@@ -1050,12 +1065,17 @@ fn parameter_at(
             };
             input
                 .next_if_eq(&'}')
-                .ok_or("unsupported or unclosed braced parameter")?;
+                .ok_or(ParseError::Incomplete("unclosed braced parameter"))?;
             Part::Variable {
                 name,
                 default,
                 if_empty,
-                alternate: operator == Some('+'),
+                operator: match operator {
+                    Some('+') => ParameterOperator::Alternate,
+                    Some('=') => ParameterOperator::Assign,
+                    Some('?') => ParameterOperator::Error,
+                    _ => ParameterOperator::Default,
+                },
             }
         }
         Some(ch) if ch.is_ascii_alphanumeric() || "_(*#?$!-".contains(*ch) => {
@@ -1064,7 +1084,7 @@ fn parameter_at(
                 name,
                 default: None,
                 if_empty: false,
-                alternate: false,
+                operator: ParameterOperator::Default,
             }
         }
         _ => {
@@ -1074,6 +1094,44 @@ fn parameter_at(
     };
     word.push(part, quoted);
     Ok(())
+}
+
+fn parameter_name(input: &mut Source<'_>) -> Option<String> {
+    if input.peek().is_some_and(char::is_ascii_digit) {
+        Some(std::iter::from_fn(|| input.next_if(char::is_ascii_digit)).collect())
+    } else {
+        variable_name(input)
+    }
+}
+
+fn parameter_word(input: &mut Source<'_>, quoted: bool, depth: usize) -> ParseResult<Word> {
+    let mut word = Word::default();
+    let mut first = true;
+    while let Some(ch) = input.next_if(|ch| *ch != '}') {
+        match ch {
+            '$' => parameter_at(input, &mut word, quoted, depth)?,
+            '\'' if !quoted => word.push(Part::Literal(single_quoted(input)?), true),
+            '"' => double_quoted(input, &mut word, depth)?,
+            '\\' => {
+                match input
+                    .next_if(|ch| !quoted || matches!(ch, '$' | '`' | '"' | '\\' | '}' | '\n'))
+                {
+                    Some('\n') => continue,
+                    Some(ch) => literal(&mut word, ch, true),
+                    None => literal(&mut word, '\\', quoted),
+                }
+            }
+            '~' if first && !quoted => {
+                if !tilde(input, &mut word, false, |ch| ch == '}') {
+                    literal(&mut word, ch, false);
+                }
+            }
+            '`' => return Err("command substitution is not supported".into()),
+            _ => literal(&mut word, ch, quoted),
+        }
+        first = false;
+    }
+    Ok(word)
 }
 
 fn substitution(input: &mut Source<'_>, word: &mut Word, quoted: bool) -> ParseResult<()> {

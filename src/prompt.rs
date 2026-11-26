@@ -2,7 +2,7 @@ use std::{env, ffi::CStr, fmt::Write, io::IsTerminal, path::Path};
 
 use crate::runtime::Invocation;
 
-pub fn render(shell: &Invocation<'_>, continuation: bool, number: usize) -> String {
+pub fn render(shell: &mut Invocation<'_>, continuation: bool, number: usize) -> String {
     if let Some(template) = shell.variable("PROMPT").filter(|_| !continuation) {
         return formatted(shell, &template);
     }

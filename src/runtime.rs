@@ -9,8 +9,8 @@ use std::rc::Rc;
 use crate::process;
 
 use crate::syntax::{
-    self, ArrayIndex, CasePattern, Command, ParseError, Part, Redirect, RedirectKind, Script,
-    Statement, Word, WordPart,
+    self, ArrayIndex, CasePattern, Command, ParameterOperator, ParseError, Part, Redirect,
+    RedirectKind, Script, Statement, Word, WordPart,
 };
 
 const DEFAULT_IFS: &str = " \t\n";
@@ -136,6 +136,7 @@ pub(crate) struct Invocation<'a> {
     agent_deadline: Option<std::time::Instant>,
     pub status: u8,
     pub exited: bool,
+    pub interactive: bool,
 }
 
 struct SavedVariable {
@@ -206,6 +207,7 @@ impl<'a> Invocation<'a> {
             agent_deadline: None,
             status: 0,
             exited: false,
+            interactive: false,
         }
     }
 
@@ -489,7 +491,7 @@ impl<'a> Invocation<'a> {
     }
 
     fn select_case<'b>(
-        &self,
+        &mut self,
         word: &Word,
         clauses: &'b [(Vec<CasePattern>, Script)],
     ) -> Result<Option<&'b Script>, String> {
@@ -597,7 +599,7 @@ impl<'a> Invocation<'a> {
             &mut substitution_status,
         ) {
             report(&descriptors[2], &error);
-            self.status = 1;
+            self.status = if self.exited { 2 } else { 1 };
             return;
         }
         if assignment_only {
@@ -1229,6 +1231,9 @@ impl<'a> Invocation<'a> {
                     }
                 }
             };
+            if self.exited {
+                return Ok(2);
+            }
             if self.agent_command()
                 && matches!(
                     direct_name(&argv),
@@ -1403,12 +1408,16 @@ impl<'a> Invocation<'a> {
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    pub fn parameter_text(&self, value: &str) -> Result<String, String> {
+    pub fn parameter_text(&mut self, value: &str) -> Result<String, String> {
         self.expand(&crate::syntax::parameter_text(value)?, &mut None)
             .map(|fields| fields.join(" "))
     }
 
-    fn expand_words(&self, words: &[Word], status: &mut Option<u8>) -> Result<Vec<String>, String> {
+    fn expand_words(
+        &mut self,
+        words: &[Word],
+        status: &mut Option<u8>,
+    ) -> Result<Vec<String>, String> {
         let mut fields = Vec::new();
         for word in words {
             self.expand_argument(word, status, &mut fields)?;
@@ -1417,7 +1426,7 @@ impl<'a> Invocation<'a> {
     }
 
     fn expand_command_words(
-        &self,
+        &mut self,
         words: &[Word],
         status: &mut Option<u8>,
     ) -> Result<Vec<String>, String> {
@@ -1436,7 +1445,7 @@ impl<'a> Invocation<'a> {
     }
 
     fn expand_argument(
-        &self,
+        &mut self,
         word: &Word,
         status: &mut Option<u8>,
         output: &mut Vec<String>,
@@ -1606,7 +1615,7 @@ impl<'a> Invocation<'a> {
         Ok((text, status))
     }
 
-    fn expand(&self, word: &Word, status: &mut Option<u8>) -> Result<Vec<String>, String> {
+    fn expand(&mut self, word: &Word, status: &mut Option<u8>) -> Result<Vec<String>, String> {
         Ok(self
             .expand_parts(word, status, false, false)?
             .into_iter()
@@ -1615,7 +1624,7 @@ impl<'a> Invocation<'a> {
     }
 
     fn expand_assignment(
-        &self,
+        &mut self,
         word: &Word,
         status: &mut Option<u8>,
     ) -> Result<Vec<String>, String> {
@@ -1626,8 +1635,29 @@ impl<'a> Invocation<'a> {
             .collect())
     }
 
+    fn parameter_value(&self, name: &str) -> Option<OsString> {
+        if name == "#" {
+            Some(self.args.len().to_string().into())
+        } else if let Ok(index) = name.parse::<usize>() {
+            if index == 0 {
+                Some(self.name.into())
+            } else {
+                self.args.get(index - 1).map(OsString::from)
+            }
+        } else {
+            self.variable_os(name)
+        }
+    }
+
+    fn parameter_error(&mut self, message: String) -> String {
+        if !self.interactive && !self.agent_command() {
+            self.exited = true;
+        }
+        message
+    }
+
     fn expand_parts(
-        &self,
+        &mut self,
         word: &Word,
         status: &mut Option<u8>,
         field_splitting: bool,
@@ -1754,25 +1784,48 @@ impl<'a> Invocation<'a> {
                     *status = Some(code);
                     field.push(fragment(text));
                 }
+                Part::Length(name) => {
+                    let length = self
+                        .parameter_value(name)
+                        .map_or(0, |value| value.to_string_lossy().chars().count());
+                    field.push(fragment(length.to_string()));
+                }
                 Part::Variable {
                     name,
                     default,
                     if_empty,
-                    alternate,
+                    operator,
                 } => {
-                    let value = if name == "#" {
-                        Some(self.args.len().to_string().into())
-                    } else if let Ok(index) = name.parse::<usize>() {
-                        if index == 0 {
-                            Some(self.name.into())
-                        } else {
-                            self.args.get(index - 1).map(OsString::from)
+                    let value = self
+                        .parameter_value(name)
+                        .filter(|value| !if_empty || !value.is_empty());
+                    let alternate = *operator == ParameterOperator::Alternate;
+                    if value.is_some() == alternate {
+                        if matches!(
+                            operator,
+                            ParameterOperator::Assign | ParameterOperator::Error
+                        ) {
+                            let expanded = match default {
+                                Some(word) => self.expand(word, status)?.join(" "),
+                                None => String::new(),
+                            };
+                            if *operator == ParameterOperator::Error {
+                                let description = if expanded.is_empty() {
+                                    "parameter is unset or null".into()
+                                } else {
+                                    expanded
+                                };
+                                return Err(self.parameter_error(format!("{name}: {description}")));
+                            }
+                            if !valid_name(name) {
+                                return Err(self.parameter_error(format!(
+                                    "{name}: cannot assign to this parameter"
+                                )));
+                            }
+                            self.variables.insert(name.clone(), expanded.clone());
+                            field.push(fragment(expanded));
+                            continue;
                         }
-                    } else {
-                        self.variable_os(name)
-                    };
-                    let value = value.filter(|value| !if_empty || !value.is_empty());
-                    if value.is_some() == *alternate {
                         if let Some(default) =
                             default.as_ref().filter(|word| !word.parts.is_empty())
                         {
@@ -1824,7 +1877,7 @@ impl<'a> Invocation<'a> {
     }
 
     fn redirect(
-        &self,
+        &mut self,
         redirects: &[Redirect],
         descriptors: &mut Descriptors,
         status: &mut Option<u8>,

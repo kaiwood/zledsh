@@ -187,3 +187,39 @@ show ~root ~root/bin "$value" "~root/bin"
         &format!("argc=4\n<{home}>\n<{prefix}/bin>\n<{prefix}/lib:{home}>\n<~root/bin>\n"),
     );
 }
+
+// POSIX.1-2024 2.6.2: test null only with the colon, and expand words lazily.
+#[test]
+fn parameter_length_assignment_and_quoted_operator_words() {
+    assert_expansion(
+        r#"HOME=/home-fixture
+unset missing untouched never
+empty=
+show "${#missing}" "${#empty}" "${empty=not assigned}" "${empty:=filled}" "$empty"
+show ${missing='a b'} "$missing" "${#missing}" "${missing:=ignored}"
+show ${untouched:-"a } b"} ${untouched:-a\}b} ${untouched:-''} ${untouched:-~/bin}
+show "${missing?${never=bad}}" "${#never}"
+"#,
+        &[],
+        "argc=5\n<0>\n<0>\n<>\n<filled>\n<filled>\nargc=5\n<a>\n<b>\n<a b>\n<3>\n<a b>\nargc=4\n<a } b>\n<a}b>\n<>\n</home-fixture/bin>\nargc=2\n<a b>\n<0>\n",
+    );
+}
+
+#[test]
+fn parameter_error_terminates_noninteractive_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    for command in [
+        "printf '%s' ${value:?\"required value\"}",
+        "printf '%s' ${value:?\"required value\"} | /bin/cat",
+        "printf wrong >${value:?\"required value\"}",
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
+            .current_dir(dir.path()).env_clear().env("HOME", dir.path()).env("PATH", "/usr/bin:/bin")
+            .args(["-c", &format!("value=; printf '<%s>\\n' \"${{value?unused}}\"; {command}; printf wrong > continued")])
+            .output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert_eq!(output.stdout, b"<>\n");
+        assert_eq!(output.stderr, b"zledsh: value: required value\n");
+        assert!(!dir.path().join("continued").exists());
+    }
+}

@@ -426,6 +426,7 @@ fn matching_identity() -> bool {
 }
 
 pub(crate) fn load_startup(invocation: &mut Invocation<'_>, input: &mut impl BufRead) {
+    invocation.interactive = true;
     // Do not run user startup files if real and effective IDs differ.
     if !matching_identity() {
         return;
