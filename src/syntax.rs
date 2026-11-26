@@ -244,6 +244,7 @@ pub(crate) type Script = Vec<Statement>;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Statement {
     Group(Script),
+    Arithmetic(Word),
     Redirected {
         command: Box<Statement>,
         redirects: Vec<Redirect>,
@@ -454,7 +455,11 @@ fn pipeline_separator(input: &mut Source<'_>) -> ParseResult<bool> {
 
 fn command_form(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
     let name = head(input);
-    let statement = if input.next_if_eq(&'(').is_some() {
+    let statement = if input.clone().take(2).eq(['(', '(']) {
+        input.next();
+        input.next();
+        Statement::Arithmetic(arithmetic_word(input, 0)?)
+    } else if input.next_if_eq(&'(').is_some() {
         if depth >= 32 {
             return Err("compound commands nested too deeply".into());
         }

@@ -396,3 +396,23 @@ printf ':%s\n' "$?"
     );
     assert!(!home.path().join("skipped").exists());
 }
+
+#[test]
+fn arithmetic_command_sets_status_and_updates_live_variables() {
+    let home = tempfile::tempdir().unwrap();
+    let source = r#"
+count=1
+(( count -= 1 )) || printf 'zero:%s\n' "$count"
+if (( count += 4 )); then printf 'nonzero:%s\n' "$count"; fi
+(( 0 && (count = 99) ))
+printf 'short:%s value:%s\n' "$?" "$count"
+(( 1 / 0 ))
+printf 'error:%s value:%s\n' "$?" "$count"
+"#;
+    assert_output(
+        shell(home.path()).args(["-c", source]).output().unwrap(),
+        0,
+        "zero:0\nnonzero:4\nshort:1 value:4\nerror:1 value:4\n",
+        "zledsh: arithmetic command: invalid arithmetic division\n",
+    );
+}

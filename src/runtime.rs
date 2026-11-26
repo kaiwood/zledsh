@@ -221,7 +221,7 @@ impl<'a> Invocation<'a> {
     fn expand_aliases(&self, script: &mut [Statement]) -> Result<(), ParseError> {
         for statement in script {
             match statement {
-                Statement::Array { .. } => {}
+                Statement::Array { .. } | Statement::Arithmetic(_) => {}
                 Statement::Pipeline(stages) => {
                     for command in stages {
                         if let Some(compound) = &mut command.compound {
@@ -369,6 +369,15 @@ impl<'a> Invocation<'a> {
             match statement {
                 Statement::Pipeline(pipeline) => {
                     self.run_pipeline_with_descriptors(pipeline, input, descriptors)
+                }
+                Statement::Arithmetic(expression) => {
+                    self.status = match self.evaluate_arithmetic(expression, &mut None) {
+                        Ok(value) => u8::from(value == 0),
+                        Err(error) => {
+                            report(&descriptors[2], &format!("arithmetic command: {error}"));
+                            if self.exited { 2 } else { 1 }
+                        }
+                    };
                 }
                 Statement::Group(body) => self.run_with_descriptors(body, input, descriptors),
                 Statement::Redirected { command, redirects } => {
@@ -1800,6 +1809,23 @@ impl<'a> Invocation<'a> {
             .collect())
     }
 
+    fn evaluate_arithmetic(
+        &mut self,
+        expression: &Word,
+        status: &mut Option<u8>,
+    ) -> Result<i64, String> {
+        let expression = self.expand(expression, status)?.join(" ");
+        crate::arithmetic::evaluate(&expression, |name, assignment| {
+            if let Some(value) = assignment {
+                self.variables.insert(name.into(), value.to_string());
+                None
+            } else {
+                self.variable(name)
+            }
+        })
+        .map_err(str::to_owned)
+    }
+
     fn parameter_value(&self, name: &str) -> Option<OsString> {
         if name == "#" {
             Some(self.args.len().to_string().into())
@@ -1948,18 +1974,11 @@ impl<'a> Invocation<'a> {
                     }
                 }
                 Part::Arithmetic(expression) => {
-                    let expression = self.expand(expression, status)?.join(" ");
-                    let value = crate::arithmetic::evaluate(&expression, |name, assignment| {
-                        if let Some(value) = assignment {
-                            self.variables.insert(name.into(), value.to_string());
-                            None
-                        } else {
-                            self.variable(name)
-                        }
-                    })
-                    .map_err(|error| {
-                        self.parameter_error(format!("arithmetic expansion: {error}"))
-                    })?;
+                    let value = self
+                        .evaluate_arithmetic(expression, status)
+                        .map_err(|error| {
+                            self.parameter_error(format!("arithmetic expansion: {error}"))
+                        })?;
                     field.push(fragment(value.to_string()));
                 }
                 Part::Substitution(source) => {
