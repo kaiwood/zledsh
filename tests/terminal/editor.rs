@@ -698,3 +698,16 @@ fn history_status_does_not_record_controls_and_respects_the_limit() {
         .collect();
     assert_eq!(commands, ["/bin/echo second", "/bin/echo third", "exit 0"]);
 }
+
+#[test]
+fn read_prompts_for_an_escaped_terminal_newline() {
+    let mut tty = Terminal::start("read> ", &[("PS2", "continue> ")], |_| {});
+    tty.expect("read> ");
+    tty.send("read value; printf '<%s>\\n' \"$value\"\n");
+    tty.send("first\\\n");
+    tty.expect("continue> ");
+    tty.send("second\n");
+    tty.expect("\r\n<firstsecond>\r\n");
+    tty.expect("read> ");
+    tty.finish();
+}

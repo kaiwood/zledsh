@@ -1224,14 +1224,15 @@ impl<'a> Invocation<'a> {
                 }
             }
             "read" => {
-                self.status =
-                    match read_from(&descriptors[0], input, |reader| self.read(args, reader)) {
-                        Ok(complete) => u8::from(!complete),
-                        Err(error) => {
-                            report(&descriptors[2], &format!("read: {error}"));
-                            2
-                        }
-                    };
+                self.status = match read_from(&descriptors[0], input, |reader| {
+                    self.read(args, reader, &descriptors)
+                }) {
+                    Ok(complete) => u8::from(!complete),
+                    Err(error) => {
+                        report(&descriptors[2], &format!("read: {error}"));
+                        2
+                    }
+                };
             }
             "printf" => {
                 self.status = match printf(args)
@@ -1878,7 +1879,12 @@ impl<'a> Invocation<'a> {
             })
     }
 
-    fn read(&mut self, args: &[String], input: &mut dyn BufRead) -> Result<bool, String> {
+    fn read(
+        &mut self,
+        args: &[String],
+        input: &mut dyn BufRead,
+        descriptors: &Descriptors,
+    ) -> Result<bool, String> {
         let mut raw = false;
         let mut delimiter = b'\n';
         let mut names = args;
@@ -1925,7 +1931,18 @@ impl<'a> Invocation<'a> {
                 if ch == '\\' && !raw {
                     match chars.next() {
                         Some(escaped) => characters.push((escaped, true)),
-                        None if terminated => continue 'lines,
+                        None if terminated => {
+                            #[cfg(any(target_os = "macos", target_os = "linux"))]
+                            if self.options.interactive
+                                && delimiter == b'\n'
+                                && descriptors[0].is_terminal()
+                                && !self.agent_command()
+                            {
+                                let prompt = crate::prompt::render(self, true, 0);
+                                let _ = descriptors[2].write(&prompt);
+                            }
+                            continue 'lines;
+                        }
                         None => break 'lines false,
                     }
                 } else {
@@ -2902,6 +2919,15 @@ enum Descriptor {
 }
 
 impl Descriptor {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn is_terminal(&self) -> bool {
+        match self {
+            Self::Inherited(fd) => unsafe { libc::isatty(*fd) == 1 },
+            Self::File(file) => unsafe { libc::isatty(file.as_raw_fd()) == 1 },
+            Self::Closed => false,
+        }
+    }
+
     fn is_open(&self) -> bool {
         match self {
             Self::Inherited(fd) => process::inherited_descriptor(*fd),
