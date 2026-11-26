@@ -350,3 +350,27 @@ printf 'captured:%s\n' "$( (printf nested) )"
         b"redirected\n"
     );
 }
+
+#[test]
+fn asynchronous_and_or_lists_short_circuit_and_keep_wait_status() {
+    let home = tempfile::tempdir().unwrap();
+    let source = r#"
+value=parent
+false && printf wrong > skipped || { value=child; printf '%s' "$value" > result; (exit 17); } &
+first=$!
+true || printf wrong > skipped && (exit 9) &
+second=$!
+wait "$second"
+printf '%s:' "$?"
+wait "$first"
+printf '%s:%s\n' "$?" "$value"
+"#;
+    assert_output(
+        shell(home.path()).args(["-c", source]).output().unwrap(),
+        0,
+        "9:17:parent\n",
+        "",
+    );
+    assert!(!home.path().join("skipped").exists());
+    assert_eq!(fs::read(home.path().join("result")).unwrap(), b"child");
+}

@@ -231,7 +231,9 @@ impl<'a> Invocation<'a> {
                         }
                     }
                 }
-                Statement::Negated(inner) | Statement::Redirected { command: inner, .. } => {
+                Statement::Negated(inner)
+                | Statement::Async(inner)
+                | Statement::Redirected { command: inner, .. } => {
                     self.expand_aliases(std::slice::from_mut(inner.as_mut()))?
                 }
                 Statement::AndOr { first, rest } => {
@@ -403,6 +405,15 @@ impl<'a> Invocation<'a> {
                     if !self.interrupted() {
                         self.status = u8::from(self.status == 0);
                     }
+                }
+                Statement::Async(inner) => {
+                    self.status = match self.start_async(inner, descriptors) {
+                        Ok(status) => status,
+                        Err(error) => {
+                            report(&descriptors[2], &format!("background list: {error}"));
+                            1
+                        }
+                    };
                 }
                 Statement::AndOr { first, rest } => {
                     self.run_with_descriptors(
@@ -1359,6 +1370,21 @@ impl<'a> Invocation<'a> {
             }
         }
         self.start_stages(stages, background)
+    }
+
+    fn start_async(&mut self, statement: &Statement, original: &Descriptors) -> io::Result<u8> {
+        if self.agent_command() {
+            return Err(io::Error::other("agent cannot start background jobs"));
+        }
+        if self.substitution_depth != 0 {
+            return Err(io::Error::other(
+                "background jobs are not supported in shell workers",
+            ));
+        }
+        let mut descriptors = original.clone();
+        descriptors[0] = Descriptor::File(Rc::new(File::open("/dev/null")?));
+        let worker = self.subshell_stage(std::slice::from_ref(statement), &descriptors)?;
+        self.start_stages(vec![worker], true)
     }
 
     fn start_stages(&mut self, stages: Vec<process::Stage>, background: bool) -> io::Result<u8> {

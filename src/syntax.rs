@@ -260,6 +260,7 @@ pub(crate) enum Statement {
         body: Script,
     },
     Negated(Box<Statement>),
+    Async(Box<Statement>),
     AndOr {
         first: Box<Statement>,
         rest: Vec<(bool, Statement)>,
@@ -339,7 +340,7 @@ fn list(input: &mut Source<'_>, stops: &[&str], depth: usize) -> ParseResult<Scr
         match separator {
             Some('&') => match &mut statement {
                 Statement::Pipeline(stages) => stages.last_mut().unwrap().background = true,
-                _ => return Err("background compound commands are not supported".into()),
+                _ => statement = Statement::Async(Box::new(statement)),
             },
             Some('\n') => input.read_here_documents()?,
             Some(';') | None => {}
