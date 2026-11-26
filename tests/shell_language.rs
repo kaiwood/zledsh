@@ -1119,3 +1119,58 @@ wait
         .unwrap();
     assert_output(output, 0, "exit=19\n", "");
 }
+
+#[test]
+fn aliases_supply_shell_tokens_and_see_the_complete_command_boundary() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+alias save='printf "%s\n" saved > record; /bin/cat record'
+save
+alias collect='printf "%s\n" joined |'
+collect /bin/cat
+alias start='if true; then'
+start printf '%s\n' conditional; fi
+alias content='printf "%s\n" old'
+alias content='printf "%s\n" new'; content
+content
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(output, 0, "saved\njoined\nconditional\nold\nnew\n", "");
+    assert_eq!(fs::read(home.path().join("record")).unwrap(), b"saved\n");
+}
+
+#[test]
+fn aliases_preserve_heredoc_bodies_and_stop_recursive_replacements() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+alias first='second' second='printf "<%s>\n" '
+alias thing='expanded'
+first thing
+first 'thing'
+alias document='/bin/cat <<EOF'
+document
+first thing
+EOF
+printf '<%s>\n' "$(first thing)"
+loop() { printf '%s\n' 'recursion stopped'; }
+alias loop='cycle' cycle='loop'
+loop
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        0,
+        "<expanded>\n<thing>\nfirst thing\n<<expanded>>\nrecursion stopped\n",
+        "",
+    );
+}

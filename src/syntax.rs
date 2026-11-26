@@ -1,4 +1,4 @@
-use std::{cell::RefCell, iter::Peekable, rc::Rc, str::Chars};
+use std::{cell::RefCell, collections::HashMap, iter::Peekable, rc::Rc, str::Chars};
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Command {
@@ -127,32 +127,121 @@ pub(crate) enum ArrayIndex {
 
 #[derive(Clone)]
 struct Source<'a> {
-    source: &'a str,
     chars: Peekable<Chars<'a>>,
     offset: usize,
+    aliases: Option<&'a HashMap<String, String>>,
+    replacements: Vec<Replacement<'a>>,
+    alias_next: bool,
     substitutions: Option<usize>,
     pending_here: Vec<PendingHere>,
+}
+
+#[derive(Clone)]
+struct Replacement<'a> {
+    name: &'a str,
+    chars: Peekable<Chars<'a>>,
+    separator: bool,
+    trailing_blank: bool,
 }
 
 impl<'a> Source<'a> {
     fn new(source: &'a str, substitutions: Option<usize>) -> Self {
         Self {
-            source,
             chars: source.chars().peekable(),
             offset: 0,
+            aliases: None,
+            replacements: Vec::new(),
+            alias_next: false,
             substitutions,
             pending_here: Vec::new(),
         }
     }
 
     fn peek(&mut self) -> Option<&char> {
-        self.chars.peek()
+        while self
+            .replacements
+            .last_mut()
+            .is_some_and(|frame| frame.chars.peek().is_none() && !frame.separator)
+        {
+            self.alias_next |= self.replacements.pop().unwrap().trailing_blank;
+        }
+        match self.replacements.last_mut() {
+            Some(frame) => frame.chars.peek().or(Some(&' ')),
+            None => self.chars.peek(),
+        }
     }
 
     fn next_if(&mut self, test: impl FnOnce(&char) -> bool) -> Option<char> {
-        let ch = self.chars.next_if(test)?;
+        let ch = *self.peek().filter(|ch| test(ch))?;
+        if let Some(frame) = self.replacements.last_mut() {
+            if frame.chars.next().is_none() {
+                frame.separator = false;
+            }
+        } else {
+            self.chars.next();
+        }
+        if !matches!(ch, ' ' | '\t') {
+            self.alias_next = false;
+        }
         self.offset += ch.len_utf8();
         Some(ch)
+    }
+
+    fn expand_aliases(&mut self, command_position: bool) -> ParseResult<()> {
+        let Some(aliases) = self.aliases else {
+            return Ok(());
+        };
+        loop {
+            skip_space(self);
+            if !command_position && !std::mem::take(&mut self.alias_next) {
+                return Ok(());
+            }
+            let mut after = self.clone();
+            let name: String = std::iter::from_fn(|| {
+                after.next_if(|ch| ch.is_ascii_alphanumeric() || "_-.!%,@".contains(*ch))
+            })
+            .collect();
+            if name.is_empty()
+                || after.peek().is_some_and(|&ch| !boundary(ch))
+                || matches!(
+                    name.as_str(),
+                    "!" | "if"
+                        | "then"
+                        | "elif"
+                        | "else"
+                        | "fi"
+                        | "for"
+                        | "while"
+                        | "until"
+                        | "do"
+                        | "done"
+                        | "case"
+                        | "esac"
+                        | "in"
+                )
+            {
+                return Ok(());
+            }
+            let Some((name, text)) = aliases.get_key_value(&name) else {
+                return Ok(());
+            };
+            if self.replacements.iter().any(|frame| frame.name == name) {
+                return Ok(());
+            }
+            if self.replacements.len() >= 64 {
+                return Err("alias substitution nested too deeply".into());
+            }
+            // Only consume the name, leaving the parent frame active for recursion checks.
+            self.by_ref().take(name.len()).for_each(drop);
+            self.replacements.push(Replacement {
+                name,
+                chars: text.chars().peekable(),
+                separator: true,
+                trailing_blank: text.ends_with([' ', '\t']),
+            });
+            // The first word of an argument-position replacement is eligible too.
+            self.alias_next = true;
+        }
     }
 
     fn next_if_eq(&mut self, expected: &char) -> Option<char> {
@@ -168,10 +257,15 @@ impl<'a> Source<'a> {
         Ok(())
     }
 
-    fn physical_line(&mut self) -> Option<&'a str> {
-        let line = self.source[self.offset..].split_inclusive('\n').next()?;
-        self.offset += line.len();
-        self.chars = self.source[self.offset..].chars().peekable();
+    fn physical_line(&mut self) -> Option<String> {
+        self.peek()?;
+        let mut line = String::new();
+        for ch in self.by_ref() {
+            line.push(ch);
+            if ch == '\n' {
+                break;
+            }
+        }
         Some(line)
     }
 
@@ -198,7 +292,7 @@ impl PendingHere {
                     }
                 }
             }
-            line.push_str(physical);
+            line.push_str(&physical);
             let text = if self.strip_tabs {
                 line.trim_start_matches('\t')
             } else {
@@ -297,8 +391,17 @@ pub(crate) struct CaseClause {
     pub fallthrough: bool,
 }
 
+#[cfg(test)]
 pub(crate) fn parse(source: &str) -> ParseResult<Script> {
+    parse_with_aliases(source, None)
+}
+
+pub(crate) fn parse_with_aliases(
+    source: &str,
+    aliases: Option<&HashMap<String, String>>,
+) -> ParseResult<Script> {
     let mut input = Source::new(source, Some(0));
+    input.aliases = aliases;
     let script = list(&mut input, &[], 0)?;
     input.require_here_documents()?;
     Ok(script)
@@ -327,6 +430,7 @@ fn head(input: &Source<'_>) -> String {
 fn list(input: &mut Source<'_>, stops: &[&str], depth: usize) -> ParseResult<Script> {
     let mut script = Vec::new();
     loop {
+        input.expand_aliases(true)?;
         skip_space(input);
         if input.next_if_eq(&'\n').is_some() {
             input.read_here_documents()?;
@@ -411,6 +515,7 @@ fn skip_newlines(input: &mut Source<'_>) -> ParseResult<()> {
 }
 
 fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
+    input.expand_aliases(true)?;
     let negated = head(input) == "!";
     if negated {
         input.next();
@@ -458,6 +563,7 @@ fn pipeline_separator(input: &mut Source<'_>) -> ParseResult<bool> {
 }
 
 fn command_form(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
+    input.expand_aliases(true)?;
     let name = head(input);
     let statement = if input.clone().take(2).eq(['(', '(']) {
         input.next();
@@ -762,6 +868,7 @@ fn simple_command_with_last(
     let mut has_name = false;
     let mut last = None;
     loop {
+        input.expand_aliases(!has_name)?;
         skip_space(input);
         let Some(&next) = input.peek() else {
             break;
@@ -1051,14 +1158,16 @@ fn single_quoted(input: &mut Source<'_>) -> ParseResult<String> {
 }
 
 fn dollar_quoted(input: &mut Source<'_>) -> ParseResult<String> {
-    let start = input.offset;
+    let mut text = String::new();
     while let Some(ch) = input.next() {
-        match ch {
-            '\'' => return Ok(input.source[start..input.offset - 1].into()),
-            '\\' => {
-                input.next();
+        if ch == '\'' {
+            return Ok(text);
+        }
+        text.push(ch);
+        if ch == '\\' {
+            if let Some(escaped) = input.next() {
+                text.push(escaped);
             }
-            _ => {}
         }
     }
     Err(ParseError::Incomplete("unclosed dollar-single quote"))
@@ -1455,18 +1564,31 @@ fn substitution(input: &mut Source<'_>, word: &mut Word, quoted: bool) -> ParseR
         return Err("command substitutions nested too deeply".into());
     }
     input.next(); // '('
-    let start = input.offset;
+    let start = input.clone();
+    let aliases = input.aliases.take();
     input.substitutions = Some(depth + 1);
     let pending = std::mem::take(&mut input.pending_here);
     list(input, &[")"], 0)?;
     input.require_here_documents()?;
     input.pending_here = pending;
     input.substitutions = Some(depth);
+    input.aliases = aliases;
     let end = input.offset;
     if input.next_if_eq(&')').is_none() {
         return Err(ParseError::Incomplete("unclosed command substitution"));
     }
-    word.push(Part::Substitution(input.source[start..end].into()), quoted);
+    // The worker re-parses the original substitution text with its alias table.
+    let mut remaining = end - start.offset;
+    let source = start
+        .take_while(|ch| {
+            if remaining == 0 {
+                return false;
+            }
+            remaining -= ch.len_utf8();
+            true
+        })
+        .collect();
+    word.push(Part::Substitution(source), quoted);
     Ok(())
 }
 

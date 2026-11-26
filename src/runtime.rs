@@ -10,7 +10,7 @@ use crate::{options::ShellOptions, process};
 
 use crate::syntax::{
     self, ArrayIndex, CaseClause, Command, ParameterOperator, ParseError, Part, Redirect,
-    RedirectKind, Script, Statement, Word, WordPart,
+    RedirectKind, Script, Statement, Word,
 };
 
 const DEFAULT_IFS: &str = " \t\n";
@@ -246,96 +246,7 @@ impl<'a> Invocation<'a> {
     }
 
     pub fn parse(&self, source: &str) -> Result<Script, ParseError> {
-        let mut commands = syntax::parse(source)?;
-        self.expand_aliases(&mut commands)?;
-        Ok(commands)
-    }
-
-    fn expand_aliases(&self, script: &mut [Statement]) -> Result<(), ParseError> {
-        for statement in script {
-            match statement {
-                Statement::Array { .. } | Statement::Arithmetic(_) => {}
-                Statement::Pipeline(stages) => {
-                    for command in stages {
-                        if let Some(compound) = &mut command.compound {
-                            self.expand_aliases(std::slice::from_mut(compound.as_mut()))?;
-                        } else {
-                            self.expand_alias(command)?;
-                        }
-                    }
-                }
-                Statement::Negated(inner)
-                | Statement::Async(inner)
-                | Statement::Redirected { command: inner, .. } => {
-                    self.expand_aliases(std::slice::from_mut(inner.as_mut()))?
-                }
-                Statement::AndOr { first, rest } => {
-                    self.expand_aliases(std::slice::from_mut(first.as_mut()))?;
-                    for (_, statement) in rest {
-                        self.expand_aliases(std::slice::from_mut(statement))?;
-                    }
-                }
-                Statement::For { body, .. }
-                | Statement::Function { body, .. }
-                | Statement::Group(body)
-                | Statement::Subshell(body) => self.expand_aliases(body)?,
-                Statement::While {
-                    condition, body, ..
-                } => {
-                    self.expand_aliases(condition)?;
-                    self.expand_aliases(body)?;
-                }
-                Statement::Case { clauses, .. } => {
-                    for clause in clauses {
-                        self.expand_aliases(&mut clause.body)?;
-                    }
-                }
-                Statement::If {
-                    branches,
-                    otherwise,
-                } => {
-                    for (condition, body) in branches {
-                        self.expand_aliases(condition)?;
-                        self.expand_aliases(body)?;
-                    }
-                    self.expand_aliases(otherwise)?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn expand_alias(&self, command: &mut Command) -> Result<(), ParseError> {
-        let mut seen = HashSet::new();
-        let index = command
-            .words
-            .iter()
-            .take_while(|word| word.assignment)
-            .count();
-        while let Some(Word {
-            parts,
-            bare: true,
-            assignment: false,
-        }) = command.words.get(index)
-        {
-            let [
-                WordPart {
-                    kind: Part::Literal(name),
-                    ..
-                },
-            ] = parts.as_slice()
-            else {
-                break;
-            };
-            let Some((name, value)) = self.aliases.get_key_value(name) else {
-                break;
-            };
-            if !seen.insert(name) {
-                break;
-            }
-            command.words.splice(index..index + 1, alias_words(value)?);
-        }
-        Ok(())
+        syntax::parse_with_aliases(source, Some(&self.aliases))
     }
 
     pub fn run_source(&mut self, source: &str, input: &mut impl BufRead) -> Result<(), String> {
@@ -1578,7 +1489,6 @@ impl<'a> Invocation<'a> {
                 {
                     return Err("invalid alias name".into());
                 }
-                alias_words(value).map_err(|error| error.message().to_owned())?;
                 self.aliases.insert(name.to_owned(), value.to_owned());
             } else {
                 print(
@@ -3043,22 +2953,6 @@ fn direct_name(mut argv: &[String]) -> Option<&str> {
         }
     }
     None
-}
-
-fn alias_words(value: &str) -> Result<Vec<Word>, ParseError> {
-    let mut parsed = syntax::parse(value)?;
-    if let [Statement::Pipeline(pipeline)] = parsed.as_mut_slice() {
-        if let [command] = pipeline.as_mut_slice() {
-            if !command.background
-                && command.redirects.is_empty()
-                && !command.words.is_empty()
-                && command.words.iter().all(|word| !word.assignment)
-            {
-                return Ok(std::mem::take(&mut command.words));
-            }
-        }
-    }
-    Err("alias replacement must be a simple command without redirects".into())
 }
 
 fn quote_value(value: &str) -> String {

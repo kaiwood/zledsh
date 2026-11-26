@@ -12,7 +12,7 @@ On macOS or Linux, run `target/debug/zledsh` without arguments for an interactiv
 
 Save `pid=$!` after starting a background job, then use `wait "$pid"` to collect its exit status. `wait "$first" "$second"` collects both statuses and returns the second. A stopped job is not finished: `wait` keeps waiting until it exits. The interactive shell prints completion notices before a prompt without consuming the status. Explicitly listing a completed job with `jobs %1` reports and consumes its status.
 
-Startup files support simple aliases such as `alias ll='ls -l'`. Use the alias on the next input line after defining it. Alias bodies can contain a command and its arguments, not pipelines or redirection. `unalias ll` removes it.
+Define aliases with `alias ll='ls -l'`. A definition takes effect on the next complete command, not later on the same semicolon-separated line. Replacements can include shell syntax, such as `alias count='ls | wc -l'`. Quoting the name bypasses expansion. `unalias ll` removes it.
 
 Startup files support `if`, `elif`, `else`, and `fi`, including nested branches. For example, add rbenv shims to `PATH` only when rbenv is installed:
 
