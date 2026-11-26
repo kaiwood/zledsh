@@ -1217,7 +1217,7 @@ fn parameter_at(
             input.next();
             Part::Name
         }
-        Some(ch) if *ch == '#' || ch.is_ascii_digit() => Part::Variable {
+        Some(ch) if matches!(ch, '#' | '-') || ch.is_ascii_digit() => Part::Variable {
             name: input.next().unwrap().to_string(),
             default: None,
             if_empty: false,
@@ -1345,7 +1345,9 @@ fn parameter_at(
 }
 
 fn parameter_name(input: &mut Source<'_>) -> Option<String> {
-    if input.peek().is_some_and(char::is_ascii_digit) {
+    if input.next_if_eq(&'-').is_some() {
+        Some("-".into())
+    } else if input.peek().is_some_and(char::is_ascii_digit) {
         Some(std::iter::from_fn(|| input.next_if(char::is_ascii_digit)).collect())
     } else {
         variable_name(input)

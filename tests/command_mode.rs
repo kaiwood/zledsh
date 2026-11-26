@@ -213,3 +213,68 @@ fn unquoted_home_prefix_expands_as_one_field() {
         b"contents\n"
     );
 }
+
+#[test]
+fn set_replaces_and_clears_positionals_without_changing_the_shell_name() {
+    let output = run(
+        r#"
+printf '%s:%s:%s\n' "$0" "$#" "$1"
+set -- -flag '' 'two words'
+printf '<%s>\n' "$@"
+f() { set inner; printf '%s:%s\n' "$#" "$1"; }
+f argument
+( set --; printf '%s\n' "$#" )
+printf '%s:%s:%s\n' "$0" "$#" "$1"
+printf '%s\n' "$(set -- child; printf '%s' "$1")"
+true | eval 'printf "%s:%s:%s\n" "$0" "$#" "$1"; set worker'
+set --
+printf '%s:%s:%s\n' "$0" "$#" "${1-unset}"
+"#,
+        &["label", "original"],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"label:1:original\n<-flag>\n<>\n<two words>\n1:inner\n0\nlabel:3:-flag\nchild\nlabel:3:-flag\nlabel:0:unset\n");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
+fn option_parameter_reflects_interactive_invocation_and_is_inherited() {
+    let home = tempfile::tempdir().unwrap();
+    let script = r#"printf '<%s:%s>\n' "$-" "${-}"; (printf '<%s>\n' "$-"); true | eval 'printf "<%s>\n" "$-"'"#;
+    for (flag, expected) in [("-c", "<:>\n<>\n<>\n"), ("-ic", "<i:i>\n<i>\n<i>\n")] {
+        let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
+            .current_dir(home.path())
+            .env_clear()
+            .env("HOME", home.path())
+            .args([flag, script])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, expected.as_bytes());
+        assert!(output.stderr.is_empty(), "{output:?}");
+    }
+}
+
+#[test]
+fn bare_set_lists_quoted_variables_without_resetting_positionals() {
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
+        .current_dir(home.path())
+        .env_clear()
+        .env("HOME", home.path())
+        .env("REMOVE_ME", "inherited")
+        .args([
+            "-c",
+            r#"unset REMOVE_ME; sample="one'two"; set > vars; printf '%s\n' "$1""#,
+            "name",
+            "keep",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"keep\n");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let vars = std::fs::read_to_string(home.path().join("vars")).unwrap();
+    assert!(vars.lines().any(|line| line == "sample='one'\\''two'"));
+    assert!(!vars.contains("REMOVE_ME"));
+}

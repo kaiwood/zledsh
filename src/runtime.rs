@@ -6,7 +6,7 @@ use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::process::Stdio;
 use std::rc::Rc;
 
-use crate::process;
+use crate::{options::ShellOptions, process};
 
 use crate::syntax::{
     self, ArrayIndex, CaseClause, Command, ParameterOperator, ParseError, Part, Redirect,
@@ -125,6 +125,7 @@ pub(crate) struct Invocation<'a> {
     exported: HashSet<String>,
     unset: HashSet<String>,
     substitution_depth: u8,
+    shell_worker: bool,
     script_depth: u8,
     loop_depth: usize,
     loop_control: Option<LoopControl>,
@@ -136,7 +137,7 @@ pub(crate) struct Invocation<'a> {
     agent_deadline: Option<std::time::Instant>,
     pub status: u8,
     pub exited: bool,
-    pub interactive: bool,
+    pub options: ShellOptions,
 }
 
 struct SavedVariable {
@@ -154,6 +155,9 @@ enum LoopControl {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PipelineVariables {
+    name: String,
+    args: Vec<String>,
+    options: ShellOptions,
     variables: HashMap<String, String>,
     exported: HashSet<String>,
     unset: HashSet<String>,
@@ -162,6 +166,7 @@ struct PipelineVariables {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Substitution {
     task: WorkerTask,
+    options: ShellOptions,
     name: String,
     args: Vec<String>,
     variables: HashMap<String, String>,
@@ -197,6 +202,7 @@ impl<'a> Invocation<'a> {
             exported: HashSet::new(),
             unset: HashSet::new(),
             substitution_depth: 0,
+            shell_worker: false,
             script_depth: 0,
             loop_depth: 0,
             loop_control: None,
@@ -208,7 +214,7 @@ impl<'a> Invocation<'a> {
             agent_deadline: None,
             status: 0,
             exited: false,
-            interactive: false,
+            options: ShellOptions::default(),
         }
     }
 
@@ -619,7 +625,9 @@ impl<'a> Invocation<'a> {
     ) -> serde_json::Result<u8> {
         // Consume and close the private descriptor before evaluating any commands.
         let state: PipelineVariables = serde_json::from_reader(BufReader::new(state))?;
-        let mut shell = Invocation::new("zledsh", &[]);
+        let mut shell = Invocation::new(&state.name, &state.args);
+        shell.options = state.options;
+        shell.shell_worker = true;
         shell.variables = state.variables;
         shell.exported = state.exported;
         shell.unset = state.unset;
@@ -723,7 +731,7 @@ impl<'a> Invocation<'a> {
         if self.agent_command()
             && matches!(
                 name.as_str(),
-                "exit" | "fg" | "bg" | "wait" | "eval" | "." | "source" | "complete"
+                "exit" | "fg" | "bg" | "wait" | "eval" | "." | "source" | "complete" | "set"
             )
         {
             report(
@@ -771,6 +779,15 @@ impl<'a> Invocation<'a> {
             }
             "local" => {
                 self.status = self.set_locals(args, &descriptors[2]);
+            }
+            "set" => {
+                self.status = match self.set(args, &descriptors[1]) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        report(&descriptors[2], &format!("set: {error}"));
+                        2
+                    }
+                };
             }
             "shift" => {
                 let count = match args {
@@ -1228,6 +1245,32 @@ impl<'a> Invocation<'a> {
         status
     }
 
+    fn set(&mut self, args: &[String], output: &Descriptor) -> Result<(), String> {
+        match args {
+            [] => {
+                let mut variables: BTreeMap<_, _> = std::env::vars_os()
+                    .filter_map(|(name, value)| {
+                        Some((name.into_string().ok()?, value.into_string().ok()?))
+                    })
+                    .filter(|(name, _)| valid_name(name) && !self.unset.contains(name))
+                    .collect();
+                variables.extend(self.variables.clone());
+                for (name, value) in variables {
+                    let quoted = value.replace('\'', "'\\''");
+                    output
+                        .write(&format!("{name}='{quoted}'\n"))
+                        .map_err(|error| error.to_string())?;
+                }
+            }
+            [first, rest @ ..] if first == "--" => self.args = rest.to_vec(),
+            [first, ..] if first.starts_with(['-', '+']) => {
+                return Err(format!("unsupported option: {first}"));
+            }
+            _ => self.args = args.to_vec(),
+        }
+        Ok(())
+    }
+
     fn command_path(&self) -> OsString {
         self.variable_os("PATH")
             .unwrap_or_else(|| OsString::from("/usr/bin:/bin"))
@@ -1325,11 +1368,11 @@ impl<'a> Invocation<'a> {
             if self.agent_command()
                 && matches!(
                     direct_name(&argv),
-                    Some("eval" | "." | "source" | "complete")
+                    Some("eval" | "." | "source" | "complete" | "set")
                 )
             {
                 return Err(io::Error::other(
-                    "eval, source and complete must be submitted by the user",
+                    "eval, source, complete and set must be submitted by the user",
                 ));
             }
             let name = argv[0].clone();
@@ -1353,6 +1396,9 @@ impl<'a> Invocation<'a> {
             let (exec, worker_state) = if is_builtin(&name) {
                 let executable = std::env::current_exe()?;
                 let state = worker_payload(&PipelineVariables {
+                    name: self.name.into(),
+                    args: self.args.clone(),
+                    options: self.options,
                     variables: self.variables.clone(),
                     exported: self.exported.clone(),
                     unset: self.unset.clone(),
@@ -1605,6 +1651,8 @@ impl<'a> Invocation<'a> {
         let saved: Substitution =
             serde_json::from_reader(state).map_err(|_| "invalid shell worker state")?;
         let mut shell = Invocation::new(&saved.name, &saved.args);
+        shell.options = saved.options;
+        shell.shell_worker = true;
         shell.variables = saved.variables;
         shell.arrays = saved.arrays;
         shell.aliases = saved.aliases;
@@ -1694,6 +1742,7 @@ impl<'a> Invocation<'a> {
     fn worker_state(&self, task: WorkerTask) -> Substitution {
         Substitution {
             task,
+            options: self.options,
             name: self.name.into(),
             args: self.args.clone(),
             variables: self.variables.clone(),
@@ -1827,7 +1876,9 @@ impl<'a> Invocation<'a> {
     }
 
     fn parameter_value(&self, name: &str) -> Option<OsString> {
-        if name == "#" {
+        if name == "-" {
+            Some(self.options.letters().into())
+        } else if name == "#" {
             Some(self.args.len().to_string().into())
         } else if let Ok(index) = name.parse::<usize>() {
             if index == 0 {
@@ -1841,7 +1892,7 @@ impl<'a> Invocation<'a> {
     }
 
     fn parameter_error(&mut self, message: String) -> String {
-        if !self.interactive && !self.agent_command() {
+        if (!self.options.interactive || self.shell_worker) && !self.agent_command() {
             self.exited = true;
         }
         message
@@ -2206,7 +2257,7 @@ fn here_document_error(error: io::Error) -> String {
 pub(crate) const BUILTINS: &[&str] = &[
     "exit", "cd", "pwd", "export", "unset", "read", "printf", "fg", "alias", "unalias", "jobs",
     "bg", "wait", "command", ":", "true", "false", "eval", "break", "continue", ".", "source",
-    "local", "shift", "return", "complete", "compgen",
+    "local", "set", "shift", "return", "complete", "compgen",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {

@@ -11,6 +11,7 @@ mod foreground;
 mod history;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod interactive;
+mod options;
 mod pathname;
 mod pattern;
 mod process;
@@ -125,15 +126,15 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
 }
 
 fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Result<u8, String> {
-    let mut force_interactive = false;
+    let mut options = options::ShellOptions::default();
     let mut read_stdin = false;
     let mut option = args.next();
     loop {
         match option.as_deref().and_then(|arg| arg.to_str()) {
-            Some("-i") => force_interactive = true,
+            Some("-i") => options.interactive = true,
             Some("-s") => read_stdin = true,
             Some("-is" | "-si") => {
-                force_interactive = true;
+                options.interactive = true;
                 read_stdin = true;
             }
             _ => break,
@@ -150,7 +151,7 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
         .as_deref()
         .and_then(|arg| arg.to_str())
         .filter(|_| !end_options);
-    let chatgpt = !read_stdin && !force_interactive && flag == Some("--chatgpt");
+    let chatgpt = !read_stdin && !options.interactive && flag == Some("--chatgpt");
     // The next bytes may belong to a child reading fd 0 directly.
     let mut input = BufReader::with_capacity(1, process::Stdin);
     if option.is_none() || read_stdin || chatgpt {
@@ -172,6 +173,7 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
         };
         let mut invocation =
             runtime::Invocation::new(name.to_str().ok_or("command name must be UTF-8")?, &args);
+        invocation.options = options;
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             use std::io::IsTerminal;
@@ -179,7 +181,7 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
                 return interactive::run(&mut invocation, &mut input, chatgpt)
                     .map_err(|error| error.to_string());
             }
-            if force_interactive {
+            if options.interactive {
                 return interactive::run_without_terminal(&mut invocation, &mut input)
                     .map_err(|error| error.to_string());
             }
@@ -200,7 +202,7 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
             Ok(0)
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
-        Some("--chatgpt-sign-out") if !force_interactive => {
+        Some("--chatgpt-sign-out") if !options.interactive => {
             if args.next().is_some() {
                 return Err("--chatgpt-sign-out does not take arguments".into());
             }
@@ -212,14 +214,15 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
             Ok(0)
         }
         Some("-c" | "-ic" | "-ci") => {
-            force_interactive |= flag != Some("-c");
+            options.interactive |= flag != Some("-c");
             let source = args.next().ok_or("-c requires a command")?;
             let source = source.to_str().ok_or("-c command must be UTF-8")?;
             let name = args.next().unwrap_or(name);
             let name = name.to_str().ok_or("command name must be UTF-8")?;
             let args = positional_args(args)?;
             let mut invocation = runtime::Invocation::new(name, &args);
-            load_forced_startup(force_interactive, &mut invocation, &mut input);
+            invocation.options = options;
+            load_forced_startup(options.interactive, &mut invocation, &mut input);
             if !invocation.exited {
                 invocation.run_source(source, &mut input)?;
             }
@@ -237,12 +240,13 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
                 Err(error) => return Err(format!("{path}: {error}")),
             };
             let mut invocation = runtime::Invocation::new(path, &args);
-            load_forced_startup(force_interactive, &mut invocation, &mut input);
+            invocation.options = options;
+            load_forced_startup(options.interactive, &mut invocation, &mut input);
             run_input(
                 &mut invocation,
                 &mut input,
                 Some(BufReader::new(script)),
-                force_interactive,
+                options.interactive,
             )
             .map_err(|error| format!("{path}: {error}"))
         }
