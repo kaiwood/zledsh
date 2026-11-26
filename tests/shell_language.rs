@@ -291,3 +291,25 @@ esac
     );
     assert!(!home.path().join("skipped").exists());
 }
+
+// POSIX.1-2024 2.9.4.1: brace grouping uses the current shell environment.
+#[test]
+fn brace_group_runs_in_the_live_shell() {
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(home.path().join("child")).unwrap();
+    let source = r#"
+value=outside
+{ value=inside; cd child; { printf '%s:' "$value"; false; }; } || printf 'failed:'
+printf '%s:' "$value"
+pwd
+"#;
+    assert_output(
+        shell(home.path()).args(["-c", source]).output().unwrap(),
+        0,
+        &format!(
+            "inside:failed:inside:{}\n",
+            home.path().join("child").canonicalize().unwrap().display()
+        ),
+        "",
+    );
+}

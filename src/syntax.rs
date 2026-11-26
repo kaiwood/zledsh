@@ -242,6 +242,7 @@ pub(crate) type Script = Vec<Statement>;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Statement {
+    Group(Script),
     Pipeline(Vec<Command>),
     Array {
         name: String,
@@ -396,7 +397,10 @@ fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
         skip_space(input);
     }
     let name = head(input);
-    let statement = if matches!(name.as_str(), "if" | "for" | "while" | "until" | "case") {
+    let statement = if matches!(
+        name.as_str(),
+        "if" | "for" | "while" | "until" | "case" | "{"
+    ) {
         if depth >= 32 {
             return Err("compound commands nested too deeply".into());
         }
@@ -405,6 +409,11 @@ fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
             "if" => conditional(input, depth + 1)?,
             "for" => for_loop(input, depth + 1)?,
             "case" => case_statement(input, depth + 1)?,
+            "{" => {
+                let body = list(input, &["}"], depth + 1)?;
+                expect_keyword(input, "}", "expected } after group")?;
+                Statement::Group(require_list(body, "empty group")?)
+            }
             _ => while_loop(input, depth + 1, name == "until")?,
         }
     } else if let Some((name, local)) = array_header(input) {

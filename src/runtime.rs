@@ -235,9 +235,9 @@ impl<'a> Invocation<'a> {
                         self.expand_aliases(std::slice::from_mut(statement))?;
                     }
                 }
-                Statement::For { body, .. } | Statement::Function { body, .. } => {
-                    self.expand_aliases(body)?
-                }
+                Statement::For { body, .. }
+                | Statement::Function { body, .. }
+                | Statement::Group(body) => self.expand_aliases(body)?,
                 Statement::While {
                     condition, body, ..
                 } => {
@@ -362,6 +362,7 @@ impl<'a> Invocation<'a> {
                 Statement::Pipeline(pipeline) => {
                     self.run_pipeline_with_descriptors(pipeline, input, descriptors)
                 }
+                Statement::Group(body) => self.run_with_descriptors(body, input, descriptors),
                 Statement::Negated(inner) => {
                     self.run_with_descriptors(
                         std::slice::from_ref(inner.as_ref()),
