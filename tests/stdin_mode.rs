@@ -194,3 +194,34 @@ fn forced_interactive_command_string_loads_startup_without_prompts() {
     assert_eq!(output.stdout, b"loaded");
     assert!(output.stderr.is_empty());
 }
+
+#[test]
+fn read_assigns_fields_and_preserves_the_unsplit_remainder() {
+    let home = tempfile::tempdir().unwrap();
+    let input = home.path().join("data");
+    std::fs::write(&input, b"  one : :two : three  \nleft\\:side:right\nbegin\\\nend last\n  raw\\:line  \npartial tail").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
+        .env_clear()
+        .env("HOME", home.path())
+        .current_dir(home.path())
+        .stdin(std::fs::File::open(input).unwrap())
+        .args([
+            "-c",
+            r#"
+IFS=' :'
+read -r a b c; printf '<%s>\n' "$a" "$b" "$c"
+read a b; printf '<%s>\n' "$a" "$b"
+unset IFS
+read a b; printf '<%s>\n' "$a" "$b"
+IFS=
+read -r a b; printf '<%s>\n' "$a" "$b"
+unset IFS
+read a b c; printf '%s:<%s>:<%s>:<%s>\n' "$?" "$a" "$b" "$c"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"<one>\n<>\n<two : three>\n<left:side>\n<right>\n<beginend>\n<last>\n<  raw\\:line  >\n<>\n1:<partial>:<tail>:<>\n");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}

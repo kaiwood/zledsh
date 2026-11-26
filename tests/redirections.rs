@@ -359,7 +359,7 @@ printf 'read=%s\n' "$?"
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert_eq!(output.stdout, b"write=1\nread=1\n");
+    assert_eq!(output.stdout, b"write=1\nread=2\n");
     let errors = String::from_utf8_lossy(&output.stderr);
     assert!(errors.contains("zledsh: printf:"));
     assert!(errors.contains("zledsh: read:"));

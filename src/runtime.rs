@@ -1229,7 +1229,7 @@ impl<'a> Invocation<'a> {
                         Ok(complete) => u8::from(!complete),
                         Err(error) => {
                             report(&descriptors[2], &format!("read: {error}"));
-                            1
+                            2
                         }
                     };
             }
@@ -1879,15 +1879,14 @@ impl<'a> Invocation<'a> {
     }
 
     fn read(&mut self, args: &[String], input: &mut dyn BufRead) -> Result<bool, String> {
-        let (raw, name) = match args {
-            [name] => (false, name),
-            [flag, name] if flag == "-r" => (true, name),
-            _ => return Err("expected read [-r] name".into()),
+        let (raw, names) = match args {
+            [flag, rest @ ..] if flag == "-r" => (true, rest),
+            _ => (false, args),
         };
-        if !valid_name(name) {
-            return Err("expected a variable name".into());
+        let names = names.strip_prefix(&[String::from("--")]).unwrap_or(names);
+        if names.is_empty() || names.iter().any(|name| !valid_name(name)) {
+            return Err("expected read [-r] name [name ...]".into());
         }
-        self.ensure_writable(name)?;
         let mut characters = Vec::new();
         let mut line = String::new();
         let complete = 'lines: loop {
@@ -1901,26 +1900,23 @@ impl<'a> Invocation<'a> {
                     '\n' => break 'lines true,
                     '\\' if !raw => match chars.next() {
                         Some('\n') => continue 'lines,
-                        Some(escaped) => characters.push((escaped, false)),
+                        Some(escaped) => characters.push((escaped, true)),
                         None => break 'lines false,
                     },
-                    ch => characters.push((ch, matches!(ch, ' ' | '\t'))),
+                    ch => characters.push((ch, false)),
                 }
             }
             break false;
         };
-        let first = characters
-            .iter()
-            .position(|&(_, separator)| !separator)
-            .unwrap_or(characters.len());
-        let end = characters
-            .iter()
-            .rposition(|&(_, separator)| !separator)
-            .map_or(first, |index| index + 1);
-        self.assign_value(
-            name,
-            characters[first..end].iter().map(|&(ch, _)| ch).collect(),
-        )?;
+        let ifs = self.variable("IFS");
+        let fields = crate::read_fields::split(
+            &characters,
+            ifs.as_deref().unwrap_or(DEFAULT_IFS),
+            names.len(),
+        );
+        for (name, value) in names.iter().zip(fields) {
+            self.assign_value(name, value)?;
+        }
         Ok(complete)
     }
 

@@ -18,6 +18,7 @@ mod pattern;
 mod process;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod prompt;
+mod read_fields;
 mod runtime;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod shell_context;
