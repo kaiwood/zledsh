@@ -76,7 +76,9 @@ pub(crate) enum Part {
     Name,
     Status,
     LastBackground,
-    Arguments,
+    Positional {
+        star: bool,
+    },
     Array {
         name: String,
         index: ArrayIndex,
@@ -931,12 +933,23 @@ fn parameter_at(
             if_empty: false,
             alternate: false,
         },
-        Some('@') => {
-            input.next();
-            Part::Arguments
-        }
+        Some('@' | '*') => Part::Positional {
+            star: input.next() == Some('*'),
+        },
         Some('{') => {
             input.next();
+            if let Some(symbol) = input.next_if(|ch| matches!(ch, '@' | '*')) {
+                input
+                    .next_if_eq(&'}')
+                    .ok_or("unsupported braced parameter operator")?;
+                word.push(
+                    Part::Positional {
+                        star: symbol == '*',
+                    },
+                    quoted,
+                );
+                return Ok(());
+            }
             let name = if input.peek().is_some_and(char::is_ascii_digit) {
                 std::iter::from_fn(|| input.next_if(char::is_ascii_digit)).collect()
             } else {

@@ -29,6 +29,10 @@ struct Fragment {
 
 type Field = Vec<Fragment>;
 
+fn field_text(field: Field) -> String {
+    field.into_iter().map(|part| part.text).collect()
+}
+
 fn split_field(field: Field, ifs: &str, output: &mut Vec<String>) {
     // POSIX.1-2024 2.6.5: IFS whitespace can precede a non-whitespace
     // delimiter as part of the same terminator. Only the latter forces a field.
@@ -1369,7 +1373,7 @@ impl<'a> Invocation<'a> {
         output: &mut Vec<String>,
     ) -> Result<(), String> {
         let ifs = self.variable("IFS");
-        for field in self.expand_parts(word, status)? {
+        for field in self.expand_parts(word, status, true)? {
             split_field(field, ifs.as_deref().unwrap_or(DEFAULT_IFS), output);
         }
         Ok(())
@@ -1521,13 +1525,18 @@ impl<'a> Invocation<'a> {
 
     fn expand(&self, word: &Word, status: &mut Option<u8>) -> Result<Vec<String>, String> {
         Ok(self
-            .expand_parts(word, status)?
+            .expand_parts(word, status, false)?
             .into_iter()
-            .map(|field| field.into_iter().map(|part| part.text).collect())
+            .map(field_text)
             .collect())
     }
 
-    fn expand_parts(&self, word: &Word, status: &mut Option<u8>) -> Result<Vec<Field>, String> {
+    fn expand_parts(
+        &self,
+        word: &Word,
+        status: &mut Option<u8>,
+        field_splitting: bool,
+    ) -> Result<Vec<Field>, String> {
         let mut fields = Vec::new();
         let mut field = Field::new();
         for part in &word.parts {
@@ -1565,14 +1574,24 @@ impl<'a> Invocation<'a> {
                     let pid: Option<u32> = None;
                     field.push(fragment(pid.map(|pid| pid.to_string()).unwrap_or_default()));
                 }
-                Part::Arguments => {
+                Part::Positional { star } if *star && (part.quoted || !field_splitting) => {
+                    // POSIX.1-2024 2.5.2: only join $* in a non-splitting context.
+                    let ifs = self.variable("IFS");
+                    let separator = ifs.as_deref().unwrap_or(DEFAULT_IFS);
+                    let first = separator
+                        .chars()
+                        .next()
+                        .map_or("", |ch| &separator[..ch.len_utf8()]);
+                    field.push(fragment(self.args.join(first)));
+                }
+                Part::Positional { .. } => {
                     let Some((first, rest)) = self.args.split_first() else {
                         continue;
                     };
-                    field.push(protected(first));
+                    field.push(fragment(first.clone()));
                     for arg in rest {
                         fields.push(std::mem::take(&mut field));
-                        field.push(protected(arg));
+                        field.push(fragment(arg.clone()));
                     }
                 }
                 Part::Array { name, index } => {
@@ -1637,8 +1656,20 @@ impl<'a> Invocation<'a> {
                     };
                     let value = value.filter(|value| !if_empty || !value.is_empty());
                     if value.is_some() == *alternate {
-                        if let Some(default) = default {
-                            let mut expanded = self.expand_parts(default, status)?.into_iter();
+                        if let Some(default) =
+                            default.as_ref().filter(|word| !word.parts.is_empty())
+                        {
+                            let expanded = self.expand_parts(default, status, field_splitting)?;
+                            if !field_splitting && expanded.len() > 1 {
+                                let text = expanded
+                                    .into_iter()
+                                    .map(field_text)
+                                    .collect::<Vec<_>>()
+                                    .join(" ");
+                                field.push(fragment(text));
+                                continue;
+                            }
+                            let mut expanded = expanded.into_iter();
                             if let Some(first) = expanded.next() {
                                 let append = |field: &mut Field, parts: Field| {
                                     field.extend(parts.into_iter().map(|mut part| {
@@ -1653,8 +1684,8 @@ impl<'a> Invocation<'a> {
                                     fields.push(std::mem::take(&mut field));
                                     append(&mut field, next);
                                 }
-                                continue;
                             }
+                            continue;
                         }
                         field.push(fragment(String::new()));
                     } else {

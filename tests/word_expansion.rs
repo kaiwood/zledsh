@@ -99,3 +99,54 @@ for item in $value; do show "$item"; done
         "<x y>\n<>\n<z>\nargc=1\n<x y>\nargc=1\n<>\nargc=1\n<z>\n",
     );
 }
+
+// POSIX.1-2024 Shell Command Language 2.5.2: separate fields and edge attachment.
+#[test]
+fn quoted_at_preserves_boundaries_and_unquoted_at_splits_each_parameter() {
+    assert_expansion(
+        r#"show "$@"
+show "pre${@}post"
+show $@
+show pre${@}post
+IFS=
+show $@
+show pre${@}post
+"#,
+        &["", "a b", ""],
+        "argc=3\n<>\n<a b>\n<>\nargc=3\n<pre>\n<a b>\n<post>\nargc=2\n<a>\n<b>\nargc=4\n<pre>\n<a>\n<b>\n<post>\nargc=1\n<a b>\nargc=3\n<pre>\n<a b>\n<post>\n",
+    );
+}
+
+#[test]
+fn star_joins_without_splitting_but_preserves_initial_fields_when_unquoted() {
+    assert_expansion(
+        r#"unset IFS
+show "$*"
+show $*
+IFS=': '
+show "pre${*}post"
+show pre${*}post
+saved=$*
+show "$saved"
+IFS=
+show "$*"
+show $*
+"#,
+        &["a b", "", "c:d"],
+        "argc=1\n<a b  c:d>\nargc=3\n<a>\n<b>\n<c:d>\nargc=1\n<prea b::c:dpost>\nargc=4\n<prea>\n<b>\n<c>\n<dpost>\nargc=1\n<a b::c:d>\nargc=1\n<a bc:d>\nargc=2\n<a b>\n<c:d>\n",
+    );
+}
+
+#[test]
+fn zero_parameters_do_not_create_at_fields_or_remove_adjacent_text_or_quotes() {
+    assert_expansion(
+        r#"show "$@" $@ $*
+show "$*" "pre$@post" pre${@}post "pre${*}post" pre${*}post
+show "$@"'' ''$@
+unset missing; show "${missing:-$@}" "${missing:-}"
+IFS=; show "$@" $@ "$*" $*
+"#,
+        &[],
+        "argc=0\nargc=5\n<>\n<prepost>\n<prepost>\n<prepost>\n<prepost>\nargc=2\n<>\n<>\nargc=1\n<>\nargc=1\n<>\n",
+    );
+}
