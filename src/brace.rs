@@ -12,12 +12,11 @@ pub(crate) fn alternatives(word: &Word) -> Result<Option<Vec<Word>>, String> {
     }
     let mut parts = Vec::new();
     for part in &word.parts {
-        if let Part::Literal(text) = &part.kind
-            && !part.quoted
-        {
-            parts.extend(text.chars().map(|ch| literal(ch.to_string())));
-        } else {
-            parts.push(part.clone());
+        match &part.kind {
+            Part::Literal(text) if !part.quoted => {
+                parts.extend(text.chars().map(|ch| literal(ch.to_string())));
+            }
+            _ => parts.push(part.clone()),
         }
     }
     let mut queue = vec![parts];
