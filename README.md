@@ -134,4 +134,10 @@ To run just the terminal integration tests:
 cargo test --locked --test terminal
 ```
 
+If Git is installed on the system PATH, you can also exercise a local `git switch` branch completion callback against a temporary repository:
+
+```sh
+cargo test --locked --test terminal git_switch_completes_a_real_local_branch -- --ignored
+```
+
 These tests drive the built `zledsh` binary in isolated temporary homes. They cover foreground signals and job control, restoration of terminal settings, startup and editing, completion, history privacy, and assistant turns with fake local providers.

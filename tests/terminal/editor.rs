@@ -603,3 +603,58 @@ fn completion_keeps_paths_inside_quotes_and_respects_typed_escapes() {
     }
     tty.finish();
 }
+
+// Optional because Git is not required by the regular Cargo suite.
+#[test]
+#[ignore = "requires Git on the system PATH"]
+fn git_switch_completes_a_real_local_branch() {
+    let mut tty = Terminal::start("git-tab> ", &[], |home| {
+        for args in [
+            &["init", "-q", "-b", "main"][..],
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "Initial",
+                "--allow-empty",
+            ],
+            &["branch", "topic-release"],
+        ] {
+            let output = Command::new("git")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .current_dir(home)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+        }
+        fs::write(
+            home.join(".zledshrc"),
+            r#"_git_branches() {
+  COMPREPLY=()
+  if [ "${COMP_WORDS[1]}" = switch ]; then
+    local branches=$(git for-each-ref --format='%(refname:short)' refs/heads)
+    COMPREPLY=( $(compgen -W "$branches" -- "${COMP_WORDS[COMP_CWORD]}") )
+  fi
+}
+complete -F _git_branches git
+"#,
+        )
+        .unwrap();
+    });
+    tty.expect("git-tab> ");
+    tty.send("git switch 'topic-r\t\n");
+    tty.expect("Switched to branch 'topic-release'");
+    tty.expect("git-tab> ");
+    assert_eq!(
+        fs::read_to_string(tty.home().join(".git/HEAD")).unwrap(),
+        "ref: refs/heads/topic-release\n"
+    );
+    tty.finish();
+}
