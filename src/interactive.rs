@@ -747,7 +747,7 @@ fn read_keys(
             }
             Key::Byte(3) => return Ok(Line::Cancelled),
             Key::Byte(4) if line.is_empty() => return Ok(Line::End),
-            Key::Byte(4) if cursor < line.len() => {
+            Key::Byte(4) | Key::Delete if cursor < line.len() => {
                 line.drain(cursor..next_char(&line, cursor));
             }
             Key::Byte(8 | 127) if cursor > 0 => {
@@ -862,20 +862,23 @@ fn read_keys(
                     }
                 }
             }
-            Key::Up | Key::Down => {
+            Key::Up | Key::Down | Key::Byte(14 | 16) => {
+                let backward = matches!(key, Key::Up | Key::Byte(16));
+                let prefix_only = matches!(key, Key::Up | Key::Down);
                 let Some(history) = history.as_deref_mut().filter(|history| !history.paused) else {
                     continue;
                 };
                 if history_index.is_none() {
-                    if key == Key::Down {
+                    if !backward {
                         continue;
                     }
                     history.refresh();
                     saved_draft = (line.clone(), cursor);
                 }
-                let matches_prefix =
-                    |text: &str| text.as_bytes().starts_with(&saved_draft.0[..saved_draft.1]);
-                if key == Key::Up {
+                let matches_prefix = |text: &str| {
+                    !prefix_only || text.as_bytes().starts_with(&saved_draft.0[..saved_draft.1])
+                };
+                if backward {
                     let bound = history_index.unwrap_or_else(|| history.entries().len());
                     history_index = history
                         .entries()
@@ -934,6 +937,7 @@ enum Key {
     End,
     Paste,
     BackTab,
+    Delete,
     Ignored,
 }
 
@@ -1046,6 +1050,7 @@ fn read_escape(input: &mut impl BufRead) -> io::Result<Key> {
                 b"H" | b"1~" => Key::Home,
                 b"F" | b"4~" => Key::End,
                 b"200~" => Key::Paste,
+                b"3~" => Key::Delete,
                 b"Z" => Key::BackTab,
                 _ => Key::Ignored,
             });

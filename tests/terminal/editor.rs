@@ -436,3 +436,27 @@ fn reverse_search_cycles_matches_and_preserves_cancelled_draft() {
     tty.expect("[private] history> ");
     tty.finish();
 }
+
+#[test]
+fn delete_and_control_history_navigation_preserve_the_draft() {
+    let mut tty = Terminal::start("keys> ", &[], |_| {});
+    tty.expect("keys> ");
+    for word in ["one", "two"] {
+        tty.send(&format!("/bin/echo {word}\n"));
+        tty.expect(&format!("\r\n{word}\r\n"));
+        tty.expect("keys> ");
+    }
+    tty.send("/bin/echo éXy\x1b[D\x1b[D\x1b[D\x10");
+    tty.expect("keys> /bin/echo two");
+    tty.send("\x10");
+    tty.expect("keys> /bin/echo one");
+    tty.send("\x0e\x0e\x1b[3~\x1b[3~\n");
+    tty.expect("\r\ny\r\n");
+    tty.expect("keys> ");
+    tty.send("history pause\n");
+    tty.expect("[private] keys> ");
+    tty.send("/bin/echo private\x10\x0e\n");
+    tty.expect("\r\nprivate\r\n");
+    tty.expect("[private] keys> ");
+    tty.finish();
+}
