@@ -343,6 +343,7 @@ pub(crate) type Script = Vec<Statement>;
 pub(crate) enum Statement {
     Group(Script),
     Arithmetic(Word),
+    Conditional(Box<Condition>),
     Redirected {
         command: Box<Statement>,
         redirects: Vec<Redirect>,
@@ -382,6 +383,16 @@ pub(crate) enum Statement {
         branches: Vec<(Script, Script)>,
         otherwise: Script,
     },
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) enum Condition {
+    Value(Word),
+    Unary(String, Word),
+    Binary(Word, String, Word),
+    Not(Box<Condition>),
+    All(Vec<Condition>),
+    Any(Vec<Condition>),
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -565,7 +576,13 @@ fn pipeline_separator(input: &mut Source<'_>) -> ParseResult<bool> {
 fn command_form(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
     input.expand_aliases(true)?;
     let name = head(input);
-    let statement = if input.clone().take(2).eq(['(', '(']) {
+    let statement = if name == "[[" {
+        input.next();
+        input.next();
+        let expression = condition_list(input, 0, false)?;
+        expect_keyword(input, "]]", "expected ]] after conditional expression")?;
+        Statement::Conditional(Box::new(expression))
+    } else if input.clone().take(2).eq(['(', '(']) {
         input.next();
         input.next();
         Statement::Arithmetic(arithmetic_word(input, 0)?)
@@ -635,6 +652,124 @@ fn command_form(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> 
         compound => compound_redirects(input, compound)?,
     };
     Ok(statement)
+}
+
+fn condition_operator(input: &mut Source<'_>, operator: &str) -> bool {
+    let mut ahead = input.clone();
+    if ahead.by_ref().take(operator.len()).eq(operator.chars()) {
+        *input = ahead;
+        true
+    } else {
+        false
+    }
+}
+
+fn condition_list(
+    input: &mut Source<'_>,
+    depth: usize,
+    conjunction: bool,
+) -> ParseResult<Condition> {
+    let mut terms = Vec::new();
+    loop {
+        terms.push(if conjunction {
+            condition_term(input, depth)?
+        } else {
+            condition_list(input, depth, true)?
+        });
+        skip_newlines(input)?;
+        if !condition_operator(input, if conjunction { "&&" } else { "||" }) {
+            break;
+        }
+    }
+    Ok(if terms.len() == 1 {
+        terms.pop().unwrap()
+    } else if conjunction {
+        Condition::All(terms)
+    } else {
+        Condition::Any(terms)
+    })
+}
+
+fn condition_term(input: &mut Source<'_>, depth: usize) -> ParseResult<Condition> {
+    if depth >= 32 {
+        return Err("conditional expression nested too deeply".into());
+    }
+    skip_newlines(input)?;
+    let name = head(input);
+    if name == "!" || input.clone().take(2).eq(['!', '(']) {
+        input.next();
+        return Ok(Condition::Not(Box::new(condition_term(input, depth + 1)?)));
+    }
+    if input.next_if_eq(&'(').is_some() {
+        let condition = condition_list(input, depth + 1, false)?;
+        if input.next_if_eq(&')').is_none() {
+            return Err(if input.peek().is_none() {
+                ParseError::Incomplete("expected ) in conditional expression")
+            } else {
+                "expected ) in conditional expression".into()
+            });
+        }
+        return Ok(condition);
+    }
+    if matches!(
+        name.as_str(),
+        "-n" | "-z"
+            | "-e"
+            | "-a"
+            | "-f"
+            | "-d"
+            | "-L"
+            | "-h"
+            | "-s"
+            | "-r"
+            | "-w"
+            | "-x"
+            | "-b"
+            | "-c"
+            | "-p"
+            | "-S"
+            | "-v"
+    ) {
+        input.by_ref().take(name.len()).count();
+        return Ok(Condition::Unary(name, condition_word(input)?));
+    }
+    let left = condition_word(input)?;
+    skip_newlines(input)?;
+    let name = head(input);
+    let operator = if matches!(input.peek(), Some('<' | '>')) {
+        input.next().unwrap().to_string()
+    } else if matches!(
+        name.as_str(),
+        "=" | "=="
+            | "!="
+            | "=~"
+            | "-eq"
+            | "-ne"
+            | "-lt"
+            | "-le"
+            | "-gt"
+            | "-ge"
+            | "-ef"
+            | "-nt"
+            | "-ot"
+    ) {
+        input.by_ref().take(name.len()).count();
+        name
+    } else {
+        return Ok(Condition::Value(left));
+    };
+    Ok(Condition::Binary(left, operator, condition_word(input)?))
+}
+
+fn condition_word(input: &mut Source<'_>) -> ParseResult<Word> {
+    skip_newlines(input)?;
+    if input.peek().is_none() {
+        return Err(ParseError::Incomplete("expected conditional operand"));
+    }
+    if head(input) == "]]" {
+        return Err("expected conditional operand".into());
+    }
+    word(input)
 }
 
 fn compound_redirects(input: &mut Source<'_>, command: Statement) -> ParseResult<Statement> {

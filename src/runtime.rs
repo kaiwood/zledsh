@@ -337,6 +337,16 @@ impl<'a> Invocation<'a> {
                     self.dispatch_traps(input, &self.updated_descriptors(base, versions));
                     self.check_errexit();
                 }
+                Statement::Conditional(condition) => {
+                    self.status = match self.evaluate_condition(condition) {
+                        Ok(matched) => u8::from(!matched),
+                        Err(error) => {
+                            report(&descriptors[2], &format!("[[: {error}"));
+                            2
+                        }
+                    };
+                    self.check_errexit();
+                }
                 Statement::Arithmetic(expression) => {
                     self.status = match self.evaluate_arithmetic(expression, &mut None) {
                         Ok(value) => u8::from(value == 0),
@@ -685,6 +695,89 @@ impl<'a> Invocation<'a> {
         if self.options.errexit && !self.ignore_errexit && self.status != 0 && !self.agent_command()
         {
             self.exited = true;
+        }
+    }
+
+    fn evaluate_condition(&mut self, condition: &syntax::Condition) -> Result<bool, String> {
+        use syntax::Condition;
+        let value =
+            |shell: &mut Self, word| shell.expand(word, &mut None).map(|fields| fields.join(" "));
+        match condition {
+            Condition::Not(inner) => Ok(!self.evaluate_condition(inner)?),
+            Condition::All(terms) => {
+                for term in terms {
+                    if !self.evaluate_condition(term)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Condition::Any(terms) => {
+                for term in terms {
+                    if self.evaluate_condition(term)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            Condition::Value(word) => Ok(!value(self, word)?.is_empty()),
+            Condition::Unary(operator, word) => {
+                let text = value(self, word)?;
+                if operator == "-v" {
+                    Ok(self.variable_os(&text).is_some())
+                } else {
+                    Ok(crate::condition::unary(operator, &text))
+                }
+            }
+            Condition::Binary(left, operator, right) => {
+                let left = value(self, left)?;
+                match operator.as_str() {
+                    "=" | "==" | "!=" => {
+                        let matched = self
+                            .expand_pattern(right, &mut None)?
+                            .matches(left.as_bytes());
+                        Ok(matched != (operator == "!="))
+                    }
+                    "=~" => {
+                        let fields = self.expand_parts(right, &mut None, false, false)?;
+                        let regex = fields
+                            .iter()
+                            .map(|field| {
+                                field
+                                    .iter()
+                                    .map(|part| {
+                                        if part.origin == Origin::Quoted {
+                                            crate::condition::quote_regex(&part.text)
+                                        } else {
+                                            part.text.clone()
+                                        }
+                                    })
+                                    .collect::<String>()
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        crate::condition::regex(&left, &regex)
+                    }
+                    "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" => {
+                        let right = value(self, right)?;
+                        let a = self.evaluate_arithmetic_text(&left)?;
+                        let b = self.evaluate_arithmetic_text(&right)?;
+                        Ok(match operator.as_str() {
+                            "-eq" => a == b,
+                            "-ne" => a != b,
+                            "-lt" => a < b,
+                            "-le" => a <= b,
+                            "-gt" => a > b,
+                            _ => a >= b,
+                        })
+                    }
+                    _ => Ok(crate::condition::binary(
+                        operator,
+                        &left,
+                        &value(self, right)?,
+                    )),
+                }
+            }
         }
     }
 
@@ -2575,7 +2668,11 @@ impl<'a> Invocation<'a> {
         status: &mut Option<u8>,
     ) -> Result<i64, String> {
         let expression = self.expand(expression, status)?.join(" ");
-        crate::arithmetic::evaluate(&expression, |name, assignment| {
+        self.evaluate_arithmetic_text(&expression)
+    }
+
+    fn evaluate_arithmetic_text(&mut self, expression: &str) -> Result<i64, String> {
+        crate::arithmetic::evaluate(expression, |name, assignment| {
             if let Some(value) = assignment {
                 self.assign_value(name, value.to_string())
                     .map_err(|_| "assignment to a read-only variable")?;

@@ -1245,3 +1245,55 @@ pwd
     );
     assert!(String::from_utf8_lossy(&output.stderr).starts_with("zledsh: popd:"));
 }
+
+#[test]
+fn double_brackets_use_patterns_without_field_splitting_and_short_circuit() {
+    let home = tempfile::tempdir().unwrap();
+    fs::write(home.path().join("two words"), b"content").unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+name='two words'
+pattern='two*'
+[[ -f $name && $name == $pattern && $name != "$pattern" ]] && printf 'matched\n'
+[[ a < z && ( ! -z $name || ${missing:?unexpected} ) ]] && printf 'ordered\n'
+[[ 2 + 1 ]] || printf 'unexpected\n'
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(output.stdout, b"matched\nordered\n");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("expected ]]"));
+}
+
+#[test]
+fn double_brackets_support_numeric_comparisons_regex_and_pipeline_status() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+n=2
+regex='^a(b|c)+$'
+[[ n+1 -eq 3 && abc =~ $regex ]] && printf 'true\n'
+[[ abc =~ "$regex" ]]
+printf 'quoted=%s\n' "$?"
+set -o pipefail
+[[ -z $n ]] | true
+printf 'pipeline=%s\n' "$?"
+invalid='['
+[[ a =~ $invalid ]]
+printf 'invalid=%s\n' "$?"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        0,
+        "true\nquoted=1\npipeline=1\ninvalid=2\n",
+        "zledsh: [[: invalid regular expression\n",
+    );
+}
