@@ -4,16 +4,18 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::{fs::PermissionsExt, process::CommandExt};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const TIMEOUT: Duration = Duration::from_secs(8);
+static OPEN_PTY: Mutex<()> = Mutex::new(());
 const ROLE: &str = "ZLEDSH_TEST_TERMINAL_ROLE";
 
 pub struct Terminal {
     child: Child,
     master: File,
     pending: Vec<u8>,
-    home: tempfile::TempDir,
+    home: Option<tempfile::TempDir>,
 }
 
 fn cvt(result: libc::c_int) -> io::Result<libc::c_int> {
@@ -29,6 +31,8 @@ impl Terminal {
         let home = tempfile::tempdir().unwrap();
         fs::create_dir(home.path().join("moved")).unwrap();
         setup(home.path());
+        // Serialize openpty + CLOEXEC + spawn so another fixture cannot inherit an unmarked fd.
+        let _open = OPEN_PTY.lock().unwrap_or_else(|error| error.into_inner());
         let (mut master, mut slave) = (-1, -1);
         let mut size = libc::winsize {
             ws_row: 24,
@@ -73,12 +77,12 @@ impl Terminal {
             child: command.spawn().unwrap(),
             master,
             pending: Vec::new(),
-            home,
+            home: Some(home),
         }
     }
 
     pub fn home(&self) -> &Path {
-        self.home.path()
+        self.home.as_ref().unwrap().path()
     }
 
     pub fn send(&mut self, input: &str) {
@@ -130,10 +134,11 @@ impl Terminal {
         }
     }
 
-    pub fn finish(mut self) {
+    pub fn finish(mut self) -> tempfile::TempDir {
         self.send("exit 0\n");
         self.expect("tty restored\r\n");
         assert!(until(|| self.child.try_wait().unwrap()).success());
+        self.home.take().unwrap()
     }
 }
 

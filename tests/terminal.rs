@@ -84,3 +84,8 @@ fn foreground_child_inherits_descriptor_nine() {
     assert_eq!(std::fs::read(tty.home().join("fd9")).unwrap(), b"fd-nine");
     tty.finish();
 }
+
+#[path = "terminal/assistant.rs"]
+mod assistant;
+#[path = "terminal/editor.rs"]
+mod editor;

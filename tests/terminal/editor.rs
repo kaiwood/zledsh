@@ -1,0 +1,438 @@
+use crate::pty::{Terminal, executable, until};
+use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+
+#[test]
+fn startup_prompt_and_cancelled_conditional() {
+    let mut tty = Terminal::start(
+        "unused> ",
+        &[
+            ("ENV", "$HOME/startup file"),
+            ("PS1", "$MARK! !!> "),
+            ("PS2", "more> "),
+        ],
+        |home| {
+            fs::create_dir(home.join(".kward")).unwrap();
+            fs::write(home.join(".kward/zledshrc"), "RC=primary\n").unwrap();
+            fs::write(
+                home.join(".zledshrc"),
+                "if true; then RC=\"$RC:personal\"; fi\nENV=ignored\nPROMPT='%~ [%?] %%> '\n",
+            )
+            .unwrap();
+            fs::write(
+                home.join("startup file"),
+                "printf 'startup:%s\\n' \"$RC\"\nMARK=env\n",
+            )
+            .unwrap();
+            fs::write(home.join("ignored"), "exit 42\n").unwrap();
+        },
+    );
+    assert!(
+        tty.expect("~ [0] %> ")
+            .contains("startup:primary:personal\r\n")
+    );
+    tty.send("cd moved; /usr/bin/false\n");
+    tty.expect("~/moved [1] %> ");
+    tty.send("unset PROMPT\n");
+    tty.expect("env3 !> ");
+    tty.send("if true; then printf not-yet > skipped\n");
+    tty.expect("more> ");
+    assert!(!tty.home().join("moved/skipped").exists());
+    tty.send("\x03");
+    tty.expect("env3 !> ");
+    assert!(!tty.home().join("moved/skipped").exists());
+    tty.finish();
+}
+
+#[test]
+fn command_lookup_guards_startup_path() {
+    for mode in [0o644, 0o755] {
+        let mut tty = Terminal::start("lookup> ", &[], |home| {
+            let bin = home.join("rbenv");
+            fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&bin, fs::Permissions::from_mode(mode)).unwrap();
+            fs::write(
+                home.join(".zledshrc"),
+                r#"export PATH="$HOME:/usr/bin:/bin"
+if command -v rbenv >/dev/null 2>&1; then
+  export PATH="${RBENV_ROOT:-$HOME/.rbenv}/shims:$PATH"
+fi
+"#,
+            )
+            .unwrap();
+        });
+        tty.expect("lookup> ");
+        let home = tty.home().display();
+        let path = if mode == 0o755 {
+            format!("{home}/.rbenv/shims:{home}:/usr/bin:/bin")
+        } else {
+            format!("{home}:/usr/bin:/bin")
+        };
+        tty.send("printf '%s\\n' \"$PATH\"\n");
+        tty.expect(&format!("\r\n{path}\r\n"));
+        tty.expect("lookup> ");
+        tty.finish();
+    }
+}
+
+#[test]
+fn cancelled_draft_leaves_the_interpreter_usable() {
+    let mut tty = Terminal::start("rust> ", &[], |_| {});
+    tty.expect("rust> ");
+    tty.send("exit 17\x03");
+    tty.expect("^C\r\n");
+    tty.expect("rust> ");
+    tty.send("printf '%s-%s\\n' still here\n");
+    tty.expect("\r\nstill-here\r\n");
+    tty.expect("rust> ");
+    tty.finish();
+}
+
+#[test]
+fn heredoc_prompts_for_input_and_can_be_cancelled() {
+    let mut tty = Terminal::start("here> ", &[("PS2", "body> ")], |_| {});
+    tty.expect("here> ");
+    tty.send("printf wrong > marker <<END\n");
+    tty.expect("body> ");
+    tty.send("not submitted\n");
+    tty.expect("body> ");
+    tty.send("\x03");
+    tty.expect("here> ");
+    assert!(!tty.home().join("marker").exists());
+    tty.send("cat <<'END'\n");
+    tty.expect("body> ");
+    tty.send("actual body\n");
+    tty.expect("body> ");
+    tty.send("END\n");
+    tty.expect("\r\nactual body\r\n");
+    tty.expect("here> ");
+    tty.finish();
+}
+
+#[test]
+fn private_commands_are_not_persisted_or_recalled() {
+    let mut tty = Terminal::start("hist> ", &[("HISTFILE", "history.jsonl")], |_| {});
+    tty.expect("hist> ");
+    tty.send("printf 'public-output\\n'\n");
+    tty.expect("\r\npublic-output\r\n");
+    tty.expect("hist> ");
+    tty.send("history pause\n");
+    tty.expect("[private] hist> ");
+    tty.send("printf 'private-output\\n'\n");
+    tty.expect("\r\nprivate-output\r\n");
+    tty.expect("[private] hist> ");
+    tty.send("history resume\n");
+    tty.expect("\x1b[?2004hhist> ");
+    tty.send("\x1b[A\n");
+    tty.expect("\r\npublic-output\r\n");
+    tty.expect("hist> ");
+    let home = tty.finish();
+    let path = home.path().join("history.jsonl");
+    let contents = fs::read_to_string(&path).unwrap();
+    let commands: Vec<String> = contents
+        .lines()
+        .map(|line| {
+            let row: serde_json::Value = serde_json::from_str(line).unwrap();
+            row.as_array()
+                .unwrap()
+                .last()
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        commands,
+        [
+            "printf 'public-output\\n'",
+            "printf 'public-output\\n'",
+            "exit 0"
+        ]
+    );
+    assert_eq!(
+        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+fn bracketed_paste_can_be_edited_and_rejects_nul() {
+    let mut tty = Terminal::start("paste> ", &[], |_| {});
+    tty.expect("paste> ");
+    tty.send("\x1b[200~printf first > one\nprintf bad > two\x1b[201~");
+    tty.expect("printf bad > two");
+    assert!(!tty.home().join("one").exists());
+    assert!(!tty.home().join("two").exists());
+    tty.send(&format!("{}{}good\n", "\x1b[D".repeat(6), "\x7f".repeat(3)));
+    tty.expect("\x1b[?2004hpaste> ");
+    assert_eq!(fs::read(tty.home().join("one")).unwrap(), b"first");
+    assert_eq!(fs::read(tty.home().join("two")).unwrap(), b"good");
+    tty.send("\x1b[200~printf unsafe > three\n\0\x1b[201~");
+    tty.expect("\x07");
+    assert!(!tty.home().join("three").exists());
+    tty.finish();
+}
+
+#[test]
+fn word_deletion_and_tab_complete_a_name_with_spaces() {
+    let mut tty = Terminal::start("edit> ", &[], |home| {
+        fs::write(home.join("file with space"), "completed-content\n").unwrap()
+    });
+    tty.expect("edit> ");
+    tty.send("/bin/cat wrong\x17fi\t\n");
+    tty.expect("\r\ncompleted-content\r\n");
+    tty.expect("edit> ");
+    tty.finish();
+}
+
+#[test]
+fn completion_uses_live_home_without_replacing_the_tilde() {
+    let mut tty = Terminal::start("home> ", &[], |home| {
+        let notes = home.join("other home/notes");
+        fs::create_dir_all(&notes).unwrap();
+        fs::write(notes.join("report draft"), "home-completed-content\n").unwrap();
+    });
+    tty.expect("home> ");
+    tty.send("HOME=\"$HOME/other home\"\n");
+    tty.expect("\x1b[?2004hhome> ");
+    tty.send("/bin/cat ~\t");
+    tty.expect("/bin/cat ~/");
+    tty.send("no\t");
+    tty.expect("notes/");
+    tty.send("re\t");
+    tty.expect("report\\ draft ");
+    tty.send("\n");
+    tty.expect("\r\nhome-completed-content\r\n");
+    tty.expect("home> ");
+    tty.finish();
+}
+
+#[test]
+fn ambiguous_completion_lists_and_cycles_in_both_directions() {
+    let mut tty = Terminal::start("suggest> ", &[], |home| {
+        fs::create_dir(home.join(".zled-dir")).unwrap();
+        fs::write(home.join(".zledsh notes"), "selected-file-content\n").unwrap();
+        fs::write(home.join(".zledshrc.example"), "different-file-content\n").unwrap();
+    });
+    tty.expect("suggest> ");
+    tty.send("/bin/cat ~/.zled\t");
+    tty.expect("suggest> /bin/cat ~/.zled\r\x1bD.zled-dir/  .zledsh\\ notes  .zledshrc.example");
+    tty.expect("\x1b[1A\r");
+    for (key, candidate) in [
+        ("\t", ".zled-dir/"),
+        ("\t", ".zledsh\\ notes"),
+        ("\t", ".zledshrc.example"),
+        ("\t", ".zled-dir/"),
+        ("\x1b[Z", ".zledshrc.example"),
+        ("\x1b[Z", ".zledsh\\ notes"),
+    ] {
+        tty.send(key);
+        tty.expect(&format!("suggest> /bin/cat ~/{candidate}\r\x1bD"));
+        tty.expect(&format!("\x1b[7m{candidate}\x1b[27m"));
+        tty.expect("\x1b[1A\r");
+    }
+    tty.send("\n");
+    assert!(
+        tty.expect("\r\nselected-file-content\r\n")
+            .contains("\x1b[1B\r\x1b[J")
+    );
+    tty.expect("suggest> ");
+    tty.finish();
+}
+
+#[test]
+fn completion_extends_shared_prefix_and_restarts_after_edit() {
+    let mut tty = Terminal::start("suggest> ", &[], |home| {
+        fs::write(home.join("report-a"), "report-a-content\n").unwrap();
+        fs::write(home.join("report-b"), "report-b-content\n").unwrap();
+    });
+    tty.expect("suggest> ");
+    tty.send("/bin/cat ~/re\t");
+    tty.expect("suggest> /bin/cat ~/report-\r\x1bDreport-a  report-b");
+    tty.expect("\x1b[1A\r");
+    tty.send("b\t");
+    assert!(tty.expect("b ").contains("\x1b[1B\r\x1b[J"));
+    tty.send("\n");
+    tty.expect("\r\nreport-b-content\r\n");
+    tty.expect("suggest> ");
+    tty.finish();
+}
+
+#[test]
+fn ctrl_k_deletes_to_end_of_current_line() {
+    let mut tty = Terminal::start("kill-line> ", &[], |_| {});
+    tty.expect("kill-line> ");
+    let prefix = "printf '%s\\n' gardé";
+    tty.send(&format!(
+        "\x1b[200~{prefix} unwanted\nprintf 'next\\n'\x1b[201~\x01{}\x0b-edited\n",
+        "\x06".repeat(prefix.chars().count())
+    ));
+    tty.expect("\r\ngardé-edited\r\nnext\r\n");
+    tty.expect("kill-line> ");
+    tty.finish();
+}
+
+#[test]
+fn word_motion_and_clear_screen_keep_the_draft_editable() {
+    let mut tty = Terminal::start("move> ", &[], |_| {});
+    tty.expect("move> ");
+    tty.send("printf '<%s>\\n' one café\x1bbpré-\x1bf-fin\x0c");
+    tty.expect("\x1b[H\x1b[2J");
+    tty.expect("move> printf '<%s>\\n' one pré-café-fin");
+    tty.send("\n");
+    tty.expect("\r\n<one>\r\n<pré-café-fin>\r\n");
+    tty.expect("move> ");
+    tty.finish();
+}
+
+#[test]
+fn yank_restores_cuts_across_prompts_but_private_mode_clears_them() {
+    let mut tty = Terminal::start("yank> ", &[], |_| {});
+    tty.expect("yank> ");
+    tty.send("/bin/echo first café\x17\x17\x19\n");
+    tty.expect("\r\nfirst café\r\n");
+    tty.expect("yank> ");
+    for cut in ["/bin/echo via-u\x15\n", "/bin/echo via-k\x01\x0b\n"] {
+        tty.send(cut);
+        tty.expect("\x1b[?2004hyank> ");
+        tty.send("\x19\n");
+        tty.expect(if cut.contains("via-u") {
+            "\r\nvia-u\r\n"
+        } else {
+            "\r\nvia-k\r\n"
+        });
+        tty.expect("yank> ");
+    }
+    tty.send("history pause\n");
+    tty.expect("[private] yank> ");
+    tty.send("/bin/echo private \x19\n");
+    tty.expect("\r\nprivate\r\n");
+    tty.expect("[private] yank> ");
+    tty.send("private-draft\x15history resume\n");
+    tty.expect("\x1b[?2004hyank> ");
+    tty.send("/bin/echo resumed \x19\n");
+    tty.expect("\r\nresumed\r\n");
+    tty.expect("yank> ");
+    tty.finish();
+}
+
+#[test]
+fn rbenv_bootstrap_installs_wrapper_and_completes_commands_and_values() {
+    let mut tty = Terminal::start("rbenv> ", &[], |home| {
+        fs::write(
+            home.join("generated-rbenv-startup"),
+            include_str!("../fixtures/rbenv-generated-startup.sh"),
+        )
+        .unwrap();
+        fs::write(
+            home.join("mock-completions"),
+            include_str!("../fixtures/rbenv-completion.sh"),
+        )
+        .unwrap();
+        fs::write(
+            home.join(".zledshrc"),
+            r#"export PATH="$HOME:/usr/bin:/bin"
+if command -v rbenv >/dev/null 2>&1; then
+  eval "$(rbenv init - bash)"
+fi
+"#,
+        )
+        .unwrap();
+        executable(
+            &home.join("rbenv"),
+            r#"#!/bin/sh
+case "$1" in
+  init) exec /bin/cat ./generated-rbenv-startup;;
+  rehash) exit 0;;
+  commands) printf '%s\n' rehash shell version;;
+  completions) [ "$#:$2" = "2:shell" ] || exit 1; printf '%s\n' system custom;;
+  sh-shell) [ "$2" = system ] || exit 1; printf 'export RBENV_VERSION=system\n';;
+  *) printf '%s\n' "$1";;
+esac
+"#,
+        );
+    });
+    assert!(!tty.expect("rbenv> ").contains("zledsh:"));
+    tty.send("rbenv ver\t\n");
+    tty.expect("\r\nversion\r\n");
+    tty.expect("rbenv> ");
+    tty.send("rbenv shell sys\t\n");
+    tty.expect("\x1b[?2004hrbenv> ");
+    tty.send("printf '%s:%s:%s\\n' \"$RBENV_VERSION\" \"$fixture_loaded\" \"$(rbenv version)\"\n");
+    tty.expect("\r\nsystem:yes:version\r\n");
+    tty.expect("rbenv> ");
+    tty.finish();
+}
+
+#[test]
+fn slow_completion_does_not_stall_editor_or_leave_worker_running() {
+    let mut tty = Terminal::start("complete> ", &[], |home| {
+        fs::write(
+            home.join(".zledshrc"),
+            r#"_slow() { /bin/sh -c 'echo $$ > worker; exec /bin/sleep 15'; }
+complete -F _slow printf
+"#,
+        )
+        .unwrap()
+    });
+    tty.expect("complete> ");
+    tty.send("printf survived\t\n");
+    tty.expect("\r\nsurvived");
+    tty.expect("complete> ");
+    let worker = fs::read_to_string(tty.home().join("worker")).unwrap();
+    until(|| {
+        let state = Command::new("/bin/ps")
+            .args(["-o", "stat=", "-p", worker.trim()])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&state.stdout);
+        (text.trim().is_empty() || text.trim().starts_with('Z')).then_some(())
+    });
+    tty.finish();
+}
+
+#[test]
+fn history_arrows_search_prefix_and_restore_original_draft() {
+    let mut tty = Terminal::start("prefix> ", &[], |_| {});
+    tty.expect("prefix> ");
+    for word in ["match-first", "match-second", "unrelated"] {
+        tty.send(&format!("/bin/echo {word}\n"));
+        tty.expect(&format!("\r\n{word}\r\n"));
+        tty.expect("prefix> ");
+    }
+    tty.send("/bin/echo match\x1b[A");
+    tty.expect("prefix> /bin/echo match-second");
+    tty.send("\x1b[A");
+    tty.expect("prefix> /bin/echo match-first");
+    tty.send("\x1b[B\x1b[B\n");
+    tty.expect("\r\nmatch\r\n");
+    tty.expect("prefix> ");
+    tty.finish();
+}
+
+#[test]
+fn reverse_search_cycles_matches_and_preserves_cancelled_draft() {
+    let mut tty = Terminal::start("history> ", &[], |_| {});
+    tty.expect("history> ");
+    for word in ["first-café", "second-café", "unrelated"] {
+        tty.send(&format!("/bin/echo {word}\n"));
+        tty.expect(&format!("\r\n{word}\r\n"));
+        tty.expect("history> ");
+    }
+    tty.send("/bin/echo draft\x12café");
+    tty.expect("(reverse-i-search)`café': /bin/echo second-café");
+    tty.send("\x07\n");
+    tty.expect("\r\ndraft\r\n");
+    tty.expect("history> ");
+    tty.send("\x12café\x12");
+    tty.expect("(reverse-i-search)`café': /bin/echo first-café");
+    tty.send("\n");
+    tty.expect("\r\nfirst-café\r\n");
+    tty.expect("history> ");
+    tty.send("history pause\n");
+    tty.expect("[private] history> ");
+    tty.send("\x12/bin/echo private\n");
+    assert!(!tty.expect("\r\nprivate\r\n").contains("reverse-i-search"));
+    tty.expect("[private] history> ");
+    tty.finish();
+}
