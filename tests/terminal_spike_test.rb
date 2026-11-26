@@ -280,6 +280,54 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
+  def test_tab_lists_ambiguous_home_paths_and_cycles_in_both_directions
+    prompt = "suggest> "
+    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt, setup: ->(home) {
+      Dir.mkdir(File.join(home, ".kward"))
+      File.write(File.join(home, ".kwsh notes"), "selected-file-content\n")
+      File.write(File.join(home, ".kwshrc.example"), "different-file-content\n")
+    }) do |reader, writer, pid|
+      writer.write("/bin/cat ~/.kw\t")
+      suggestions = read_until(reader, "#{prompt}/bin/cat ~/.kw")
+      assert_includes suggestions, ".kward/"
+      assert_includes suggestions, ".kwsh\\ notes"
+      assert_includes suggestions, ".kwshrc.example"
+
+      [".kward/", ".kwsh\\ notes", ".kwshrc.example", ".kward/"].each do |candidate|
+        writer.write("\t")
+        read_until(reader, "#{prompt}/bin/cat ~/#{candidate}")
+      end
+      writer.write("\e[Z")
+      read_until(reader, "#{prompt}/bin/cat ~/.kwshrc.example")
+      writer.write("\e[Z")
+      read_until(reader, "#{prompt}/bin/cat ~/.kwsh\\ notes")
+      writer.write("\n")
+      read_until(reader, "\r\nselected-file-content\r\n")
+      read_until(reader, prompt)
+      exit_spike(reader, writer, pid)
+    end
+  end
+
+  def test_tab_extends_shared_prefix_and_starts_over_after_an_edit
+    prompt = "suggest> "
+    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt, setup: ->(home) {
+      File.write(File.join(home, "report-a"), "report-a-content\n")
+      File.write(File.join(home, "report-b"), "report-b-content\n")
+    }) do |reader, writer, pid|
+      writer.write("/bin/cat ~/re\t")
+      suggestions = read_until(reader, "#{prompt}/bin/cat ~/report-")
+      assert_includes suggestions, "report-a"
+      assert_includes suggestions, "report-b"
+
+      writer.write("b\t")
+      read_until(reader, "b ")
+      writer.write("\n")
+      read_until(reader, "\r\nreport-b-content\r\n")
+      read_until(reader, prompt)
+      exit_spike(reader, writer, pid)
+    end
+  end
+
   def test_ctrl_k_deletes_to_end_of_current_line_without_moving_cursor
     prompt = "kill-line> "
     with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|

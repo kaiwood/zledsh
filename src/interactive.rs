@@ -8,6 +8,7 @@ use std::sync::{
 };
 use std::{env, fs};
 
+use crate::completion;
 use crate::history::History;
 use crate::runtime::Invocation;
 use crate::shell_context::{LastCommand, ShellContext};
@@ -672,6 +673,40 @@ fn cut(
     remembered
 }
 
+struct CompletionCycle {
+    matches: completion::Matches,
+    anchor: usize,
+    selected: Option<usize>,
+}
+
+impl CompletionCycle {
+    fn advance(&mut self, line: &mut Vec<u8>, cursor: usize, backwards: bool) -> usize {
+        let len = self.matches.len();
+        let index = match (self.selected, backwards) {
+            (None, false) => 0,
+            (None | Some(0), true) => len - 1,
+            (Some(index), false) => (index + 1) % len,
+            (Some(index), true) => index - 1,
+        };
+        self.selected = Some(index);
+        let suffix = self.matches.extension(self.selected);
+        line.splice(self.anchor..cursor, suffix.bytes());
+        self.anchor + suffix.len()
+    }
+}
+
+fn show_suggestions(echo: &mut impl Write, matches: &completion::Matches) -> io::Result<()> {
+    const LIMIT: usize = 24;
+    echo.write_all(b"\r\n")?;
+    for label in matches.labels().take(LIMIT) {
+        write!(echo, "  {}", display(label.as_bytes()))?;
+    }
+    if matches.len() > LIMIT {
+        write!(echo, "  ({} more)", matches.len() - LIMIT)?;
+    }
+    echo.write_all(b"\r\n")
+}
+
 fn read_keys(
     input: &mut impl BufRead,
     echo: &mut impl Write,
@@ -685,12 +720,16 @@ fn read_keys(
     let mut consecutive_cut = false;
     let mut history_index = None;
     let mut saved_draft = (Vec::new(), 0);
+    let mut completion: Option<CompletionCycle> = None;
     echo.write_all(draft.as_bytes())?;
     echo.flush()?;
     let mut line = draft.into_bytes();
     let mut cursor = line.len();
     while let Some(mut key) = read_key(input, shell)? {
         let previous_cut = std::mem::take(&mut consecutive_cut);
+        if !matches!(key, Key::Byte(b'\t') | Key::BackTab) {
+            completion = None;
+        }
         if key == Key::Byte(18) {
             let Some(history) = history.as_deref_mut().filter(|history| !history.paused) else {
                 continue;
@@ -788,27 +827,39 @@ fn read_keys(
                 Paste::Rejected => echo.write_all(b"\x07")?,
                 Paste::End => return Ok(Line::End),
             },
-            Key::Byte(b'\t')
+            Key::Byte(b'\t') | Key::BackTab
                 if primary && (cursor == line.len() || line[cursor].is_ascii_whitespace()) =>
             {
-                let Some(mut suffix) = std::str::from_utf8(&line[..cursor])
-                    .ok()
-                    .and_then(|prefix| crate::completion::suffix(prefix, shell))
-                else {
-                    continue;
-                };
-                if cursor == line.len() {
-                    line.extend_from_slice(suffix.as_bytes());
-                    cursor = line.len();
-                    echo.write_all(suffix.as_bytes())?;
-                    echo.flush()?;
-                    continue;
+                if let Some(cycle) = &mut completion {
+                    cursor = cycle.advance(&mut line, cursor, key == Key::BackTab);
+                } else {
+                    let Some(matches) = std::str::from_utf8(&line[..cursor])
+                        .ok()
+                        .and_then(|prefix| completion::matches(prefix, shell))
+                    else {
+                        continue;
+                    };
+                    let mut suffix = matches.extension(None);
+                    if cursor < line.len() && suffix.ends_with(' ') {
+                        suffix.pop();
+                    }
+                    let anchor = cursor;
+                    let at_end = cursor == line.len();
+                    line.splice(cursor..cursor, suffix.bytes());
+                    cursor += suffix.len();
+                    if matches.len() > 1 {
+                        show_suggestions(echo, &matches)?;
+                        completion = Some(CompletionCycle {
+                            matches,
+                            anchor,
+                            selected: None,
+                        });
+                    } else if at_end {
+                        echo.write_all(suffix.as_bytes())?;
+                        echo.flush()?;
+                        continue;
+                    }
                 }
-                if suffix.ends_with(' ') {
-                    suffix.pop();
-                }
-                line.splice(cursor..cursor, suffix.bytes());
-                cursor += suffix.len();
             }
             Key::Up | Key::Down => {
                 let Some(history) = history.as_deref_mut().filter(|history| !history.paused) else {
@@ -878,6 +929,7 @@ enum Key {
     Home,
     End,
     Paste,
+    BackTab,
     Ignored,
 }
 
@@ -990,6 +1042,7 @@ fn read_escape(input: &mut impl BufRead) -> io::Result<Key> {
                 b"H" | b"1~" => Key::Home,
                 b"F" | b"4~" => Key::End,
                 b"200~" => Key::Paste,
+                b"Z" => Key::BackTab,
                 _ => Key::Ignored,
             });
         }

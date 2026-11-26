@@ -8,7 +8,7 @@ use std::{
 
 use crate::runtime::{BUILTINS, Invocation};
 
-pub fn suffix(line: &str, shell: &Invocation<'_>) -> Option<String> {
+pub(crate) fn matches(line: &str, shell: &Invocation<'_>) -> Option<Matches> {
     // Leave quoted and structured command lines to a later, parser-aware completer.
     if line.contains(['\'', '"', '\\', '$', ';', '|', '&', '<', '>', '\n']) {
         return None;
@@ -29,12 +29,13 @@ pub fn suffix(line: &str, shell: &Invocation<'_>) -> Option<String> {
             && !candidate.chars().any(char::is_control)
     });
     if token == "~" && matches.is_empty() {
-        return shell
+        if shell
             .variable("HOME")
-            .filter(|home| Path::new(home).is_dir())
-            .map(|_| "/".into());
-    }
-    if command && !token.contains('/') {
+            .is_some_and(|home| Path::new(&home).is_dir())
+        {
+            matches.push("~/".into());
+        }
+    } else if command && !token.contains('/') {
         if token.is_empty() {
             return None;
         }
@@ -87,28 +88,62 @@ pub fn suffix(line: &str, shell: &Invocation<'_>) -> Option<String> {
     }
     matches.sort_unstable();
     matches.dedup();
-    let first = matches.first()?;
-    let mut end = first.len();
-    for candidate in &matches[1..] {
-        end = first[..end]
-            .char_indices()
-            .zip(candidate.chars())
-            .take_while(|((_, a), b)| a == b)
-            .map(|((i, ch), _)| i + ch.len_utf8())
-            .last()
-            .unwrap_or(0);
+    (!matches.is_empty()).then_some(Matches {
+        token_len: token.len(),
+        candidates: matches,
+    })
+}
+
+pub(crate) struct Matches {
+    token_len: usize,
+    candidates: Vec<String>,
+}
+
+impl Matches {
+    pub(crate) fn len(&self) -> usize {
+        self.candidates.len()
     }
-    let mut suffix = String::new();
-    for ch in first.get(token.len()..end)?.chars() {
-        if ch.is_whitespace() || "\\'\"$`;|&<>()*?[]#!{}~".contains(ch) {
-            suffix.push('\\');
+
+    pub(crate) fn labels(&self) -> impl Iterator<Item = String> + '_ {
+        let parent_len = self.candidates[0][..self.token_len]
+            .rfind('/')
+            .map_or(0, |slash| slash + 1);
+        self.candidates
+            .iter()
+            .map(move |word| escape(&word[parent_len..]))
+    }
+
+    pub(crate) fn extension(&self, selection: Option<usize>) -> String {
+        let word = &self.candidates[selection.unwrap_or(0)];
+        let mut end = word.len();
+        if selection.is_none() {
+            for candidate in &self.candidates[1..] {
+                end = word[..end]
+                    .char_indices()
+                    .zip(candidate.chars())
+                    .take_while(|((_, a), b)| a == b)
+                    .map(|((i, ch), _)| i + ch.len_utf8())
+                    .last()
+                    .unwrap_or(0);
+            }
         }
-        suffix.push(ch);
+        let mut suffix = escape(&word[self.token_len..end]);
+        if self.len() == 1 && !word.ends_with('/') {
+            suffix.push(' ');
+        }
+        suffix
     }
-    if matches.len() == 1 && !first.ends_with('/') {
-        suffix.push(' ');
+}
+
+fn escape(text: &str) -> String {
+    let mut escaped = String::new();
+    for ch in text.chars() {
+        if ch.is_whitespace() || "\\'\"$`;|&<>()*?[]#!{}~".contains(ch) {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
     }
-    (!suffix.is_empty()).then_some(suffix)
+    escaped
 }
 
 pub(crate) fn run_callback(mut command: Command) -> io::Result<Vec<String>> {
