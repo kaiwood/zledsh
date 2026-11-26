@@ -40,7 +40,7 @@ Use the same syntax in your startup files, `zledsh -c`, redirected stdin, or at 
 
 Use `printf '%s\n' done >> run.log` to append without replacing the log. `<>file` opens or creates `file` for reading and writing without truncating it. `>|file` explicitly replaces the contents; it currently behaves like `>file` because `noclobber` is not implemented yet.
 
-Redirections are applied left to right: `tool >run.log 2>&1` sends both streams to the log, while `tool 2>&1 >run.log` leaves errors on the original stdout. Use `tool 3<input 0<&3` to copy fd 3 onto stdin, or `tool 3>&-` to close fd 3 for that command. These changes don't affect later commands.
+Command arguments expand before redirects open files, so a `$(...)` in an argument sees the original contents of a file the command redirects to. Redirections are applied left to right: `tool >run.log 2>&1` sends both streams to the log, while `tool 2>&1 >run.log` leaves errors on the original stdout. Use `tool 3<input 0<&3` to copy fd 3 onto stdin, or `tool 3>&-` to close fd 3 for that command. These changes don't affect later commands.
 
 Pass inline input to a command with a here-document:
 

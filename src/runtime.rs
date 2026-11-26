@@ -526,8 +526,22 @@ impl<'a> Invocation<'a> {
             return;
         }
         let command = &pipeline[0];
-        let mut descriptors = original.clone();
         let mut substitution_status = None;
+        let assignment_only =
+            !command.words.is_empty() && command.words.iter().all(|word| word.assignment);
+        let argv = if assignment_only {
+            Vec::new()
+        } else {
+            match self.expand_command_words(&command.words, &mut substitution_status) {
+                Ok(argv) => argv,
+                Err(error) => {
+                    report(&original[2], &error);
+                    self.status = 2;
+                    return;
+                }
+            }
+        };
+        let mut descriptors = original.clone();
         if let Err(error) = self.redirect(
             &command.redirects,
             &mut descriptors,
@@ -537,7 +551,7 @@ impl<'a> Invocation<'a> {
             self.status = 1;
             return;
         }
-        if !command.words.is_empty() && command.words.iter().all(|word| word.assignment) {
+        if assignment_only {
             for word in &command.words {
                 match self.expand(word, &mut substitution_status) {
                     Ok(fields) if fields.len() == 1 => self.assign(&fields[0]),
@@ -556,14 +570,6 @@ impl<'a> Invocation<'a> {
             self.status = substitution_status.unwrap_or(0);
             return;
         }
-        let argv = match self.expand_command_words(&command.words, &mut substitution_status) {
-            Ok(argv) => argv,
-            Err(error) => {
-                report(&descriptors[2], &error);
-                self.status = 2;
-                return;
-            }
-        };
         let mut argv = argv.as_slice();
         let mut bypass_functions = false;
         while let [prefix, rest @ ..] = argv {

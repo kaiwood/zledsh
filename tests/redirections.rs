@@ -65,6 +65,29 @@ fn failed_input_redirect_skips_the_command_and_leaves_input_intact() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("missing"));
 }
 
+// POSIX Shell Command Language 2.9.1: expand ordinary arguments before redirection.
+#[test]
+fn argument_substitution_reads_output_file_before_redirection_truncates_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("data");
+    for suffix in ["", " | /bin/cat"] {
+        fs::write(&file, b"original\n").unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
+            .current_dir(dir.path())
+            .env("HOME", dir.path())
+            .args([
+                "-c",
+                &format!(r#"printf '%s\n' "$(/bin/cat data)" >data{suffix}"#),
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert_eq!(fs::read(&file).unwrap(), b"original\n", "suffix {suffix:?}");
+    }
+}
+
 // POSIX Shell Command Language 2.7.2 and 2.7.3.
 #[test]
 fn append_preserves_existing_output_and_force_write_replaces_it() {
