@@ -75,7 +75,7 @@ impl Value<'_> {
 
 pub(crate) fn evaluate(
     source: &str,
-    variable: impl FnMut(&str, Option<i64>) -> Option<String>,
+    variable: impl FnMut(&str, Option<i64>) -> Result<Option<String>, &'static str>,
 ) -> Result<i64, &'static str> {
     let mut parser = Parser {
         rest: source,
@@ -93,7 +93,7 @@ struct Parser<'a, F> {
     variable: F,
 }
 
-impl<'a, F: FnMut(&str, Option<i64>) -> Option<String>> Parser<'a, F> {
+impl<'a, F: FnMut(&str, Option<i64>) -> Result<Option<String>, &'static str>> Parser<'a, F> {
     fn peek(&self) -> Result<Token<'a>, &'static str> {
         Ok(token(self.rest)?.0)
     }
@@ -115,7 +115,10 @@ impl<'a, F: FnMut(&str, Option<i64>) -> Option<String>> Parser<'a, F> {
         if !active {
             return Ok(0);
         }
-        let Some(text) = value.name.and_then(|name| (self.variable)(name, None)) else {
+        let Some(name) = value.name else {
+            return Ok(value.number);
+        };
+        let Some(text) = (self.variable)(name, None)? else {
             return Ok(value.number);
         };
         if text.trim().is_empty() {
@@ -211,7 +214,7 @@ impl<'a, F: FnMut(&str, Option<i64>) -> Option<String>> Parser<'a, F> {
                 binary(if power == 1 { &op[..op.len() - 1] } else { op }, lhs, rhs)?
             };
             if let Some(name) = name.filter(|_| active) {
-                (self.variable)(name, Some(result));
+                (self.variable)(name, Some(result))?;
             }
             left = Value::number(result);
         }

@@ -462,3 +462,61 @@ fn errexit_checks_the_final_and_or_command_and_can_be_disabled() {
         assert_output(output, status, stdout, "");
     }
 }
+
+#[test]
+fn readonly_preserves_values_across_assignment_unset_and_export() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+value="two words'"
+readonly fixed=$value missing
+readonly -p
+( fixed=changed; printf unexpected ) || printf 'assignment blocked\n'
+true | unset fixed
+printf 'worker status=%s\n' "$?"
+export fixed=changed || printf 'export assignment blocked\n'
+export fixed
+/usr/bin/printenv fixed
+unset fixed || printf 'unset blocked\n'
+printf '<%s>\n' "$fixed" "${missing-unset}"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        0,
+        "readonly fixed='two words'\\'''\nreadonly missing\nassignment blocked\nworker status=2\nexport assignment blocked\ntwo words'\nunset blocked\n<two words'>\n<unset>\n",
+        "zledsh: fixed: read-only variable\nzledsh: unset: fixed: read-only variable\nzledsh: export: fixed: read-only variable\nzledsh: unset: fixed: read-only variable\n",
+    );
+}
+
+#[test]
+fn readonly_rejects_indirect_writes_and_does_not_leak_a_function_local() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+x=outer
+f() { local x=inner; readonly x; printf '%s\n' "$x"; }
+f
+x=2
+readonly x y
+((x=3, changed=1)) || printf 'arithmetic blocked\n'
+( printf '%s' "${y:=value}" ) || printf 'parameter blocked\n'
+true | read x || printf 'read blocked\n'
+printf '%s:%s\n' "$x" "${changed-unset}"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        0,
+        "inner\narithmetic blocked\nparameter blocked\nread blocked\n2:unset\n",
+        "zledsh: arithmetic command: assignment to a read-only variable\nzledsh: y: read-only variable\nzledsh: read: x: read-only variable\n",
+    );
+}

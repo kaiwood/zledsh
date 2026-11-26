@@ -123,6 +123,7 @@ pub(crate) struct Invocation<'a> {
     functions: HashMap<String, Script>,
     completions: HashMap<String, String>,
     exported: HashSet<String>,
+    readonly: HashSet<String>,
     unset: HashSet<String>,
     substitution_depth: u8,
     shell_worker: bool,
@@ -145,6 +146,7 @@ struct SavedVariable {
     value: Option<String>,
     array: Option<BTreeMap<usize, String>>,
     exported: bool,
+    readonly: bool,
     unset: bool,
 }
 
@@ -162,6 +164,7 @@ struct PipelineVariables {
     ignore_errexit: bool,
     variables: HashMap<String, String>,
     exported: HashSet<String>,
+    readonly: HashSet<String>,
     unset: HashSet<String>,
 }
 
@@ -177,6 +180,7 @@ struct Substitution {
     aliases: HashMap<String, String>,
     functions: HashMap<String, Script>,
     exported: HashSet<String>,
+    readonly: HashSet<String>,
     unset: HashSet<String>,
     depth: u8,
     status: u8,
@@ -203,6 +207,7 @@ impl<'a> Invocation<'a> {
             functions: HashMap::new(),
             completions: HashMap::new(),
             exported: HashSet::new(),
+            readonly: HashSet::new(),
             unset: HashSet::new(),
             substitution_depth: 0,
             shell_worker: false,
@@ -480,7 +485,12 @@ impl<'a> Invocation<'a> {
                     self.status = 0;
                     self.loop_depth += 1;
                     for item in items {
-                        self.assign(&format!("{name}={item}"));
+                        if let Err(error) = self.assign_value(name, item) {
+                            report(&descriptors[2], &error);
+                            self.status = 2;
+                            self.check_errexit();
+                            break;
+                        }
                         self.run_with_descriptors(body, input, descriptors);
                         if !self.next_iteration() {
                             break;
@@ -653,6 +663,7 @@ impl<'a> Invocation<'a> {
         shell.shell_worker = true;
         shell.variables = state.variables;
         shell.exported = state.exported;
+        shell.readonly = state.readonly;
         shell.unset = state.unset;
         let mut descriptors = inherited_descriptors();
         for (fd, stream) in descriptors[..3].iter_mut().enumerate() {
@@ -710,7 +721,14 @@ impl<'a> Invocation<'a> {
         if assignment_only {
             for word in &command.words {
                 match self.expand_assignment(word, &mut substitution_status) {
-                    Ok(fields) if fields.len() == 1 => self.assign(&fields[0]),
+                    Ok(fields) if fields.len() == 1 => {
+                        if let Err(error) = self.assign(&fields[0]) {
+                            let error = self.parameter_error(error);
+                            report(&descriptors[2], &error);
+                            self.status = 2;
+                            return;
+                        }
+                    }
                     result => {
                         report(
                             &descriptors[2],
@@ -754,7 +772,16 @@ impl<'a> Invocation<'a> {
         if self.agent_command()
             && matches!(
                 name.as_str(),
-                "exit" | "fg" | "bg" | "wait" | "eval" | "." | "source" | "complete" | "set"
+                "exit"
+                    | "fg"
+                    | "bg"
+                    | "wait"
+                    | "eval"
+                    | "."
+                    | "source"
+                    | "complete"
+                    | "set"
+                    | "readonly"
             )
         {
             report(
@@ -916,6 +943,15 @@ impl<'a> Invocation<'a> {
                     }
                 };
             }
+            "readonly" => {
+                self.status = match self.mark_readonly(args, &descriptors[1]) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        report(&descriptors[2], &format!("readonly: {error}"));
+                        2
+                    }
+                };
+            }
             "export" => {
                 self.status = 0;
                 for arg in args {
@@ -928,8 +964,12 @@ impl<'a> Invocation<'a> {
                         self.status = 2;
                         break;
                     }
+                    if let Err(error) = self.assign(arg) {
+                        report(&descriptors[2], &format!("export: {error}"));
+                        self.status = 2;
+                        break;
+                    }
                     self.exported.insert(name.to_owned());
-                    self.assign(arg);
                 }
             }
             "unset" => {
@@ -939,6 +979,11 @@ impl<'a> Invocation<'a> {
                         name.strip_suffix(']').and_then(|name| name.split_once('['))
                     {
                         if let Ok(index) = index.parse::<usize>() {
+                            if let Err(error) = self.ensure_writable(array) {
+                                report(&descriptors[2], &format!("unset: {error}"));
+                                self.status = 2;
+                                break;
+                            }
                             if let Some(values) = self.arrays.get_mut(array) {
                                 values.remove(&index);
                             }
@@ -947,6 +992,11 @@ impl<'a> Invocation<'a> {
                     }
                     if !valid_name(name) {
                         report(&descriptors[2], "unset: expected a variable name");
+                        self.status = 2;
+                        break;
+                    }
+                    if let Err(error) = self.ensure_writable(name) {
+                        report(&descriptors[2], &format!("unset: {error}"));
                         self.status = 2;
                         break;
                     }
@@ -1090,6 +1140,11 @@ impl<'a> Invocation<'a> {
             } else {
                 self.unset.remove(&name);
             }
+            if saved.readonly {
+                self.readonly.insert(name.clone());
+            } else {
+                self.readonly.remove(&name);
+            }
             if saved.exported {
                 self.exported.insert(name);
             } else {
@@ -1101,6 +1156,7 @@ impl<'a> Invocation<'a> {
     }
 
     fn assign_array(&mut self, name: &str, words: &[Word], local: bool) -> Result<u8, String> {
+        self.ensure_writable(name)?;
         let mut status = None;
         let values = self.expand_words(words, &mut status)?;
         if local {
@@ -1122,6 +1178,7 @@ impl<'a> Invocation<'a> {
             value: self.variables.get(name).cloned(),
             array: self.arrays.get(name).cloned(),
             exported: self.exported.contains(name),
+            readonly: self.readonly.contains(name),
             unset: self.unset.contains(name),
         });
         Ok(())
@@ -1136,6 +1193,10 @@ impl<'a> Invocation<'a> {
             let (name, value) = arg.split_once('=').unwrap_or((arg, ""));
             if !valid_name(name) {
                 report(output, "local: expected a variable name or assignment");
+                return 2;
+            }
+            if let Err(error) = self.ensure_writable(name) {
+                report(output, &format!("local: {error}"));
                 return 2;
             }
             self.save_local(name).expect("local frame checked above");
@@ -1229,6 +1290,8 @@ impl<'a> Invocation<'a> {
             [path] => path.clone(),
             _ => return Err("expected at most one directory".into()),
         };
+        self.ensure_writable("PWD")?;
+        self.ensure_writable("OLDPWD")?;
         let previous = std::env::current_dir().map_err(|error| error.to_string())?;
         std::env::set_current_dir(&destination)
             .map_err(|error| format!("{destination}: {error}"))?;
@@ -1278,9 +1341,9 @@ impl<'a> Invocation<'a> {
                 .collect();
             variables.extend(self.variables.clone());
             for (name, value) in variables {
-                let quoted = value.replace('\'', "'\\''");
+                let quoted = quote_value(&value);
                 output
-                    .write(&format!("{name}='{quoted}'\n"))
+                    .write(&format!("{name}={quoted}\n"))
                     .map_err(|error| error.to_string())?;
             }
             return Ok(());
@@ -1423,11 +1486,11 @@ impl<'a> Invocation<'a> {
             if self.agent_command()
                 && matches!(
                     direct_name(&argv),
-                    Some("eval" | "." | "source" | "complete" | "set")
+                    Some("eval" | "." | "source" | "complete" | "set" | "readonly")
                 )
             {
                 return Err(io::Error::other(
-                    "eval, source, complete and set must be submitted by the user",
+                    "this builtin must be submitted by the user",
                 ));
             }
             let name = argv[0].clone();
@@ -1457,6 +1520,7 @@ impl<'a> Invocation<'a> {
                     ignore_errexit: self.ignore_errexit,
                     variables: self.variables.clone(),
                     exported: self.exported.clone(),
+                    readonly: self.readonly.clone(),
                     unset: self.unset.clone(),
                 })?;
                 let state_fd = process::duplicate(state.as_raw_fd())?;
@@ -1572,6 +1636,7 @@ impl<'a> Invocation<'a> {
         if !valid_name(name) {
             return Err("expected a variable name".into());
         }
+        self.ensure_writable(name)?;
         let mut characters = Vec::new();
         let mut line = String::new();
         let complete = 'lines: loop {
@@ -1608,10 +1673,51 @@ impl<'a> Invocation<'a> {
         Ok(complete)
     }
 
-    fn assign(&mut self, assignment: &str) {
-        if let Some((name, value)) = assignment.split_once('=') {
-            self.variables.insert(name.to_owned(), value.to_owned());
+    fn mark_readonly(&mut self, args: &[String], output: &Descriptor) -> Result<(), String> {
+        if args.is_empty() || args == ["-p"] {
+            let mut names: Vec<_> = self.readonly.iter().collect();
+            names.sort_unstable();
+            for name in names {
+                let binding = match self.variable(name) {
+                    Some(value) => format!("{name}={}", quote_value(&value)),
+                    None => name.clone(),
+                };
+                output
+                    .write(&format!("readonly {binding}\n"))
+                    .map_err(|error| error.to_string())?;
+            }
+            return Ok(());
         }
+        for arg in args.strip_prefix(&[String::from("--")]).unwrap_or(args) {
+            let name = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
+            if !valid_name(name) {
+                return Err("expected a variable name or assignment".into());
+            }
+            self.assign(arg)?;
+            self.readonly.insert(name.into());
+        }
+        Ok(())
+    }
+
+    fn ensure_writable(&self, name: &str) -> Result<(), String> {
+        if self.readonly.contains(name) {
+            Err(format!("{name}: read-only variable"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn assign(&mut self, assignment: &str) -> Result<(), String> {
+        if let Some((name, value)) = assignment.split_once('=') {
+            self.assign_value(name, value.into())?;
+        }
+        Ok(())
+    }
+
+    fn assign_value(&mut self, name: &str, value: String) -> Result<(), String> {
+        self.ensure_writable(name)?;
+        self.variables.insert(name.into(), value);
+        Ok(())
     }
 
     fn variable_os(&self, name: &str) -> Option<OsString> {
@@ -1656,7 +1762,8 @@ impl<'a> Invocation<'a> {
         let assignment_only = words.iter().all(|word| word.assignment);
         for word in words {
             if word.assignment
-                && (assignment_only || matches!(direct_name(&fields), Some("export" | "local")))
+                && (assignment_only
+                    || matches!(direct_name(&fields), Some("export" | "local" | "readonly")))
             {
                 fields.extend(self.expand_assignment(word, status)?);
             } else {
@@ -1719,6 +1826,7 @@ impl<'a> Invocation<'a> {
         shell.aliases = saved.aliases;
         shell.functions = saved.functions;
         shell.exported = saved.exported;
+        shell.readonly = saved.readonly;
         shell.unset = saved.unset;
         shell.substitution_depth = saved.depth;
         shell.status = saved.status;
@@ -1812,6 +1920,7 @@ impl<'a> Invocation<'a> {
             aliases: self.aliases.clone(),
             functions: self.functions.clone(),
             exported: self.exported.clone(),
+            readonly: self.readonly.clone(),
             unset: self.unset.clone(),
             depth: self.substitution_depth + 1,
             status: self.status,
@@ -1928,10 +2037,11 @@ impl<'a> Invocation<'a> {
         let expression = self.expand(expression, status)?.join(" ");
         crate::arithmetic::evaluate(&expression, |name, assignment| {
             if let Some(value) = assignment {
-                self.variables.insert(name.into(), value.to_string());
-                None
+                self.assign_value(name, value.to_string())
+                    .map_err(|_| "assignment to a read-only variable")?;
+                Ok(None)
             } else {
-                self.variable(name)
+                Ok(self.variable(name))
             }
         })
         .map_err(str::to_owned)
@@ -2148,7 +2258,9 @@ impl<'a> Invocation<'a> {
                                     "{name}: cannot assign to this parameter"
                                 )));
                             }
-                            self.variables.insert(name.clone(), expanded.clone());
+                            if let Err(error) = self.assign_value(name, expanded.clone()) {
+                                return Err(self.parameter_error(error));
+                            }
                             field.push(fragment(expanded));
                             continue;
                         }
@@ -2335,9 +2447,9 @@ fn here_document_error(error: io::Error) -> String {
 }
 
 pub(crate) const BUILTINS: &[&str] = &[
-    "exit", "cd", "pwd", "export", "unset", "read", "printf", "fg", "alias", "unalias", "jobs",
-    "bg", "wait", "command", ":", "true", "false", "eval", "break", "continue", ".", "source",
-    "local", "set", "shift", "return", "complete", "compgen",
+    "exit", "cd", "pwd", "export", "readonly", "unset", "read", "printf", "fg", "alias", "unalias",
+    "jobs", "bg", "wait", "command", ":", "true", "false", "eval", "break", "continue", ".",
+    "source", "local", "set", "shift", "return", "complete", "compgen",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {
@@ -2372,6 +2484,10 @@ fn alias_words(value: &str) -> Result<Vec<Word>, ParseError> {
         }
     }
     Err("alias replacement must be a simple command without redirects".into())
+}
+
+fn quote_value(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn valid_name(name: &str) -> bool {
