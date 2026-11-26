@@ -92,3 +92,42 @@ EOF
         "<report-?.txt>\n<report-[12].txt>\n<report-1.txt>\n<report-2.txt>\nonly the literal file\nfile contents\nreport-[12].txt\nreport-?.txt\n",
     );
 }
+
+#[test]
+fn matches_are_sorted_per_pattern_in_c_locale() {
+    assert_paths(
+        &[
+            "order-zoo",
+            "order-apple",
+            "order-Zebra",
+            "order-2",
+            "a/end",
+            "a-/end",
+        ],
+        r#"printf '<%s>\n' order-z* order-* a*//end"#,
+        "<order-zoo>\n<order-2>\n<order-Zebra>\n<order-apple>\n<order-zoo>\n<a-//end>\n<a//end>\n",
+    );
+}
+
+#[test]
+fn globbing_follows_splitting_but_never_resplits_or_reglobs_the_matches() {
+    assert_paths(
+        &["item one.txt", "item*.txt", "item2.txt", "next space.log"],
+        r#"patterns='item*.txt:next*.log'; IFS=' :'
+show() { printf 'argc=%s\n' "$#"; for arg; do printf '<%s>\n' "$arg"; done; }
+show $patterns "$patterns" item"*".txt
+"#,
+        "argc=6\n<item one.txt>\n<item*.txt>\n<item2.txt>\n<next space.log>\n<item*.txt:next*.log>\n<item*.txt>\n",
+    );
+}
+
+#[test]
+fn backslashes_from_unquoted_expansions_can_escape_pattern_characters() {
+    assert_paths(
+        &["q*1.txt", "q21.txt", "r\\1.txt"],
+        r#"match='q\*?.txt'; missing='q\*?.missing'; inactive='q\*1.txt'
+printf '<%s>\n' $match $missing $inactive 'r\'?.txt
+"#,
+        "<q*1.txt>\n<q\\*?.missing>\n<q\\*1.txt>\n<r\\1.txt>\n",
+    );
+}

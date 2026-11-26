@@ -122,7 +122,8 @@ pub(crate) fn expand(Pattern(components): Pattern) -> Result<Vec<String>, String
     if check_literal_tail {
         paths.retain(|path| fs::symlink_metadata(path).is_ok());
     }
-    paths.sort_unstable();
+    // POSIX/C collation order. Per-shell locale selection is not implemented.
+    paths.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
     paths
         .into_iter()
         .map(|path| {
