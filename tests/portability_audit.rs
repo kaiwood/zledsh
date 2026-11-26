@@ -81,3 +81,105 @@ printf '%s\n' *.txt
         assert!(output.stderr.is_empty(), "{output:?}");
     }
 }
+
+#[test]
+fn noninteractive_modes_do_not_load_startup_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    fs::create_dir(home.join(".kward")).unwrap();
+    for file in [".kward/zledshrc", ".zledshrc", "env"] {
+        fs::write(home.join(file), "printf unexpected; exit 81\n").unwrap();
+    }
+    fs::write(home.join("script"), "printf script\n").unwrap();
+    for (args, stdout) in [
+        (&["-c", "printf command"][..], b"command".as_slice()),
+        (&["script"], b"script".as_slice()),
+        (&["-s"], b"script".as_slice()),
+    ] {
+        let output = shell(home)
+            .env("ENV", home.join("env"))
+            .stdin(fs::File::open(home.join("script")).unwrap())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, stdout);
+        assert!(output.stderr.is_empty(), "{output:?}");
+    }
+}
+
+#[test]
+fn input_accepts_long_lines_but_reports_descriptor_and_nesting_limits() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let expected = "x".repeat(128 * 1024);
+    fs::write(home.join("long"), format!("printf '%s' '{expected}'\n")).unwrap();
+    let output = shell(home).arg("long").output().unwrap();
+    assert!(output.status.success(), "{:?}", output.stderr);
+    assert_eq!(output.stdout, expected.as_bytes());
+    assert!(output.stderr.is_empty());
+
+    for (source, diagnostic) in [
+        (
+            "printf unexpected 10> file".into(),
+            "only descriptors 0 through 9 are supported",
+        ),
+        (
+            format!("{}: {}", "{ ".repeat(40), "; } ".repeat(40)),
+            "compound commands nested too deeply",
+        ),
+    ] {
+        let output = shell(home).args(["-c", &source]).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(diagnostic),
+            "{output:?}"
+        );
+    }
+    assert!(!home.join("file").exists());
+}
+
+#[test]
+fn executable_format_failures_never_fall_back_to_an_interpreter() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    for (name, content) in [
+        ("text", b"printf unexpected > marker\n".as_slice()),
+        ("binary", b"\0not-an-executable".as_slice()),
+        (
+            "bad-interpreter",
+            b"#!./missing-interpreter\nprintf unexpected > marker\n".as_slice(),
+        ),
+    ] {
+        let path = home.join(name);
+        fs::write(&path, content).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fs::write(home.join("not-executable"), b"printf unexpected > marker\n").unwrap();
+    for (name, status, diagnostic) in [
+        ("text", 126, "cannot execute"),
+        ("binary", 126, "cannot execute"),
+        ("bad-interpreter", 126, "cannot execute"),
+        ("not-executable", 126, "cannot execute"),
+        ("missing", 127, "command not found"),
+    ] {
+        let output = shell(home)
+            .args(["-c", &format!("./{name}")])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(status), "{name}: {output:?}");
+        assert!(output.stdout.is_empty());
+        assert_eq!(
+            output.stderr,
+            format!("zledsh: ./{name}: {diagnostic}\n").as_bytes()
+        );
+    }
+    assert!(!home.join("marker").exists());
+    let output = shell(home).arg("text").output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stdout.is_empty() && output.stderr.is_empty());
+    assert_eq!(fs::read(home.join("marker")).unwrap(), b"unexpected");
+}
