@@ -9,6 +9,7 @@ pub(crate) struct Foreground {
     shell_group: Option<libc::pid_t>,
     jobs: Vec<Job>,
     next: usize,
+    retained_statuses: usize,
     pub last_background: Option<libc::pid_t>,
 }
 
@@ -29,6 +30,10 @@ impl Foreground {
             shell_group: None,
             jobs: Vec::new(),
             next: 1,
+            retained_statuses: usize::try_from(unsafe { libc::sysconf(libc::_SC_CHILD_MAX) })
+                .ok()
+                .filter(|&limit| limit > 0)
+                .unwrap_or(128),
             last_background: None,
         }
     }
@@ -50,12 +55,13 @@ impl Foreground {
                         job.stopped = false;
                     }
                     Some(Outcome::Stopped(_)) => job.stopped = true,
-                    _ => {}
+                    None => job.stopped = false,
+                    Some(Outcome::TimedOut) => unreachable!(),
                 }
             }
         }
         // Preserve a bounded set of completed statuses for a later wait.
-        while self.jobs.iter().filter(|job| job.done.is_some()).count() > 128 {
+        while self.jobs.iter().filter(|job| job.done.is_some()).count() > self.retained_statuses {
             let first_done = self.jobs.iter().position(|job| job.done.is_some()).unwrap();
             self.jobs.remove(first_done);
         }
@@ -83,21 +89,51 @@ impl Foreground {
             pipeline,
             stopped: modes.is_some(),
             done: None,
+            notified: false,
             modes,
         });
         id
     }
 
-    pub fn listing(&mut self) -> io::Result<String> {
+    pub fn notify(&mut self) -> io::Result<()> {
         self.refresh()?;
+        if self.has_terminal() {
+            for job in &mut self.jobs {
+                if let Some(code) = job.done.filter(|_| !job.notified) {
+                    eprintln!(
+                        "[{}] {} {}",
+                        job.id,
+                        done_state(code),
+                        job.pipeline.last_pid()
+                    );
+                    job.notified = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn listing(&mut self, selectors: &[String]) -> io::Result<String> {
+        self.refresh()?;
+        let mut indices = if selectors.is_empty() {
+            (0..self.jobs.len())
+                .filter(|&index| !self.jobs[index].notified)
+                .collect()
+        } else {
+            selectors
+                .iter()
+                .map(|selector| self.select(Some(selector), true))
+                .collect::<io::Result<Vec<_>>>()?
+        };
         let mut output = String::new();
-        for job in &self.jobs {
-            let state = if job.done.is_some() {
-                "Done"
+        for &index in &indices {
+            let job = &self.jobs[index];
+            let state = if let Some(code) = job.done {
+                done_state(code)
             } else if job.stopped {
-                "Stopped"
+                "Stopped".into()
             } else {
-                "Running"
+                "Running".into()
             };
             output.push_str(&format!(
                 "[{}] {state} {}\n",
@@ -105,23 +141,43 @@ impl Foreground {
                 job.pipeline.last_pid()
             ));
         }
+        indices.sort_unstable();
+        indices.dedup();
+        for index in indices.into_iter().rev() {
+            if self.jobs[index].done.is_some() {
+                self.jobs.remove(index);
+            }
+        }
         Ok(output)
     }
 
     fn select(&self, selector: Option<&str>, include_done: bool) -> io::Result<usize> {
-        self.jobs
-            .iter()
-            .rposition(|job| {
-                (include_done || job.done.is_none())
-                    && match selector {
-                        None | Some("%+") => true,
-                        Some(value) if value.starts_with('%') => {
-                            value[1..].parse::<usize>() == Ok(job.id)
-                        }
-                        Some(value) => value.parse::<libc::pid_t>() == Ok(job.pipeline.last_pid()),
+        let eligible = |job: &Job| include_done || job.done.is_none();
+        let index = match selector {
+            None | Some("%" | "%+" | "%%" | "%-") => {
+                // A suspended job takes precedence over a running job.
+                let matching = |stopped| {
+                    self.jobs
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .filter(move |(_, job)| job.done.is_none() && job.stopped == stopped)
+                        .map(|(index, _)| index)
+                };
+                matching(true)
+                    .chain(matching(false))
+                    .nth(usize::from(selector == Some("%-")))
+            }
+            Some(value) => self.jobs.iter().rposition(|job| {
+                eligible(job)
+                    && if let Some(number) = value.strip_prefix('%') {
+                        number.parse::<usize>() == Ok(job.id)
+                    } else {
+                        value.parse::<libc::pid_t>() == Ok(job.pipeline.last_pid())
                     }
-            })
-            .ok_or_else(|| io::Error::other("no matching job"))
+            }),
+        };
+        index.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no matching job"))
     }
 
     pub fn background(&mut self, selector: Option<&str>) -> io::Result<u8> {
@@ -134,49 +190,47 @@ impl Foreground {
         Ok(0)
     }
 
-    pub fn wait_background(&mut self, selector: Option<&str>) -> io::Result<u8> {
+    pub fn wait_background(&mut self, selectors: &[String]) -> io::Result<u8> {
         self.refresh()?;
-        if selector.is_some() {
-            let index = self.select(selector, true)?;
-            return self.wait_job(index);
-        }
-        for index in (0..self.jobs.len()).rev() {
-            if !self.jobs[index].stopped {
-                self.wait_job(index)?;
-                if let Some(signal) = crate::traps::pending() {
-                    return Ok(128 + signal as u8);
+        let mut status = 0;
+        if selectors.is_empty() {
+            while !self.jobs.is_empty() {
+                if let Err(signal) = self.wait_job(self.jobs.len() - 1)? {
+                    return Ok(128 + signal);
+                }
+            }
+        } else {
+            for selector in selectors {
+                match self.select(Some(selector), true) {
+                    Ok(index) => match self.wait_job(index)? {
+                        Ok(code) => status = code,
+                        Err(signal) => return Ok(128 + signal),
+                    },
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => status = 127,
+                    Err(error) => return Err(error),
                 }
             }
         }
-        Ok(0)
+        Ok(status)
     }
 
-    fn wait_job(&mut self, index: usize) -> io::Result<u8> {
+    // Distinguish a trap interrupt from a child's signal-derived exit status.
+    fn wait_job(&mut self, index: usize) -> io::Result<Result<u8, u8>> {
         let job = &mut self.jobs[index];
-        if let Some(code) = job.done {
-            self.jobs.remove(index);
-            return Ok(code);
-        }
-        let outcome = loop {
+        let code = loop {
             if let Some(signal) = crate::traps::pending() {
-                return Ok(128 + signal as u8);
+                return Ok(Err(signal as u8));
             }
-            if let Some(outcome) = job.pipeline.poll()? {
-                break outcome;
+            if let Some(code) = job.done {
+                break code;
+            }
+            if let Some(Outcome::Exited { code, .. }) = job.pipeline.poll()? {
+                break code;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         };
-        match outcome {
-            Outcome::Exited { code, .. } => {
-                self.jobs.remove(index);
-                Ok(code)
-            }
-            Outcome::Stopped(code) => {
-                job.stopped = true;
-                Ok(code)
-            }
-            Outcome::TimedOut => unreachable!(),
-        }
+        self.jobs.remove(index);
+        Ok(Ok(code))
     }
 
     fn terminal(&self) -> io::Result<ShellTerminal> {
@@ -342,6 +396,7 @@ struct Job {
     modes: Option<libc::termios>,
     stopped: bool,
     done: Option<u8>,
+    notified: bool,
 }
 
 impl Job {
@@ -350,6 +405,14 @@ impl Job {
         self.pipeline.resumed();
         self.stopped = false;
         Ok(())
+    }
+}
+
+fn done_state(code: u8) -> String {
+    if code == 0 {
+        "Done".into()
+    } else {
+        format!("Done({code})")
     }
 }
 

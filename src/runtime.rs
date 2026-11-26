@@ -1369,22 +1369,22 @@ impl<'a> Invocation<'a> {
                     .foreground
                     .get_or_insert_with(crate::foreground::Foreground::noninteractive);
                 let selector = args.first().map(String::as_str);
-                let result = if args.len() > 1 || (name == "jobs" && selector.is_some()) {
+                let result = if matches!(name.as_str(), "fg" | "bg") && args.len() > 1 {
                     Err(io::Error::other("unexpected job arguments"))
                 } else {
                     match name.as_str() {
                         "fg" => jobs.resume(selector),
                         "bg" => jobs.background(selector),
-                        "wait" => jobs.wait_background(selector),
+                        "wait" => jobs.wait_background(args),
                         _ => jobs
-                            .listing()
+                            .listing(args)
                             .and_then(|text| descriptors[1].write(&text))
                             .map(|()| 0),
                     }
                 };
                 self.status = result.unwrap_or_else(|error| {
                     report(&descriptors[2], &format!("{name}: {error}"));
-                    if name == "wait" { 127 } else { 1 }
+                    1
                 });
             }
             _ => self.status = self.external(argv, descriptors),

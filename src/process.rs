@@ -434,17 +434,15 @@ impl Pipeline {
 
     fn collect(&mut self, nonblocking: bool) -> io::Result<Option<Outcome>> {
         loop {
-            let Some(&(pid, _)) = self
+            let running = self
                 .children
                 .iter()
-                .find(|(_, state)| matches!(state, Member::Running))
-            else {
-                if let Some(stop_signal) = self.children.iter().find_map(|(_, state)| match state {
-                    Member::Stopped(signal) => Some(*signal),
-                    _ => None,
-                }) {
-                    return Ok(Some(Outcome::Stopped(128 + stop_signal)));
-                }
+                .find_map(|&(pid, ref member)| matches!(member, Member::Running).then_some(pid));
+            let stopped = self.children.iter().find_map(|(_, member)| match member {
+                Member::Stopped(signal) => Some(*signal),
+                _ => None,
+            });
+            if running.is_none() && stopped.is_none() {
                 // The option is fixed at launch, including for jobs collected later.
                 let last = self.children.last();
                 let status = if self.pipefail {
@@ -464,19 +462,32 @@ impl Pipeline {
                     code: status_code(status),
                     signaled: status.signal().is_some(),
                 }));
-            };
-            let polling = if nonblocking { libc::WNOHANG } else { 0 };
-            let (pid, status) = if let Some(group) = self.group {
-                wait_pid(-group, libc::WUNTRACED | polling)?
+            }
+            // Drain queued continue/exit events even when every live member
+            // was last seen stopped (an external SIGCONT may have resumed it).
+            let polling = if nonblocking || running.is_none() {
+                libc::WNOHANG
             } else {
-                wait_pid(pid, polling)?
+                0
+            };
+            let (pid, status) = if let Some(group) = self.group {
+                wait_pid(-group, libc::WUNTRACED | libc::WCONTINUED | polling)?
+            } else {
+                wait_pid(
+                    running.expect("ungrouped members are not tracked while stopped"),
+                    polling,
+                )?
             };
             if pid == 0 {
-                return Ok(None);
+                return Ok(stopped
+                    .filter(|_| running.is_none())
+                    .map(|signal| Outcome::Stopped(128 + signal)));
             }
             if let Some((_, member)) = self.children.iter_mut().find(|(child, _)| *child == pid) {
                 if libc::WIFSTOPPED(status) {
                     *member = Member::Stopped(libc::WSTOPSIG(status) as u8);
+                } else if libc::WIFCONTINUED(status) {
+                    *member = Member::Running;
                 } else {
                     *member = Member::Done(status);
                 }

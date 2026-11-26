@@ -1059,3 +1059,63 @@ fn exit_trap_runs_on_stdin_eof_and_named_script_errors() {
         "{output:?}"
     );
 }
+
+#[test]
+fn wait_collects_each_operand_and_returns_the_last_status() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+exit 17 & first=$!
+exit 23 & second=$!
+wait "$first" 0 "$second"
+printf 'last=%s\n' "$?"
+wait "$first" "$second"
+printf 'consumed=%s\n' "$?"
+exit 31 & third=$!
+wait
+printf 'all=%s\n' "$?"
+wait "$third"
+printf 'discarded=%s\n' "$?"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        0,
+        "last=23\nconsumed=127\nall=0\ndiscarded=127\n",
+        "",
+    );
+}
+
+#[test]
+fn wait_for_stopped_job_collects_exit_after_external_continue() {
+    let home = tempfile::tempdir().unwrap();
+    let worker = home.path().join("stop");
+    fs::write(&worker, "kill -STOP \"$$\"\nexit 19\n").unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+/bin/sh ./stop & pid=$!
+# Wait until the foreground job table has observed the stop before resuming.
+i=0
+while [ "$i" -lt 50 ]; do
+    jobs %1 > status
+    /usr/bin/grep -q Stopped status && break
+    i=$((i + 1))
+    /bin/sleep 0.02
+done
+if [ "$i" -eq 50 ]; then /bin/kill -KILL "$pid"; exit 2; fi
+(/bin/sleep 0.2; /bin/kill -CONT "$pid") &
+wait "$pid"
+printf 'exit=%s\n' "$?"
+wait
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(output, 0, "exit=19\n", "");
+}

@@ -89,3 +89,47 @@ fn foreground_child_inherits_descriptor_nine() {
 mod assistant;
 #[path = "terminal/editor.rs"]
 mod editor;
+
+#[test]
+fn jobs_selects_a_stopped_current_job_and_a_running_previous_job() {
+    let mut tty = Terminal::start("select> ", &[], |home| {
+        executable(
+            &home.join("stop"),
+            "#!/bin/sh\nprintf 'ready to stop\\n'\nkill -STOP \"$$\"\nexit 9\n",
+        );
+    });
+    tty.expect("select> ");
+    tty.send("./stop\n");
+    tty.expect("Stopped\r\n");
+    tty.expect("select> ");
+    tty.send("/bin/sleep 30 &\n");
+    tty.expect("select> ");
+    tty.send("jobs %%; jobs %-\n");
+    tty.expect("\r\n[1] Stopped ");
+    tty.expect("\r\n[2] Running ");
+    tty.expect("select> ");
+    tty.send("fg %%; printf 'resumed=%s\\n' \"$?\"\n");
+    tty.expect("\r\nresumed=9\r\n");
+    tty.expect("select> ");
+    tty.send("/bin/kill \"$!\"; wait \"$!\"\n");
+    tty.expect("select> ");
+    tty.finish();
+}
+
+#[test]
+fn completion_notice_is_printed_once_and_preserves_the_wait_status() {
+    let mut tty = Terminal::start("notice> ", &[], |_| {});
+    tty.expect("notice> ");
+    // Wait for a later foreground command to return so the first job can
+    // complete before the next prompt, without needing an idle redraw.
+    tty.send("exit 23 & saved=$!; /bin/sleep 0.2\n");
+    tty.expect("\r\n[1] Done(23) ");
+    tty.expect("notice> ");
+    tty.send(":\n");
+    let next_prompt = tty.expect("notice> ");
+    assert!(!next_prompt.contains("Done"), "{next_prompt:?}");
+    tty.send("wait \"$saved\"; printf 'first=%s\\n' \"$?\"; wait \"$saved\"; printf 'second=%s\\n' \"$?\"\n");
+    tty.expect("\r\nfirst=23\r\nsecond=127\r\n");
+    tty.expect("notice> ");
+    tty.finish();
+}

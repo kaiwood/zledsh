@@ -101,7 +101,7 @@ fn run_shell(
     let mut conversation = chatgpt::Conversation::default();
     while !invocation.exited {
         if let Some(foreground) = &mut invocation.foreground {
-            foreground.refresh()?;
+            foreground.notify()?;
         }
         let mut prompt = crate::prompt::render(invocation, !source.is_empty(), history.next);
         if history.paused {
