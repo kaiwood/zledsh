@@ -658,3 +658,35 @@ complete -F _git_branches git
     );
     tty.finish();
 }
+
+#[test]
+fn history_status_does_not_record_controls_and_respects_the_limit() {
+    let mut tty = Terminal::start(
+        "limited> ",
+        &[("HISTSIZE", "3"), ("HISTFILE", "history.jsonl")],
+        |_| {},
+    );
+    tty.expect("limited> ");
+    tty.send("history status\n");
+    tty.expect("\r\nShell history is recording.\r\n");
+    tty.expect("limited> ");
+    for word in ["first", "second", "third"] {
+        tty.send(&format!("/bin/echo {word}\n"));
+        tty.expect(&format!("\r\n{word}\r\n"));
+        tty.expect("limited> ");
+    }
+    tty.send("history pause\n");
+    tty.expect("[private] limited> ");
+    tty.send("history status\n");
+    tty.expect("\r\nShell history is paused.\r\n");
+    tty.expect("[private] limited> ");
+    tty.send("history resume\n");
+    tty.expect("\x1b[?2004hlimited> ");
+    let home = tty.finish();
+    let contents = fs::read_to_string(home.path().join("history.jsonl")).unwrap();
+    let commands: Vec<_> = contents
+        .lines()
+        .map(|line| serde_json::from_str::<(usize, String)>(line).unwrap().1)
+        .collect();
+    assert_eq!(commands, ["/bin/echo second", "/bin/echo third", "exit 0"]);
+}
