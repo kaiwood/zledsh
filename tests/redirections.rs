@@ -513,3 +513,73 @@ printf reset > existing
     assert_eq!(fs::read(dir.path().join("fresh")).unwrap(), b"new");
     assert!(!dir.path().join("missing").exists());
 }
+
+#[test]
+fn exec_redirections_persist_across_lists_and_nested_execution() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
+        .current_dir(dir.path())
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("PATH", "/usr/bin:/bin")
+        .args([
+            "-c",
+            r#"
+exec 3>log && printf 'first\n' >&3
+f() { exec 4>&3; }
+f
+( exec 3>isolated; printf 'child\n' >&3 )
+eval 'exec 3>&-
+printf "second\n" >&4'
+/bin/echo third >&4
+printf 'bad\n' >&3 || printf 'closed\n'
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"closed\n");
+    assert_eq!(output.stderr, b"zledsh: 3: bad file descriptor\n");
+    assert_eq!(
+        fs::read(dir.path().join("log")).unwrap(),
+        b"first\nsecond\nthird\n"
+    );
+    assert_eq!(fs::read(dir.path().join("isolated")).unwrap(), b"child\n");
+}
+
+#[test]
+fn exec_stdin_redirect_changes_the_input_for_commands_and_stdin_scripts() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("data"), b"first\nsecond\n").unwrap();
+    fs::write(dir.path().join("next"), b"printf 'replacement\\n'\n").unwrap();
+    let shell = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_zledsh"));
+        command
+            .current_dir(dir.path())
+            .env_clear()
+            .env("HOME", dir.path());
+        command
+    };
+    let output = shell()
+        .args([
+            "-c",
+            r#"exec < data; read -r line; printf '%s\n' "$line"; /bin/cat"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"first\nsecond\n");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    fs::write(
+        dir.path().join("initial"),
+        b"exec < next\nprintf unexpected\n",
+    )
+    .unwrap();
+    let output = shell()
+        .stdin(fs::File::open(dir.path().join("initial")).unwrap())
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"replacement\n");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}

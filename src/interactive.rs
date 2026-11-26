@@ -130,7 +130,7 @@ fn run_shell(
             }
         } else {
             write_prompt(&mut io::stderr().lock(), &prompt)?;
-            if input.read_line(&mut source)? == 0 {
+            if invocation.read_stdin_line(input, &mut source)? == 0 {
                 break;
             }
         }

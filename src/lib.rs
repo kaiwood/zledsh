@@ -302,7 +302,7 @@ fn run_input(
     while !invocation.exited {
         let count = match &mut script {
             Some(script) => script.read_line(&mut source),
-            None => input.read_line(&mut source),
+            None => invocation.read_stdin_line(input, &mut source),
         }
         .map_err(|error| error.to_string())?;
         if count == 0 && source.is_empty() {

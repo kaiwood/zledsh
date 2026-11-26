@@ -118,6 +118,8 @@ pub(crate) struct Invocation<'a> {
     name: &'a str,
     args: Vec<String>,
     getopts_offset: usize,
+    persistent_fds: Descriptors,
+    fd_versions: [u64; crate::SHELL_FDS],
     variables: HashMap<String, String>,
     arrays: HashMap<String, BTreeMap<usize, String>>,
     aliases: HashMap<String, String>,
@@ -206,6 +208,8 @@ impl<'a> Invocation<'a> {
             name,
             args: args.to_vec(),
             getopts_offset: 0,
+            persistent_fds: inherited_descriptors(),
+            fd_versions: [0; crate::SHELL_FDS],
             variables: HashMap::from([
                 ("IFS".into(), DEFAULT_IFS.into()),
                 ("OPTIND".into(), "1".into()),
@@ -329,7 +333,7 @@ impl<'a> Invocation<'a> {
     }
 
     pub fn run_source(&mut self, source: &str, input: &mut impl BufRead) -> Result<(), String> {
-        self.run_source_with_descriptors(source, input, &inherited_descriptors())
+        self.run_source_with_descriptors(source, input, &self.persistent_fds.clone())
     }
 
     fn run_source_with_descriptors(
@@ -338,11 +342,15 @@ impl<'a> Invocation<'a> {
         input: &mut dyn BufRead,
         descriptors: &Descriptors,
     ) -> Result<(), String> {
+        let versions = self.fd_versions;
         let mut pending = String::new();
         for line in source.split_inclusive('\n') {
             pending.push_str(line);
             match self.parse(&pending) {
-                Ok(commands) => self.run_with_descriptors(&commands, input, descriptors),
+                Ok(commands) => {
+                    let current = self.updated_descriptors(descriptors, versions);
+                    self.run_with_descriptors(&commands, input, &current);
+                }
                 Err(ParseError::Incomplete(_)) => continue,
                 Err(error) => return Err(error.message().to_owned()),
             }
@@ -381,7 +389,7 @@ impl<'a> Invocation<'a> {
     }
 
     pub fn run(&mut self, script: &[Statement], input: &mut impl BufRead) {
-        self.run_with_descriptors(script, input, &inherited_descriptors());
+        self.run_with_descriptors(script, input, &self.persistent_fds.clone());
     }
 
     fn run_with_descriptors(
@@ -390,10 +398,14 @@ impl<'a> Invocation<'a> {
         input: &mut dyn BufRead,
         descriptors: &Descriptors,
     ) {
+        let versions = self.fd_versions;
         for statement in script {
             if self.interrupted() {
                 break;
             }
+            let base = descriptors;
+            let current = self.updated_descriptors(base, versions);
+            let descriptors = &current;
             match statement {
                 Statement::Pipeline(pipeline) => {
                     self.run_pipeline_with_descriptors(pipeline, input, descriptors);
@@ -459,6 +471,8 @@ impl<'a> Invocation<'a> {
                             break;
                         }
                         if (self.status == 0) == *on_success {
+                            let current = self.updated_descriptors(base, versions);
+                            let descriptors = &current;
                             let command = std::slice::from_ref(statement);
                             if index + 1 == rest.len() {
                                 self.run_with_descriptors(command, input, descriptors);
@@ -504,7 +518,11 @@ impl<'a> Invocation<'a> {
                             self.check_errexit();
                             break;
                         }
-                        self.run_with_descriptors(body, input, descriptors);
+                        self.run_with_descriptors(
+                            body,
+                            input,
+                            &self.updated_descriptors(base, versions),
+                        );
                         if !self.next_iteration() {
                             break;
                         }
@@ -519,7 +537,11 @@ impl<'a> Invocation<'a> {
                     let mut last = 0;
                     self.loop_depth += 1;
                     loop {
-                        self.run_tested_list(condition, input, descriptors);
+                        self.run_tested_list(
+                            condition,
+                            input,
+                            &self.updated_descriptors(base, versions),
+                        );
                         if self.interrupted() {
                             last = self.status;
                             if self.next_iteration() {
@@ -530,7 +552,11 @@ impl<'a> Invocation<'a> {
                         if (self.status != 0) != *until {
                             break;
                         }
-                        self.run_with_descriptors(body, input, descriptors);
+                        self.run_with_descriptors(
+                            body,
+                            input,
+                            &self.updated_descriptors(base, versions),
+                        );
                         last = self.status;
                         if !self.next_iteration() {
                             break;
@@ -543,7 +569,11 @@ impl<'a> Invocation<'a> {
                     Ok(Some(index)) => {
                         self.status = 0;
                         for clause in &clauses[index..] {
-                            self.run_with_descriptors(&clause.body, input, descriptors);
+                            self.run_with_descriptors(
+                                &clause.body,
+                                input,
+                                &self.updated_descriptors(base, versions),
+                            );
                             if !clause.fallthrough || self.interrupted() {
                                 break;
                             }
@@ -562,7 +592,11 @@ impl<'a> Invocation<'a> {
                 } => {
                     let mut selected = otherwise;
                     for (condition, body) in branches {
-                        self.run_tested_list(condition, input, descriptors);
+                        self.run_tested_list(
+                            condition,
+                            input,
+                            &self.updated_descriptors(base, versions),
+                        );
                         if self.interrupted() {
                             return;
                         }
@@ -574,11 +608,41 @@ impl<'a> Invocation<'a> {
                     if selected.is_empty() {
                         self.status = 0;
                     } else {
-                        self.run_with_descriptors(selected, input, descriptors);
+                        self.run_with_descriptors(
+                            selected,
+                            input,
+                            &self.updated_descriptors(base, versions),
+                        );
                     }
                 }
             }
         }
+    }
+
+    fn updated_descriptors(
+        &self,
+        base: &Descriptors,
+        versions: [u64; crate::SHELL_FDS],
+    ) -> Descriptors {
+        // Keep command-local redirects except where exec has since replaced a descriptor.
+        std::array::from_fn(|fd| {
+            if self.fd_versions[fd] == versions[fd] {
+                base[fd].clone()
+            } else {
+                self.persistent_fds[fd].clone()
+            }
+        })
+    }
+
+    pub fn read_stdin_line(&self, input: &mut dyn BufRead, text: &mut String) -> io::Result<usize> {
+        if matches!(self.persistent_fds[0], Descriptor::Inherited(0)) {
+            return input.read_line(text);
+        }
+        if matches!(self.persistent_fds[0], Descriptor::Closed) {
+            return Ok(0);
+        }
+        let fd = self.persistent_fds[0].duplicate()?;
+        BufReader::with_capacity(1, File::from(fd)).read_line(text)
     }
 
     fn run_tested_list(
@@ -659,7 +723,7 @@ impl<'a> Invocation<'a> {
     }
 
     pub fn run_pipeline(&mut self, pipeline: &[Command], input: &mut impl BufRead) {
-        self.run_pipeline_with_descriptors(pipeline, input, &inherited_descriptors());
+        self.run_pipeline_with_descriptors(pipeline, input, &self.persistent_fds.clone());
     }
 
     pub fn run_pipeline_builtin(
@@ -770,7 +834,13 @@ impl<'a> Invocation<'a> {
             report(&descriptors[2], &error);
             self.status = 2;
         } else {
-            self.execute_argv(&argv, input, descriptors, substitution_status);
+            self.execute_argv(
+                &argv,
+                input,
+                descriptors,
+                substitution_status,
+                &command.redirects,
+            );
         }
         self.restore_variables(saved);
     }
@@ -781,6 +851,7 @@ impl<'a> Invocation<'a> {
         input: &mut dyn BufRead,
         descriptors: Descriptors,
         substitution_status: Option<u8>,
+        redirects: &[Redirect],
     ) {
         let mut bypass_functions = false;
         while let [prefix, rest @ ..] = argv {
@@ -963,15 +1034,13 @@ impl<'a> Invocation<'a> {
             "exec" => {
                 let args = args.strip_prefix(&[String::from("--")]).unwrap_or(args);
                 if args.is_empty() {
-                    report(
-                        &descriptors[2],
-                        "exec: persistent redirections are not supported yet",
-                    );
-                    self.status = 2;
+                    self.commit_exec_redirects(redirects, &descriptors);
+                    self.status = 0;
                 } else {
                     self.status = self.replace_shell(args, &descriptors);
+                    self.commit_exec_redirects(redirects, &descriptors);
+                    self.special_builtin_error(true);
                 }
-                self.special_builtin_error(true);
             }
             "exit" => {
                 let code = match args {
@@ -1746,6 +1815,18 @@ impl<'a> Invocation<'a> {
         self.external(argv, inherited_descriptors()) == 0
     }
 
+    fn commit_exec_redirects(&mut self, redirects: &[Redirect], descriptors: &Descriptors) {
+        for redirect in redirects {
+            let fd = match redirect {
+                Redirect::File { fd, .. }
+                | Redirect::Here { fd, .. }
+                | Redirect::HereString { fd, .. } => *fd,
+            };
+            self.fd_versions[fd] += 1;
+            self.persistent_fds[fd] = descriptors[fd].clone();
+        }
+    }
+
     fn replace_shell(&self, argv: &[String], descriptors: &Descriptors) -> u8 {
         let (path, env) = self.execution_environment();
         let name = &argv[0];
@@ -2049,6 +2130,7 @@ impl<'a> Invocation<'a> {
                     *descriptor = Descriptor::Closed;
                 }
             }
+            shell.persistent_fds = descriptors.clone();
             let mut input = BufReader::with_capacity(1, process::Stdin);
             shell.run_with_descriptors(&body, &mut input, &descriptors);
             return Ok(shell.status);
