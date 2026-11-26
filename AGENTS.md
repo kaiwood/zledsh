@@ -10,5 +10,5 @@
 
 - Test behavior changes with focused acceptance cases. Check stdout, stderr where specified, exit status, and side effects as relevant. Add a regression for the failure or boundary being fixed.
 - Use temporary homes and working directories. Never modify the user's real startup files or saved state. Use a real PTY for terminal editing, interactive history, and job-control tests.
-- Run `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked`, plus the relevant parity or PTY checks listed in the [README](README.md#development). Report which checks and platforms were actually verified; macOS and Linux are both supported.
+- Run `cargo fmt --check`, `cargo clippy --locked --all-targets -- -D warnings`, and `cargo test --locked`, and use `cargo test --locked --test terminal` for focused PTY verification. See the [README](README.md#development) for platform prerequisites. Report which checks and platforms were actually verified; macOS and Linux are both supported.
 - Update the user-facing docs when behavior changes.

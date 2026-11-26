@@ -1,6 +1,6 @@
 # zledsh
 
-`zledsh` is a work-in-progress standalone Rust port of Kward’s shell for macOS and Linux. `zledsh` is the only executable. Run it without arguments for an interactive shell or use `zledsh -c` to run a command. No Ruby or Kward installation is required. The terminal prototype is a separate Cargo example.
+`zledsh` is a work-in-progress standalone Rust port of Kward’s shell for macOS and Linux. `zledsh` is the only executable. Run it without arguments for an interactive shell or use `zledsh -c` to run a command. No Ruby or Kward installation is required.
 
 ```sh
 cargo run --locked -- -c 'printf "<%s>\n" "$0" "$@"' demo 'two words'
@@ -116,31 +116,12 @@ cargo test --locked
 cargo fmt --check
 ```
 
-### Shell parity checks
+`cargo test --locked` runs the shell-language, command, and real-terminal regressions. It does not require Ruby, rbenv, or a sibling Kward checkout. On Linux, install util-linux for `/usr/bin/script`, which some Rust unit tests use. The terminal integration tests also need a working PTY (such as `/dev/pts` in a Linux container) and the system `stty` and `ps` commands.
 
-The parity suite is separate from `cargo test`. It uses Ruby with Minitest and expects a sibling `../kward` checkout at `051440ed` with no local changes to tracked files. It does not switch branches or modify that checkout. Run it against the Ruby reference from this repository:
-
-```sh
-ruby tests/shell_parity_test.rb
-```
-
-Set `ZLEDSH_REFERENCE` to use a checkout in a different location. Each case runs with a temporary home and working directory. The suite checks command mode, redirected input, and interactive startup and execution in a PTY. The legacy Ruby `kward shell` command is used **only** as a test reference; the Rust project does not ship that command.
-
-Set `ZLEDSH_CMD` to run the same cases against a build of `zledsh`. The value is split into arguments, not evaluated by a shell. Use absolute paths for path arguments after the executable, since the tests run from a temporary directory.
+To run just the terminal integration tests:
 
 ```sh
-ZLEDSH_CMD='./target/debug/zledsh' ruby tests/shell_parity_test.rb
+cargo test --locked --test terminal
 ```
 
-The Cargo, differential, and terminal suites run on macOS and Linux. On Linux, the Cargo tests use `script` from util-linux. Ruby and the reference’s development gems (including `unicode-display_width`) are needed only for the separate Ruby fixtures. The parity harness starts each shell with an isolated environment, so install those gems where the reference Ruby can find them without `GEM_HOME` or `GEM_PATH` overrides.
-
-### Terminal and process spike
-
-```sh
-cargo build --locked --bins --example terminal_spike
-ruby tests/terminal_spike_test.rb
-```
-
-The PTY suite exercises Ctrl+Z and `fg`, restoration of the stopped job’s terminal settings and the original settings on exit, and inheritance of fd 9. It also tests a fake `?` turn over private pipes: the interpreter changes its own working directory, the provider’s draft is editable without executing, and Ctrl+C cancels and reaps a waiting provider without ending the session. The suite also runs `zledsh` to check foreground signals, stop/resume, and restoration of the original terminal settings.
-
-The example recognizes only fixed test commands. It does not parse shell syntax, run arbitrary commands, contact a provider, or change `zledsh` behavior. Ruby runs the test harness, not the Rust example.
+These tests drive the built `zledsh` binary in isolated temporary homes. They cover foreground signals and job control, restoration of terminal settings, startup and editing, completion, history privacy, and assistant turns with fake local providers.

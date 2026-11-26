@@ -136,12 +136,13 @@ printf '%s\n' "$?"
 }
 
 // Shell Command Language 2.9.2 and 2.9.3: status, precedence, and laziness.
+// The last stage drains the pipe before returning 1, so the producer cannot race a close.
 #[test]
 fn boolean_lists_short_circuit_with_pipeline_status() {
     let home = tempfile::tempdir().unwrap();
     let source = r#"false && printf wrong > skipped || printf fallback
 true || printf wrong > skipped && printf ':left'
-if ! printf hidden | false &&
+if ! printf hidden | /usr/bin/grep -q '^never$' &&
   true; then printf ':negated'; fi
 ! true
 printf ':%s' "$?"
