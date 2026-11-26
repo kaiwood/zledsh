@@ -1,7 +1,12 @@
 use std::process::{Command, Output};
 
 fn run(source: &str) -> Output {
+    let dir = tempfile::tempdir().unwrap();
     Command::new(env!("CARGO_BIN_EXE_zledsh"))
+        .current_dir(dir.path())
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("PATH", "/usr/bin:/bin")
         .args(["-c", source])
         .output()
         .unwrap()
@@ -60,6 +65,55 @@ true | command eval zledsh_pipeline_show
 "#);
     assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"second\n");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
+fn pipeline_expansion_and_redirection_do_not_change_parent_variables() {
+    let output = run(r#"
+value=0
+printf '%s\n' "$((value=1))" 3>&"$((value=1))" | /bin/cat
+printf 'parent:%s\n' "$value"
+: 3>&"$((value=1))" | /bin/cat
+printf 'parent:%s\n' "$value"
+"#);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"1\nparent:0\nparent:0\n");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
+fn fatal_expansion_only_exits_its_stage() {
+    let output = run(r#"
+unset value
+printf '%s\n' "${value:?missing}" | /bin/cat
+printf 'default:%s\n' "$?"
+set -o pipefail
+printf '%s\n' "${value:?missing}" | /bin/cat
+printf 'pipefail:%s\n' "$?"
+"#);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"default:0\npipefail:2\n");
+    assert_eq!(
+        output.stderr,
+        b"zledsh: value: missing\nzledsh: value: missing\n"
+    );
+}
+
+#[test]
+fn background_external_exec_keeps_the_stage_pid() {
+    let output = run(r#"
+/bin/sh -c 'printf "%s\n" "$$"' &
+last=$!
+wait "$last"
+printf '%s\n' "$!" | /bin/cat
+"#);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = std::str::from_utf8(&output.stdout).unwrap();
+    let pids: Vec<_> = stdout.lines().collect();
+    assert_eq!(pids.len(), 2, "{stdout:?}");
+    assert!(pids[0].parse::<u32>().is_ok(), "{stdout:?}");
+    assert_eq!(pids[0], pids[1]);
     assert!(output.stderr.is_empty(), "{output:?}");
 }
 

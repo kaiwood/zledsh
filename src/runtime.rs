@@ -130,6 +130,7 @@ pub(crate) struct Invocation<'a> {
     readonly: HashSet<String>,
     unset: HashSet<String>,
     substitution_depth: u8,
+    inherited_background_pid: Option<libc::pid_t>,
     shell_worker: bool,
     script_depth: u8,
     loop_depth: usize,
@@ -197,12 +198,14 @@ struct Substitution {
     unset: HashSet<String>,
     depth: u8,
     status: u8,
+    last_background_pid: Option<libc::pid_t>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 enum WorkerTask {
     Script(String),
     List(Script),
+    Stage(Command),
     Complete {
         function: String,
         words: Vec<String>,
@@ -230,6 +233,7 @@ impl<'a> Invocation<'a> {
             readonly: HashSet::new(),
             unset: HashSet::new(),
             substitution_depth: 0,
+            inherited_background_pid: None,
             shell_worker: false,
             script_depth: 0,
             loop_depth: 0,
@@ -890,7 +894,16 @@ impl<'a> Invocation<'a> {
             };
             return;
         }
-        let command = &pipeline[0];
+        self.run_simple_command(&pipeline[0], input, original, false);
+    }
+
+    fn run_simple_command(
+        &mut self,
+        command: &Command,
+        input: &mut dyn BufRead,
+        original: &Descriptors,
+        pipeline_stage: bool,
+    ) {
         let mut substitution_status = None;
         let prefix_len = command
             .words
@@ -960,6 +973,7 @@ impl<'a> Invocation<'a> {
                 descriptors,
                 substitution_status,
                 &command.redirects,
+                pipeline_stage,
             );
         }
         self.restore_variables(saved);
@@ -972,6 +986,7 @@ impl<'a> Invocation<'a> {
         descriptors: Descriptors,
         substitution_status: Option<u8>,
         redirects: &[Redirect],
+        pipeline_stage: bool,
     ) {
         let mut bypass_functions = false;
         while let [prefix, rest @ ..] = argv {
@@ -1386,6 +1401,14 @@ impl<'a> Invocation<'a> {
             }
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             "fg" | "bg" | "jobs" | "wait" => {
+                if pipeline_stage {
+                    report(
+                        &descriptors[2],
+                        &format!("{name}: not available in a pipeline stage"),
+                    );
+                    self.status = 1;
+                    return;
+                }
                 let jobs = self
                     .foreground
                     .get_or_insert_with(crate::foreground::Foreground::noninteractive);
@@ -1408,7 +1431,7 @@ impl<'a> Invocation<'a> {
                     1
                 });
             }
-            _ => self.status = self.external(argv, descriptors),
+            _ => self.status = self.external(argv, descriptors, pipeline_stage),
         }
     }
 
@@ -1915,34 +1938,29 @@ impl<'a> Invocation<'a> {
             let mut descriptors = original.clone();
             descriptors[0] = stdin;
             descriptors[1] = stdout;
-            if let Some(compound) = &command.compound {
-                if self.agent_command() {
-                    return Err(io::Error::other(
-                        "compound commands must be submitted by the user",
-                    ));
-                }
-                stages.push(
-                    self.subshell_stage(std::slice::from_ref(compound.as_ref()), &descriptors)?,
-                );
+            if !self.agent_command() {
+                let child = if let Some(compound) = &command.compound {
+                    self.subshell_stage(std::slice::from_ref(compound.as_ref()), &descriptors)?
+                } else {
+                    self.worker_stage(WorkerTask::Stage(command.clone()), &descriptors)?
+                };
+                stages.push(child);
                 stdin = next_input.map_or(Descriptor::Closed, |read| {
                     Descriptor::File(Rc::new(File::from(read)))
                 });
                 continue;
             }
+            // Assistant commands must pass the existing checks before launch;
+            // never send an unchecked assistant command to a shell worker.
+            if command.compound.is_some() {
+                return Err(io::Error::other(
+                    "compound commands must be submitted by the user",
+                ));
+            }
             if command.words.first().is_some_and(|word| word.assignment) {
-                if self.agent_command() {
-                    return Err(io::Error::other(
-                        "command assignment prefixes must be submitted by the user",
-                    ));
-                }
-                let mut command = command.clone();
-                command.background = false;
-                let body = [Statement::Pipeline(vec![command])];
-                stages.push(self.subshell_stage(&body, &descriptors)?);
-                stdin = next_input.map_or(Descriptor::Closed, |read| {
-                    Descriptor::File(Rc::new(File::from(read)))
-                });
-                continue;
+                return Err(io::Error::other(
+                    "command assignment prefixes must be submitted by the user",
+                ));
             }
             let mut status = None;
             let argv = match self.expand_command_words(&command.words, &mut status) {
@@ -1966,50 +1984,33 @@ impl<'a> Invocation<'a> {
             if self.exited {
                 return Ok(2);
             }
-            if self.agent_command()
-                && matches!(
-                    direct_name(&argv),
-                    Some(
-                        "eval"
-                            | "exec"
-                            | "."
-                            | "source"
-                            | "complete"
-                            | "set"
-                            | "readonly"
-                            | "umask"
-                            | "pushd"
-                            | "popd"
-                            | "dirs"
-                            | "trap"
-                    )
+            if matches!(
+                direct_name(&argv),
+                Some(
+                    "eval"
+                        | "exec"
+                        | "."
+                        | "source"
+                        | "complete"
+                        | "set"
+                        | "readonly"
+                        | "umask"
+                        | "pushd"
+                        | "popd"
+                        | "dirs"
+                        | "trap"
                 )
-            {
+            ) {
                 return Err(io::Error::other(
                     "this builtin must be submitted by the user",
                 ));
             }
             let name = argv[0].clone();
-            let evaluates_source = matches!(direct_name(&argv), Some("eval" | "." | "source"));
-            let calls_function = !is_special_builtin(&name)
-                && self.functions.contains_key(&name)
-                && name != "command";
-            if evaluates_source || calls_function {
-                if self.agent_command() {
-                    return Err(io::Error::other(
-                        "shell functions must be submitted by the user",
-                    ));
-                }
-                let command = Command {
-                    words: argv.into_iter().map(Word::literal).collect(),
-                    ..Command::default()
-                };
-                let body = [Statement::Pipeline(vec![command])];
-                stages.push(self.subshell_stage(&body, &descriptors)?);
-                stdin = next_input.map_or(Descriptor::Closed, |read| {
-                    Descriptor::File(Rc::new(File::from(read)))
-                });
-                continue;
+            if !is_special_builtin(&name) && self.functions.contains_key(&name) && name != "command"
+            {
+                return Err(io::Error::other(
+                    "shell functions must be submitted by the user",
+                ));
             }
             let (exec, worker_state) = if is_builtin(&name) {
                 let executable = std::env::current_exe()?;
@@ -2094,7 +2095,7 @@ impl<'a> Invocation<'a> {
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub fn run_editor(&mut self, argv: &[String]) -> bool {
-        self.external(argv, inherited_descriptors()) == 0
+        self.external(argv, inherited_descriptors(), false) == 0
     }
 
     fn commit_exec_redirects(&mut self, redirects: &[Redirect], descriptors: &Descriptors) {
@@ -2127,7 +2128,12 @@ impl<'a> Invocation<'a> {
         }
     }
 
-    fn external(&mut self, argv: &[String], mut descriptors: Descriptors) -> u8 {
+    fn external(
+        &mut self,
+        argv: &[String],
+        mut descriptors: Descriptors,
+        pipeline_stage: bool,
+    ) -> u8 {
         let (path, env) = self.execution_environment();
         let name = &argv[0];
         let exec = match process::Exec::new(argv, &path, env) {
@@ -2153,6 +2159,18 @@ impl<'a> Invocation<'a> {
                 return 1;
             }
         };
+        if pipeline_stage {
+            // The stage PID is already registered with the parent job. Keep it
+            // when launching an external command instead of waiting on a child.
+            let error = process::replace(&child);
+            let (message, status) = if error.raw_os_error() == Some(libc::ENOENT) {
+                ("command not found", 127)
+            } else {
+                ("cannot execute", 126)
+            };
+            report(&descriptors[2], &format!("{name}: {message}"));
+            return status;
+        }
         self.start_stages(vec![child], false)
             .unwrap_or_else(|error| {
                 report(&descriptors[2], &format!("{name}: {error}"));
@@ -2460,10 +2478,8 @@ impl<'a> Invocation<'a> {
         shell.unset = saved.unset;
         shell.substitution_depth = saved.depth;
         shell.status = saved.status;
+        shell.inherited_background_pid = saved.last_background_pid;
         if let Some(closed) = closed {
-            let WorkerTask::List(body) = saved.task else {
-                return Err("invalid subshell task".into());
-            };
             let mut descriptors = inherited_descriptors();
             for (fd, descriptor) in descriptors[..3].iter_mut().enumerate() {
                 if (closed & (1 << fd)) != 0 {
@@ -2472,7 +2488,15 @@ impl<'a> Invocation<'a> {
             }
             shell.persistent_fds = descriptors.clone();
             let mut input = BufReader::with_capacity(1, process::Stdin);
-            shell.run_with_descriptors(&body, &mut input, &descriptors);
+            match saved.task {
+                WorkerTask::List(body) => {
+                    shell.run_with_descriptors(&body, &mut input, &descriptors)
+                }
+                WorkerTask::Stage(command) => {
+                    shell.run_simple_command(&command, &mut input, &descriptors, true)
+                }
+                _ => return Err("invalid subshell task".into()),
+            }
             return Ok(shell.finish(&mut input, Ok(shell.status)));
         }
         process::null_stdin().map_err(|error| error.to_string())?;
@@ -2484,7 +2508,9 @@ impl<'a> Invocation<'a> {
                 Ok(shell.finish(&mut io::empty(), result))
             }
             WorkerTask::Complete { function, words } => shell.complete_in_worker(&function, words),
-            WorkerTask::List(_) => Err("invalid command substitution task".into()),
+            WorkerTask::List(_) | WorkerTask::Stage(_) => {
+                Err("invalid command substitution task".into())
+            }
         }
     }
 
@@ -2560,6 +2586,7 @@ impl<'a> Invocation<'a> {
             unset: self.unset.clone(),
             depth: self.substitution_depth + 1,
             status: self.status,
+            last_background_pid: self.last_background_pid(),
         }
     }
 
@@ -2577,10 +2604,18 @@ impl<'a> Invocation<'a> {
         body: &[Statement],
         descriptors: &Descriptors,
     ) -> io::Result<process::Stage> {
+        self.worker_stage(WorkerTask::List(body.to_vec()), descriptors)
+    }
+
+    fn worker_stage(
+        &self,
+        task: WorkerTask,
+        descriptors: &Descriptors,
+    ) -> io::Result<process::Stage> {
         if self.substitution_depth >= 32 {
             return Err(io::Error::other("subshells nested too deeply"));
         }
-        let state = worker_payload(&self.worker_state(WorkerTask::List(body.to_vec())))?;
+        let state = worker_payload(&self.worker_state(task))?;
         let state_fd = process::duplicate(state.as_raw_fd())?;
         let executable = std::env::current_exe()?;
         let args = [
@@ -2710,6 +2745,18 @@ impl<'a> Invocation<'a> {
         message
     }
 
+    fn last_background_pid(&self) -> Option<libc::pid_t> {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if let Some(pid) = self
+            .foreground
+            .as_ref()
+            .and_then(|jobs| jobs.last_background)
+        {
+            return Some(pid);
+        }
+        self.inherited_background_pid
+    }
+
     fn expand_parts(
         &mut self,
         word: &Word,
@@ -2768,16 +2815,11 @@ impl<'a> Invocation<'a> {
                 }
                 Part::Name => field.push(fragment(self.name.into())),
                 Part::Status => field.push(fragment(self.status.to_string())),
-                Part::LastBackground => {
-                    #[cfg(any(target_os = "macos", target_os = "linux"))]
-                    let pid = self
-                        .foreground
-                        .as_ref()
-                        .and_then(|jobs| jobs.last_background);
-                    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-                    let pid: Option<u32> = None;
-                    field.push(fragment(pid.map(|pid| pid.to_string()).unwrap_or_default()));
-                }
+                Part::LastBackground => field.push(fragment(
+                    self.last_background_pid()
+                        .map(|pid| pid.to_string())
+                        .unwrap_or_default(),
+                )),
                 Part::Positional { star } if *star && (part.quoted || !field_splitting) => {
                     // POSIX.1-2024 2.5.2: only join $* in a non-splitting context.
                     let ifs = self.variable("IFS");

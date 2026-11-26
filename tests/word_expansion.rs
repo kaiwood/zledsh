@@ -210,7 +210,6 @@ fn parameter_error_terminates_noninteractive_execution() {
     let dir = tempfile::tempdir().unwrap();
     for command in [
         "printf '%s' ${value:?\"required value\"}",
-        "printf '%s' ${value:?\"required value\"} | /bin/cat",
         "printf wrong >${value:?\"required value\"}",
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
