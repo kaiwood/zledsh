@@ -131,6 +131,15 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
     let mut option = args.next();
     loop {
         match option.as_deref().and_then(|arg| arg.to_str()) {
+            Some(flag @ ("-o" | "+o")) => {
+                let name = args
+                    .next()
+                    .ok_or("-o and +o require an option name at invocation")?;
+                options.set_named(
+                    name.to_str().ok_or("option name must be UTF-8")?,
+                    flag == "-o",
+                )?;
+            }
             Some("-i") => options.interactive = true,
             Some("-s") => read_stdin = true,
             Some("-is" | "-si") => {

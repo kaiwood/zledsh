@@ -1246,28 +1246,57 @@ impl<'a> Invocation<'a> {
     }
 
     fn set(&mut self, args: &[String], output: &Descriptor) -> Result<(), String> {
-        match args {
-            [] => {
-                let mut variables: BTreeMap<_, _> = std::env::vars_os()
-                    .filter_map(|(name, value)| {
-                        Some((name.into_string().ok()?, value.into_string().ok()?))
-                    })
-                    .filter(|(name, _)| valid_name(name) && !self.unset.contains(name))
-                    .collect();
-                variables.extend(self.variables.clone());
-                for (name, value) in variables {
-                    let quoted = value.replace('\'', "'\\''");
-                    output
-                        .write(&format!("{name}='{quoted}'\n"))
-                        .map_err(|error| error.to_string())?;
+        if args.is_empty() {
+            let mut variables: BTreeMap<_, _> = std::env::vars_os()
+                .filter_map(|(name, value)| {
+                    Some((name.into_string().ok()?, value.into_string().ok()?))
+                })
+                .filter(|(name, _)| valid_name(name) && !self.unset.contains(name))
+                .collect();
+            variables.extend(self.variables.clone());
+            for (name, value) in variables {
+                let quoted = value.replace('\'', "'\\''");
+                output
+                    .write(&format!("{name}='{quoted}'\n"))
+                    .map_err(|error| error.to_string())?;
+            }
+            return Ok(());
+        }
+        let mut remaining = args;
+        let mut options = self.options;
+        while let [flag, rest @ ..] = remaining {
+            match flag.as_str() {
+                "-o" | "+o" => {
+                    let enabled = flag == "-o";
+                    if let Some((name, rest)) = rest.split_first() {
+                        options.set_named(name, enabled)?;
+                        remaining = rest;
+                    } else {
+                        for (name, active) in options.named() {
+                            let line = if enabled {
+                                format!("{name} {}\n", if active { "on" } else { "off" })
+                            } else {
+                                format!("set {}o {name}\n", if active { '-' } else { '+' })
+                            };
+                            output.write(&line).map_err(|error| error.to_string())?;
+                        }
+                        break;
+                    }
+                }
+                "--" => {
+                    self.args = rest.to_vec();
+                    break;
+                }
+                value if value.len() > 1 && value.starts_with(['-', '+']) => {
+                    return Err(format!("unsupported option: {value}"));
+                }
+                _ => {
+                    self.args = remaining.to_vec();
+                    break;
                 }
             }
-            [first, rest @ ..] if first == "--" => self.args = rest.to_vec(),
-            [first, ..] if first.starts_with(['-', '+']) => {
-                return Err(format!("unsupported option: {first}"));
-            }
-            _ => self.args = args.to_vec(),
         }
+        self.options = options;
         Ok(())
     }
 
@@ -1455,13 +1484,13 @@ impl<'a> Invocation<'a> {
                 return self
                     .foreground
                     .get_or_insert_with(crate::foreground::Foreground::noninteractive)
-                    .run_background(stages);
+                    .run_background(stages, self.options.pipefail);
             }
             if let Some(tty) = self.foreground.as_mut().filter(|tty| tty.has_terminal()) {
-                return tty.run_pipeline(stages, self.agent_deadline);
+                return tty.run_pipeline(stages, self.options.pipefail, self.agent_deadline);
             }
         }
-        let (mut job, gate) = process::Pipeline::start(stages, false)?;
+        let (mut job, gate) = process::Pipeline::start(stages, false, self.options.pipefail)?;
         drop(gate);
         match job.wait(None)? {
             process::Outcome::Exited { code, .. } | process::Outcome::Stopped(code) => Ok(code),

@@ -92,3 +92,53 @@ printf '%s\n' "${line-unset}"
     );
     assert!(output.stderr.is_empty(), "{output:?}");
 }
+
+#[test]
+fn pipefail_uses_the_rightmost_failure_and_negates_after_selection() {
+    let output = run(r#"
+set -o pipefail
+exit 19 | exit 7 | true
+printf '%s\n' "$?"
+! exit 19 | true
+printf '%s\n' "$?"
+! true | true
+printf '%s\n' "$?"
+( exit 13 | true )
+printf '%s\n' "$?"
+set +o pipefail
+exit 19 | set -o pipefail
+printf '%s\n' "$?"
+exit 19 | true
+printf '%s\n' "$?"
+"#);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"7\n0\n1\n13\n0\n0\n");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
+fn background_pipeline_remembers_pipefail_from_invocation() {
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
+        .args([
+            "-o",
+            "pipefail",
+            "-c",
+            r#"
+exit 19 | true &
+pid=$!
+set +o pipefail
+wait "$pid"
+printf '%s\n' "$?"
+exit 19 | true &
+pid=$!
+set -o pipefail
+wait "$pid"
+printf '%s\n' "$?"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"19\n0\n");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}

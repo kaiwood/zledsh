@@ -269,13 +269,13 @@ impl ExecVector {
 pub(crate) struct Pipeline {
     pub group: Option<libc::pid_t>,
     children: Vec<(libc::pid_t, Member)>,
-    last: Option<libc::c_int>,
+    pipefail: bool,
 }
 
 enum Member {
     Running,
     Stopped(u8),
-    Done,
+    Done(libc::c_int),
 }
 
 pub(crate) enum Outcome {
@@ -290,16 +290,20 @@ impl Pipeline {
         Self {
             group: Some(pid),
             children: vec![(pid, Member::Running)],
-            last: None,
+            pipefail: false,
         }
     }
 
-    pub fn start(stages: Vec<Stage>, foreground: bool) -> io::Result<(Self, OwnedFd)> {
+    pub fn start(
+        stages: Vec<Stage>,
+        foreground: bool,
+        pipefail: bool,
+    ) -> io::Result<(Self, OwnedFd)> {
         let gate = pipe()?;
         let mut job = Self {
             group: None,
             children: Vec::new(),
-            last: None,
+            pipefail,
         };
         for stage in &stages {
             let group = foreground.then(|| job.group.unwrap_or(0));
@@ -367,7 +371,21 @@ impl Pipeline {
                 }) {
                     return Ok(Some(Outcome::Stopped(128 + stop_signal)));
                 }
-                let status = ExitStatus::from_raw(self.last.unwrap_or(0));
+                // The option is fixed at launch, including for jobs collected later.
+                let last = self.children.last();
+                let status = if self.pipefail {
+                    self.children
+                        .iter()
+                        .rev()
+                        .find(|(_, member)| matches!(member, Member::Done(status) if *status != 0))
+                        .or(last)
+                } else {
+                    last
+                };
+                let status = match status {
+                    Some((_, Member::Done(status))) => ExitStatus::from_raw(*status),
+                    _ => ExitStatus::from_raw(0),
+                };
                 return Ok(Some(Outcome::Exited {
                     code: status_code(status),
                     signaled: status.signal().is_some(),
@@ -382,15 +400,11 @@ impl Pipeline {
             if pid == 0 {
                 return Ok(None);
             }
-            let last_pid = self.children.last().unwrap().0;
             if let Some((_, member)) = self.children.iter_mut().find(|(child, _)| *child == pid) {
                 if libc::WIFSTOPPED(status) {
                     *member = Member::Stopped(libc::WSTOPSIG(status) as u8);
                 } else {
-                    *member = Member::Done;
-                    if pid == last_pid {
-                        self.last = Some(status);
-                    }
+                    *member = Member::Done(status);
                 }
             }
         }
@@ -402,7 +416,7 @@ impl Drop for Pipeline {
         let live = self
             .children
             .iter()
-            .filter(|(_, state)| !matches!(state, Member::Done));
+            .filter(|(_, state)| !matches!(state, Member::Done(_)));
         if let Some(group) = self.group.filter(|_| live.clone().next().is_some()) {
             unsafe { libc::kill(-group, libc::SIGKILL) };
         }

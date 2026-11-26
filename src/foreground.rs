@@ -62,9 +62,9 @@ impl Foreground {
         Ok(())
     }
 
-    pub fn run_background(&mut self, stages: Vec<Stage>) -> io::Result<u8> {
+    pub fn run_background(&mut self, stages: Vec<Stage>, pipefail: bool) -> io::Result<u8> {
         self.refresh()?;
-        let (pipeline, gate) = Pipeline::start(stages, true)?;
+        let (pipeline, gate) = Pipeline::start(stages, true, pipefail)?;
         let pid = pipeline.last_pid();
         let id = self.add(pipeline, None);
         self.last_background = Some(pid);
@@ -228,10 +228,11 @@ impl Foreground {
     pub fn run_pipeline(
         &mut self,
         stages: Vec<Stage>,
+        pipefail: bool,
         deadline: Option<Instant>,
     ) -> io::Result<u8> {
         let terminal = self.terminal()?;
-        let (job, gate) = Pipeline::start(stages, true)?;
+        let (job, gate) = Pipeline::start(stages, true, pipefail)?;
         if let Err(error) = give_terminal(job.group.unwrap()) {
             drop(job);
             return Err(error);
