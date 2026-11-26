@@ -72,6 +72,7 @@ impl Word {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Part {
     Literal(String),
+    DollarQuoted(String),
     Tilde {
         login: String,
         assignment_only: bool,
@@ -792,6 +793,10 @@ fn here_delimiter(input: &mut Source<'_>) -> ParseResult<(String, bool)> {
                     ));
                 }
             },
+            '$' if input.next_if_eq(&'\'').is_some() => {
+                quoted = true;
+                text.push_str(&decode_dollar_quote(&dollar_quoted(input)?)?);
+            }
             '#' if text.is_empty() && !quoted => break,
             ch => text.push(ch),
         }
@@ -835,6 +840,10 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
                 Some(ch) => literal(&mut word, ch, true),
                 None => return Err("trailing backslash".into()),
             },
+            '$' if input.next_if_eq(&'\'').is_some() => {
+                word.bare = false;
+                word.push(Part::DollarQuoted(dollar_quoted(input)?), true);
+            }
             '$' => parameter_at(input, &mut word, false, 0)?,
             '[' if !started && input.peek().is_none_or(|&ch| boundary(ch)) => {
                 literal(&mut word, ch, false)
@@ -899,6 +908,86 @@ fn single_quoted(input: &mut Source<'_>) -> ParseResult<String> {
         text.push(ch);
     }
     Err(ParseError::Incomplete("unclosed single quote"))
+}
+
+fn dollar_quoted(input: &mut Source<'_>) -> ParseResult<String> {
+    let start = input.offset;
+    while let Some(ch) = input.next() {
+        match ch {
+            '\'' => return Ok(input.source[start..input.offset - 1].into()),
+            '\\' => {
+                input.next();
+            }
+            _ => {}
+        }
+    }
+    Err(ParseError::Incomplete("unclosed dollar-single quote"))
+}
+
+pub(crate) fn decode_dollar_quote(text: &str) -> Result<String, &'static str> {
+    let mut input = text.bytes().peekable();
+    let mut result = Vec::with_capacity(text.len());
+    while let Some(byte) = input.next() {
+        let byte = if byte == b'\\' {
+            match input
+                .next()
+                .ok_or("incomplete dollar-single quote escape")?
+            {
+                byte @ (b'\\' | b'\'' | b'"') => byte,
+                b'a' => 7,
+                b'b' => 8,
+                b'e' => 27,
+                b'f' => 12,
+                b'n' => b'\n',
+                b'r' => b'\r',
+                b't' => b'\t',
+                b'v' => 11,
+                b'c' => match input.next().ok_or("missing control character")? {
+                    b'?' => 127,
+                    b'\\' if input.next_if_eq(&b'\\').is_some() => 28,
+                    byte @ (b'@'..=b'_' | b'a'..=b'z') => byte & 31,
+                    _ => return Err("invalid control character"),
+                },
+                first @ (b'x' | b'0'..=b'7') => {
+                    let radix = if first == b'x' { 16 } else { 8 };
+                    let mut value = if radix == 8 {
+                        u32::from(first - b'0')
+                    } else {
+                        0
+                    };
+                    let mut digits = 0;
+                    while digits < 2 {
+                        let Some(digit) = input
+                            .peek()
+                            .and_then(|byte| char::from(*byte).to_digit(radix))
+                        else {
+                            break;
+                        };
+                        input.next();
+                        value = value * radix + digit;
+                        digits += 1;
+                    }
+                    if radix == 16 && digits == 0 {
+                        return Err("missing hexadecimal digit");
+                    }
+                    u8::try_from(value)
+                        .map_err(|_| "dollar-single quote escape exceeds one byte")?
+                }
+                byte => {
+                    result.push(b'\\');
+                    byte
+                }
+            }
+        } else {
+            byte
+        };
+        // Use the POSIX-permitted truncating interpretation of a NUL escape.
+        if byte == 0 {
+            break;
+        }
+        result.push(byte);
+    }
+    String::from_utf8(result).map_err(|_| "dollar-single quote result is not UTF-8")
 }
 
 fn double_quoted(input: &mut Source<'_>, word: &mut Word, depth: usize) -> ParseResult<()> {
@@ -1117,6 +1206,9 @@ fn parameter_word(input: &mut Source<'_>, quoted: bool, depth: usize) -> ParseRe
     let mut first = true;
     while let Some(ch) = input.next_if(|ch| *ch != '}') {
         match ch {
+            '$' if !quoted && input.next_if_eq(&'\'').is_some() => {
+                word.push(Part::DollarQuoted(dollar_quoted(input)?), true);
+            }
             '$' => parameter_at(input, &mut word, quoted, depth)?,
             '\'' if !quoted => word.push(Part::Literal(single_quoted(input)?), true),
             '"' => double_quoted(input, &mut word, depth)?,

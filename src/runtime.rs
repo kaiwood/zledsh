@@ -1701,6 +1701,9 @@ impl<'a> Invocation<'a> {
                         Origin::Literal
                     },
                 }),
+                Part::DollarQuoted(text) => {
+                    field.push(protected(&syntax::decode_dollar_quote(text)?))
+                }
                 Part::Tilde {
                     login,
                     assignment_only,

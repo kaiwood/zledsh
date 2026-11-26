@@ -238,3 +238,23 @@ unset value; show "${value#*}" ${value%*}
         "argc=4\n<b/c.txt.txt>\n<c.txt.txt>\n<.a/b/c.txt>\n<>\nargc=5\n<.a/b/c.txt.txt>\n<.a/b/c.txt.txt>\n<>\n<.a/b/c.txt.txt>\n<>\nargc=4\n<a*b>\n<*b>\n<*a>\n<*a*b>\nargc=1\n<>\n",
     );
 }
+
+// POSIX.1-2024 2.2.4: escaped bytes are protected from splitting and globbing.
+#[test]
+fn dollar_single_quotes_preserve_escaped_text_as_one_argument() {
+    assert_expansion(
+        r#"show $'one\ttwo\nthree' pre$''post $'' $'\101\x42\xC3\xA9' $'\'\"\\*?' $'\cA\c?\e' $'keep\000discard'"#,
+        &[],
+        "argc=7\n<one\ttwo\nthree>\n<prepost>\n<>\n<ABé>\n<'\"\\*?>\n<\x01\x7f\x1b>\n<keep>\n",
+    );
+    assert_expansion(
+        r#"unset value
+show ${value:-$'a\tb'} "$'literal'"
+/bin/cat <<$'E\x4eD'
+$value
+END
+"#,
+        &[],
+        "argc=2\n<a\tb>\n<$'literal'>\n$value\n",
+    );
+}
