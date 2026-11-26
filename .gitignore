@@ -5,3 +5,6 @@
 .DS_Store
 *.rs.bk
 /PLAN.md
+.vscode
+AGENTS.md
+
