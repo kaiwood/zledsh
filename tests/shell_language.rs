@@ -1203,3 +1203,45 @@ printf 'empty=%s\n' "$?"
         "",
     );
 }
+
+#[test]
+fn directory_stack_rotates_and_failed_changes_do_not_pop() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().canonicalize().unwrap();
+    for name in ["a", "b"] {
+        fs::create_dir(root.join(name)).unwrap();
+    }
+    let output = shell(&root)
+        .args([
+            "-c",
+            r#"
+pushd a > /dev/null
+pushd ../b > /dev/null
+pushd > /dev/null
+pwd
+( popd > /dev/null; pwd )
+pwd
+/bin/rmdir ../b
+popd > /dev/null || printf 'blocked\n'
+dirs
+popd +1 > /dev/null
+popd > /dev/null
+pwd
+"#,
+        ])
+        .output()
+        .unwrap();
+    let a = root.join("a");
+    let b = root.join("b");
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "{a}\n{b}\n{a}\nblocked\n{a} {b} {root}\n{root}\n",
+            a = a.display(),
+            b = b.display(),
+            root = root.display()
+        )
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).starts_with("zledsh: popd:"));
+}

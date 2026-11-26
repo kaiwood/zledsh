@@ -115,6 +115,7 @@ fn split_field(field: Field, ifs: &str) -> Vec<Field> {
 }
 
 pub(crate) struct Invocation<'a> {
+    directory_stack: Vec<String>,
     name: &'a str,
     args: Vec<String>,
     getopts_offset: usize,
@@ -169,6 +170,7 @@ struct PipelineVariables {
     getopts_offset: usize,
     options: ShellOptions,
     trap_snapshot: BTreeMap<libc::c_int, String>,
+    directory_stack: Vec<String>,
     ignore_errexit: bool,
     variables: HashMap<String, String>,
     exported: HashSet<String>,
@@ -181,6 +183,7 @@ struct Substitution {
     task: WorkerTask,
     options: ShellOptions,
     trap_snapshot: BTreeMap<libc::c_int, String>,
+    directory_stack: Vec<String>,
     ignore_errexit: bool,
     name: String,
     args: Vec<String>,
@@ -209,6 +212,7 @@ enum WorkerTask {
 impl<'a> Invocation<'a> {
     pub fn new(name: &'a str, args: &[String]) -> Self {
         Self {
+            directory_stack: Vec::new(),
             name,
             args: args.to_vec(),
             getopts_offset: 0,
@@ -758,6 +762,7 @@ impl<'a> Invocation<'a> {
         let mut shell = Invocation::new(&state.name, &state.args);
         shell.options = state.options;
         shell.inherit_traps(state.trap_snapshot);
+        shell.directory_stack = state.directory_stack;
         shell.getopts_offset = state.getopts_offset;
         shell.ignore_errexit = state.ignore_errexit;
         shell.shell_worker = true;
@@ -914,6 +919,9 @@ impl<'a> Invocation<'a> {
                     | "set"
                     | "readonly"
                     | "umask"
+                    | "pushd"
+                    | "popd"
+                    | "dirs"
                     | "trap"
             )
         {
@@ -1086,9 +1094,18 @@ impl<'a> Invocation<'a> {
                     }
                 }
             }
+            "pushd" | "popd" | "dirs" => {
+                self.status = match self.directory_stack_command(name, args, &descriptors[1]) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        report(&descriptors[2], &format!("{name}: {error}"));
+                        1
+                    }
+                };
+            }
             "cd" | "pwd" => {
                 let result = if name == "cd" {
-                    self.change_directory(args, &descriptors[1])
+                    self.change_directory(args, Some(&descriptors[1]))
                 } else {
                     self.print_directory(args, &descriptors[1])
                 };
@@ -1520,7 +1537,11 @@ impl<'a> Invocation<'a> {
         }
     }
 
-    fn change_directory(&mut self, args: &[String], output: &Descriptor) -> Result<(), String> {
+    fn change_directory(
+        &mut self,
+        args: &[String],
+        output: Option<&Descriptor>,
+    ) -> Result<(), String> {
         use std::path::{Path, PathBuf};
 
         let (physical, require_pwd, operands) = directory_options(args, true)?;
@@ -1570,12 +1591,92 @@ impl<'a> Invocation<'a> {
         };
         self.assign_value("PWD", current.to_string_lossy().into_owned())?;
         self.exported.insert("PWD".into());
-        if print {
+        if let Some(output) = output.filter(|_| print) {
             output
                 .write(&format!("{}\n", current.display()))
                 .map_err(|error| error.to_string())?;
         }
         Ok(())
+    }
+
+    fn directory_stack_command(
+        &mut self,
+        name: &str,
+        args: &[String],
+        output: &Descriptor,
+    ) -> Result<(), String> {
+        let (stay, args) = match args {
+            [flag, rest @ ..] if flag == "-n" && name != "dirs" => (true, rest),
+            _ => (false, args),
+        };
+        let quoted_path = args.first().is_some_and(|arg| arg == "--");
+        let args = if quoted_path { &args[1..] } else { args };
+        let cwd = self
+            .working_directory(false)
+            .map_err(|error| error.to_string())?
+            .into_os_string()
+            .into_string()
+            .map_err(|_| "directory is not UTF-8")?;
+        let mut stack = vec![cwd.clone()];
+        stack.extend(self.directory_stack.iter().cloned());
+        let index = |arg: &str| -> Result<usize, String> {
+            let number = arg
+                .get(1..)
+                .and_then(|n| n.parse::<usize>().ok())
+                .filter(|&n| n < stack.len())
+                .ok_or("invalid stack index")?;
+            Ok(if arg.starts_with('-') {
+                stack.len() - number - 1
+            } else {
+                number
+            })
+        };
+        match (name, args) {
+            ("dirs", []) => {}
+            ("pushd", []) if stay => {}
+            ("pushd", []) if stack.len() > 1 => stack.swap(0, 1),
+            ("pushd", [arg]) if !quoted_path && arg.starts_with(['+', '-']) => {
+                let index = index(arg)?;
+                if !stay {
+                    stack.rotate_left(index);
+                }
+            }
+            ("pushd", [path]) if stay => {
+                let absolute = std::path::Path::new(&cwd).join(path);
+                stack.insert(1, absolute.to_string_lossy().into_owned());
+            }
+            ("pushd", [path]) => {
+                self.change_directory(&["--".into(), path.clone()], None)?;
+                stack.insert(
+                    0,
+                    self.working_directory(false)
+                        .map_err(|error| error.to_string())?
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+            ("popd", [] | [_]) if stack.len() > 1 => {
+                let index = match args {
+                    [arg] if arg.starts_with(['+', '-']) => index(arg)?,
+                    [] => 0,
+                    _ => return Err("expected a stack index".into()),
+                };
+                stack.remove(if stay && index == 0 { 1 } else { index });
+            }
+            ("pushd" | "popd", []) => return Err("directory stack is empty".into()),
+            _ => return Err("unexpected directory stack arguments".into()),
+        }
+        if self
+            .working_directory(false)
+            .map_err(|error| error.to_string())?
+            != std::path::Path::new(&stack[0])
+        {
+            self.change_directory(&["--".into(), stack[0].clone()], None)?;
+        }
+        self.directory_stack = stack[1..].to_vec();
+        output
+            .write(&format!("{}\n", stack.join(" ")))
+            .map_err(|error| error.to_string())
     }
 
     fn describe_commands(&self, names: &[String], descriptors: &Descriptors) -> u8 {
@@ -1784,6 +1885,9 @@ impl<'a> Invocation<'a> {
                             | "set"
                             | "readonly"
                             | "umask"
+                            | "pushd"
+                            | "popd"
+                            | "dirs"
                             | "trap"
                     )
                 )
@@ -1819,6 +1923,7 @@ impl<'a> Invocation<'a> {
                     getopts_offset: self.getopts_offset,
                     options: self.options,
                     trap_snapshot: self.traps.snapshot(),
+                    directory_stack: self.directory_stack.clone(),
                     ignore_errexit: self.ignore_errexit,
                     variables: self.variables.clone(),
                     exported: self.exported.clone(),
@@ -2228,6 +2333,7 @@ impl<'a> Invocation<'a> {
         let mut shell = Invocation::new(&saved.name, &saved.args);
         shell.options = saved.options;
         shell.inherit_traps(saved.trap_snapshot);
+        shell.directory_stack = saved.directory_stack;
         shell.getopts_offset = saved.getopts_offset;
         shell.ignore_errexit = saved.ignore_errexit;
         shell.shell_worker = true;
@@ -2326,6 +2432,7 @@ impl<'a> Invocation<'a> {
             task,
             options: self.options,
             trap_snapshot: self.traps.snapshot(),
+            directory_stack: self.directory_stack.clone(),
             ignore_errexit: self.ignore_errexit,
             name: self.name.into(),
             args: self.args.clone(),
@@ -2912,10 +3019,10 @@ fn here_document_error(error: io::Error) -> String {
 }
 
 pub(crate) const BUILTINS: &[&str] = &[
-    "exit", "exec", "cd", "pwd", "export", "readonly", "unset", "read", "printf", "fg", "alias",
-    "unalias", "jobs", "bg", "wait", "command", ":", "true", "false", "eval", "break", "continue",
-    ".", "source", "local", "set", "shift", "getopts", "umask", "trap", "return", "complete",
-    "compgen",
+    "exit", "exec", "cd", "pwd", "pushd", "popd", "dirs", "export", "readonly", "unset", "read",
+    "printf", "fg", "alias", "unalias", "jobs", "bg", "wait", "command", ":", "true", "false",
+    "eval", "break", "continue", ".", "source", "local", "set", "shift", "getopts", "umask",
+    "trap", "return", "complete", "compgen",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {
