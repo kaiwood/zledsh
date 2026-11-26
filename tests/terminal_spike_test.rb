@@ -288,21 +288,23 @@ class TerminalSpikeTest < Minitest::Test
       File.write(File.join(home, ".kwshrc.example"), "different-file-content\n")
     }) do |reader, writer, pid|
       writer.write("/bin/cat ~/.kw\t")
-      suggestions = read_until(reader, "#{prompt}/bin/cat ~/.kw")
-      assert_includes suggestions, ".kward/"
-      assert_includes suggestions, ".kwsh\\ notes"
-      assert_includes suggestions, ".kwshrc.example"
+      caret_restored = /\e\[1A\r\e\[\d+C\z/
+      suggestions = read_until(reader, caret_restored)
+      assert_includes suggestions, "#{prompt}/bin/cat ~/.kw\r\eD.kward/  .kwsh\\ notes  .kwshrc.example"
 
-      [".kward/", ".kwsh\\ notes", ".kwshrc.example", ".kward/"].each do |candidate|
-        writer.write("\t")
-        read_until(reader, "#{prompt}/bin/cat ~/#{candidate}")
+      forward = [".kward/", ".kwsh\\ notes", ".kwshrc.example", ".kward/"]
+      backward = [".kwshrc.example", ".kwsh\\ notes"]
+      [["\t", forward], ["\e[Z", backward]].each do |key, candidates|
+        candidates.each do |candidate|
+          writer.write(key)
+          selection = read_until(reader, caret_restored)
+          assert_includes selection, "#{prompt}/bin/cat ~/#{candidate}\r\eD"
+          assert_includes selection, "\e[7m#{candidate}\e[27m"
+        end
       end
-      writer.write("\e[Z")
-      read_until(reader, "#{prompt}/bin/cat ~/.kwshrc.example")
-      writer.write("\e[Z")
-      read_until(reader, "#{prompt}/bin/cat ~/.kwsh\\ notes")
       writer.write("\n")
-      read_until(reader, "\r\nselected-file-content\r\n")
+      submitted = read_until(reader, "\r\nselected-file-content\r\n")
+      assert_includes submitted, "\e[1B\r\e[J"
       read_until(reader, prompt)
       exit_spike(reader, writer, pid)
     end
@@ -315,12 +317,12 @@ class TerminalSpikeTest < Minitest::Test
       File.write(File.join(home, "report-b"), "report-b-content\n")
     }) do |reader, writer, pid|
       writer.write("/bin/cat ~/re\t")
-      suggestions = read_until(reader, "#{prompt}/bin/cat ~/report-")
-      assert_includes suggestions, "report-a"
-      assert_includes suggestions, "report-b"
+      suggestions = read_until(reader, /\e\[1A\r\e\[\d+C\z/)
+      assert_includes suggestions, "#{prompt}/bin/cat ~/report-\r\eDreport-a  report-b"
 
       writer.write("b\t")
-      read_until(reader, "b ")
+      edited = read_until(reader, "b ")
+      assert_includes edited, "\e[1B\r\e[J"
       writer.write("\n")
       read_until(reader, "\r\nreport-b-content\r\n")
       read_until(reader, prompt)

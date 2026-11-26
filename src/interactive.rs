@@ -1,3 +1,5 @@
+mod completion_menu;
+
 use std::collections::VecDeque;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -677,6 +679,7 @@ struct CompletionCycle {
     matches: completion::Matches,
     anchor: usize,
     selected: Option<usize>,
+    menu_offset: Option<usize>,
 }
 
 impl CompletionCycle {
@@ -693,18 +696,6 @@ impl CompletionCycle {
         line.splice(self.anchor..cursor, suffix.bytes());
         self.anchor + suffix.len()
     }
-}
-
-fn show_suggestions(echo: &mut impl Write, matches: &completion::Matches) -> io::Result<()> {
-    const LIMIT: usize = 24;
-    echo.write_all(b"\r\n")?;
-    for label in matches.labels().take(LIMIT) {
-        write!(echo, "  {}", display(label.as_bytes()))?;
-    }
-    if matches.len() > LIMIT {
-        write!(echo, "  ({} more)", matches.len() - LIMIT)?;
-    }
-    echo.write_all(b"\r\n")
 }
 
 fn read_keys(
@@ -728,7 +719,9 @@ fn read_keys(
     while let Some(mut key) = read_key(input, shell)? {
         let previous_cut = std::mem::take(&mut consecutive_cut);
         if !matches!(key, Key::Byte(b'\t') | Key::BackTab) {
-            completion = None;
+            if let Some(down) = completion.take().and_then(|cycle| cycle.menu_offset) {
+                completion_menu::dismiss(echo, down)?;
+            }
         }
         if key == Key::Byte(18) {
             let Some(history) = history.as_deref_mut().filter(|history| !history.paused) else {
@@ -831,7 +824,12 @@ fn read_keys(
                 if primary && (cursor == line.len() || line[cursor].is_ascii_whitespace()) =>
             {
                 if let Some(cycle) = &mut completion {
+                    let screen = completion_menu::Screen::new(prompt, &line[..cursor]);
                     cursor = cycle.advance(&mut line, cursor, key == Key::BackTab);
+                    cycle.menu_offset =
+                        screen.draw(echo, &line, cursor, &cycle.matches, cycle.selected)?;
+                    echo.flush()?;
+                    continue;
                 } else {
                     let Some(matches) = std::str::from_utf8(&line[..cursor])
                         .ok()
@@ -843,17 +841,22 @@ fn read_keys(
                     if cursor < line.len() && suffix.ends_with(' ') {
                         suffix.pop();
                     }
+                    let screen = (matches.len() > 1)
+                        .then(|| completion_menu::Screen::new(prompt, &line[..cursor]));
                     let anchor = cursor;
                     let at_end = cursor == line.len();
                     line.splice(cursor..cursor, suffix.bytes());
                     cursor += suffix.len();
-                    if matches.len() > 1 {
-                        show_suggestions(echo, &matches)?;
+                    if let Some(screen) = screen {
+                        let menu_offset = screen.draw(echo, &line, cursor, &matches, None)?;
                         completion = Some(CompletionCycle {
                             matches,
                             anchor,
                             selected: None,
+                            menu_offset,
                         });
+                        echo.flush()?;
+                        continue;
                     } else if at_end {
                         echo.write_all(suffix.as_bytes())?;
                         echo.flush()?;
@@ -913,6 +916,9 @@ fn read_keys(
         }
         redraw(echo, prompt, &line, cursor)?;
         echo.flush()?;
+    }
+    if let Some(down) = completion.and_then(|cycle| cycle.menu_offset) {
+        completion_menu::dismiss(echo, down)?;
     }
     Ok(Line::End)
 }

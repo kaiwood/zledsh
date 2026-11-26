@@ -54,7 +54,7 @@ At the `kwsh` prompt:
 - Use **Ctrl+R** to search history by substring, **Ctrl+R** again for an older match, **Enter** to run the match, or **Ctrl+G** to return to your draft. Up and Down recall commands by prefix.
 - Use **Alt+B / Alt+F** to move by word, or Left/Right, Home/End, and **Ctrl+A / Ctrl+E** to move the cursor. **Ctrl+L** clears the screen without discarding the draft.
 - **Ctrl+W** cuts the previous word, **Ctrl+U** cuts to the start of the draft, and **Ctrl+K** cuts to the end of the current line. **Ctrl+Y** pastes the most recent cut. Consecutive cuts are combined in order.
-- **Tab** completes simple command names or paths, including `~/` paths. If several matches are possible, the first Tab fills in their shared prefix and lists suggestions. Press **Tab** again to cycle forward or **Shift+Tab** to cycle backward. Press Enter to run the edited command.
+- **Tab** completes simple command names or paths, including `~/` paths. If several matches are possible, the first Tab fills in their shared prefix and shows a grid below the draft. Press **Tab** again to highlight the next match or **Shift+Tab** to go back. The grid closes when you resume editing or press Enter.
 - Bracketed paste inserts text into the draft without running it.
 
 History stays in memory unless you set `HISTFILE` before the first prompt, for example with `export HISTFILE="$HOME/.kwsh_history"` in `~/.kwshrc`. `HISTSIZE` defaults to 512. Unsafe history files are left untouched. Use `history pause` before entering sensitive text and `history resume` afterward. Pausing clears saved cuts and disables search, saving cuts, and yanking. It does not erase earlier history or hide input from terminal scrollback.

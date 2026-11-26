@@ -247,7 +247,7 @@ fn terminal_device(fd: RawFd) -> Option<libc::dev_t> {
         .then(|| unsafe { stat.assume_init().st_rdev })
 }
 
-fn window_size() -> io::Result<libc::winsize> {
+pub(crate) fn window_size() -> io::Result<libc::winsize> {
     let mut size = MaybeUninit::uninit();
     cvt(unsafe { libc::ioctl(TTY, libc::TIOCGWINSZ, size.as_mut_ptr()) })?;
     Ok(unsafe { size.assume_init() })
