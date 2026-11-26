@@ -924,6 +924,21 @@ fn read_keys(
                     }
                 }
             }
+            Key::LastArgument => {
+                let Some(history) = history.as_deref_mut().filter(|history| !history.paused) else {
+                    continue;
+                };
+                history.refresh();
+                let Some(word) = history
+                    .entries()
+                    .next_back()
+                    .and_then(syntax::last_argument)
+                else {
+                    continue;
+                };
+                line.splice(cursor..cursor, word.bytes());
+                cursor += word.len();
+            }
             Key::Up | Key::Down | Key::Byte(14 | 16) => {
                 let backward = matches!(key, Key::Up | Key::Byte(16));
                 let prefix_only = matches!(key, Key::Up | Key::Down);
@@ -1004,6 +1019,7 @@ enum Key {
     KillWord,
     BackwardKillWord,
     YankPop,
+    LastArgument,
     Ignored,
 }
 
@@ -1136,6 +1152,7 @@ fn read_escape(input: &mut impl BufRead) -> io::Result<Key> {
         Some(b'd' | b'D') => return Ok(Key::KillWord),
         Some(8 | 127) => return Ok(Key::BackwardKillWord),
         Some(b'y' | b'Y') => return Ok(Key::YankPop),
+        Some(b'.') => return Ok(Key::LastArgument),
         _ => return Ok(Key::Ignored),
     }
     let mut sequence = [0; 16];

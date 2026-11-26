@@ -523,3 +523,27 @@ fn undo_restores_multiline_edits_and_resets_on_submit() {
     tty.expect("undo> ");
     tty.finish();
 }
+
+#[test]
+fn last_argument_recall_keeps_quoting_and_excludes_private_commands() {
+    let mut tty = Terminal::start("arg> ", &[], |_| {});
+    tty.expect("arg> ");
+    tty.send("printf '%s' 'two words' > public\n");
+    tty.expect("\x1b[?2004harg> ");
+    tty.send("history pause\n");
+    tty.expect("[private] arg> ");
+    tty.send("/bin/echo classified\n");
+    tty.expect("\r\nclassified\r\n");
+    tty.expect("[private] arg> ");
+    tty.send("/bin/echo absent\x1b.\n");
+    tty.expect("\r\nabsent\r\n");
+    tty.expect("[private] arg> ");
+    tty.send("history resume\n");
+    tty.expect("\x1b[?2004harg> ");
+    tty.send("printf '<%s>\\n' \x1b.");
+    tty.expect("arg> printf '<%s>\\n' 'two words'");
+    tty.send("\n");
+    tty.expect("\r\n<two words>\r\n");
+    tty.expect("arg> ");
+    tty.finish();
+}

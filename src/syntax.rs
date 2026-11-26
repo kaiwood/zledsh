@@ -731,8 +731,27 @@ fn case_statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement
     })
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) fn last_argument(source: &str) -> Option<&str> {
+    let mut input = Source::new(source, Some(0));
+    let (_, argument) = simple_command_with_last(&mut input).ok()?;
+    skip_newlines(&mut input).ok()?;
+    if input.peek().is_some() || input.require_here_documents().is_err() {
+        return None;
+    }
+    argument.map(|range| &source[range])
+}
+
 fn simple_command(input: &mut Source<'_>) -> ParseResult<Command> {
+    simple_command_with_last(input).map(|(command, _)| command)
+}
+
+fn simple_command_with_last(
+    input: &mut Source<'_>,
+) -> ParseResult<(Command, Option<std::ops::Range<usize>>)> {
     let mut command = Command::default();
+    let mut has_name = false;
+    let mut last = None;
     loop {
         skip_space(input);
         let Some(&next) = input.peek() else {
@@ -771,7 +790,14 @@ fn simple_command(input: &mut Source<'_>) -> ParseResult<Command> {
                     )));
                 }
             }
-            command.words.push(word(input)?);
+            let start = input.offset;
+            let word = word(input)?;
+            if has_name {
+                last = Some(start..input.offset);
+            } else if !word.assignment {
+                has_name = true;
+            }
+            command.words.push(word);
         }
     }
     if command.words.is_empty() && command.redirects.is_empty() {
@@ -781,7 +807,7 @@ fn simple_command(input: &mut Source<'_>) -> ParseResult<Command> {
             Err("missing pipeline command or unexpected separator".into())
         };
     }
-    Ok(command)
+    Ok((command, last))
 }
 
 fn redirect(input: &mut Source<'_>) -> ParseResult<Option<Redirect>> {
