@@ -4,6 +4,7 @@ pub(crate) struct ShellOptions {
     pub errexit: bool,
     pub pipefail: bool,
     pub noglob: bool,
+    pub globstar: bool,
     pub noclobber: bool,
 }
 
@@ -12,6 +13,7 @@ impl ShellOptions {
         match name {
             "errexit" => self.errexit = enabled,
             "pipefail" => self.pipefail = enabled,
+            "globstar" => self.globstar = enabled,
             "noglob" => self.noglob = enabled,
             "noclobber" => self.noclobber = enabled,
             _ => return Err(format!("unsupported option: {name}")),
@@ -22,6 +24,7 @@ impl ShellOptions {
     pub fn named(self) -> impl Iterator<Item = (&'static str, bool)> {
         [
             ("errexit", self.errexit),
+            ("globstar", self.globstar),
             ("noclobber", self.noclobber),
             ("noglob", self.noglob),
             ("pipefail", self.pipefail),

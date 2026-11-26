@@ -167,3 +167,25 @@ fn noglob_can_be_enabled_at_invocation() {
     assert!(output.stderr.is_empty(), "{output:?}");
     assert_eq!(output.stdout, b"<f>\n<*.txt>\n");
 }
+
+#[test]
+fn opt_in_globstar_matches_zero_or_more_visible_directory_levels() {
+    assert_paths(
+        &[
+            "top.txt",
+            "a/next.txt",
+            "a/b/deep.txt",
+            ".hidden/secret.txt",
+        ],
+        r#"
+printf '<%s>\n' **/*.txt
+set -o globstar
+printf '<%s>\n' **/*.txt
+printf '<%s>\n' a/**/
+printf '<%s>\n' '**'/*.txt
+set -f
+printf '<%s>\n' **/*.txt
+"#,
+        "<a/next.txt>\n<a/b/deep.txt>\n<a/next.txt>\n<top.txt>\n<a/>\n<a/b/>\n<**/*.txt>\n<**/*.txt>\n",
+    );
+}

@@ -2303,7 +2303,7 @@ impl<'a> Invocation<'a> {
                     let quoted = part.origin == Origin::Quoted;
                     part.text.chars().map(move |ch| (ch, quoted))
                 });
-                if let Some(pattern) = crate::pathname::pattern(chars)? {
+                if let Some(pattern) = crate::pathname::pattern(chars, self.options.globstar)? {
                     if self.agent_command() {
                         return Err("pathname expansion must be submitted by the user".into());
                     }
