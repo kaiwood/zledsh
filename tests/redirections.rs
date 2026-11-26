@@ -461,3 +461,55 @@ printf '<%s>\n' "$result"
     );
     assert!(output.stderr.is_empty(), "{output:?}");
 }
+
+#[test]
+fn noclobber_rejects_existing_regular_files_but_allows_force_append_and_devices() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("existing"), b"original").unwrap();
+    std::os::unix::fs::symlink("existing", dir.path().join("link")).unwrap();
+    std::os::unix::fs::symlink("missing", dir.path().join("dangling")).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
+        .current_dir(dir.path())
+        .env_clear()
+        .env("HOME", dir.path())
+        .env("PATH", "/usr/bin:/bin")
+        .args([
+            "-c",
+            "-C",
+            r#"
+printf '%s\n' "$-"
+printf bad > existing || printf 'blocked regular\n'
+( printf bad > link ) || printf 'blocked symlink\n'
+printf bad > dangling || printf 'blocked dangling\n'
+/bin/cat existing
+printf '\n'
+printf new > fresh
+printf quiet > /dev/null
+printf forced >| existing
+printf appended >> existing
+printf '%s\n' "$(/bin/cat existing fresh)"
+set +o noclobber
+printf reset > existing
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        output.stdout,
+        b"C\nblocked regular\nblocked symlink\nblocked dangling\noriginal\nforcedappendednew\n"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.lines().count(), 3, "{stderr}");
+    for target in ["existing", "link", "dangling"] {
+        assert!(
+            stderr
+                .lines()
+                .any(|line| line.starts_with(&format!("zledsh: {target}:"))),
+            "{stderr}"
+        );
+    }
+    assert_eq!(fs::read(dir.path().join("existing")).unwrap(), b"reset");
+    assert_eq!(fs::read(dir.path().join("fresh")).unwrap(), b"new");
+    assert!(!dir.path().join("missing").exists());
+}

@@ -2256,6 +2256,7 @@ impl<'a> Invocation<'a> {
                         RedirectKind::Append => {
                             OpenOptions::new().append(true).create(true).open(target)
                         }
+                        RedirectKind::Write if self.options.noclobber => open_noclobber(target),
                         _ => File::create(target),
                     }
                     .map_err(|error| format!("{target}: {error}"))?;
@@ -2273,6 +2274,23 @@ fn worker_payload(state: &impl serde::Serialize) -> io::Result<File> {
     serde_json::to_writer(&mut payload, state)?;
     payload.rewind()?;
     Ok(payload)
+}
+
+fn open_noclobber(target: &str) -> io::Result<File> {
+    let exists = match OpenOptions::new().write(true).create_new(true).open(target) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => error,
+        result => return result,
+    };
+    if std::fs::metadata(target)?.is_file() {
+        return Err(exists);
+    }
+    // Devices and FIFOs may be opened, but never truncate here. If the path
+    // was replaced after metadata(), refuse to write to a regular file.
+    let file = OpenOptions::new().write(true).open(target)?;
+    if file.metadata()?.is_file() {
+        return Err(exists);
+    }
+    Ok(file)
 }
 
 fn here_input(text: &[u8], newline: bool) -> Result<Descriptor, String> {
