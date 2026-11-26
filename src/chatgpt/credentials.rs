@@ -45,9 +45,14 @@ const STORE_ERROR: Error = Error::Message("could not access the private ChatGPT 
 impl Store {
     pub fn lock(home: &Path, cancelled: &AtomicBool) -> Result<Self> {
         let directory = home.join(".zledsh");
-        prepare_directory(&directory)?;
-        let lock = lock_file(&directory.join("chatgpt-session.lock"), cancelled)?;
+        let store = Self::lock_current(&directory, cancelled)?;
         migrate(home, &directory, cancelled)?;
+        Ok(store)
+    }
+
+    fn lock_current(directory: &Path, cancelled: &AtomicBool) -> Result<Self> {
+        prepare_directory(directory)?;
+        let lock = lock_file(&directory.join("chatgpt-session.lock"), cancelled)?;
         Ok(Self {
             path: directory.join(SESSION_FILE),
             _lock: lock,
@@ -59,11 +64,12 @@ impl Store {
     }
 
     pub fn forget(home: &Path, cancelled: &AtomicBool) -> Result<bool> {
+        let directory = home.join(".zledsh");
         let legacy = home.join(".zledsh-chatgpt-session");
-        if !exists(&home.join(".zledsh"))? && !exists(&legacy)? {
+        if !exists(&directory)? && !exists(&legacy)? {
             return Ok(false);
         }
-        let store = Self::lock(home, cancelled)?;
+        let store = Self::lock_current(&directory, cancelled)?;
         let legacy_removed = if exists(&legacy)? {
             let _legacy_lock = lock_file(&home.join(".zledsh-chatgpt-session.lock"), cancelled)?;
             remove_session(&legacy)?
