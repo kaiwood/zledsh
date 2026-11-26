@@ -51,6 +51,19 @@ printf "status=%s\n" "$?"
 }
 
 #[test]
+fn eval_in_a_pipeline_inherits_functions_aliases_and_arrays() {
+    let output = run(r#"
+items=(first second)
+show() { printf '%s\n' "${items[1]}"; }
+alias zledsh_pipeline_show=show
+true | command eval zledsh_pipeline_show
+"#);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"second\n");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
+
+#[test]
 fn pipeline_status_is_the_last_stage_status() {
     assert_eq!(run("exit 19 | exit 7").status.code(), Some(7));
     assert_eq!(run("exit 19 | /bin/cat").status.code(), Some(0));

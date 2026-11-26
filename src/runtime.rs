@@ -1990,8 +1990,11 @@ impl<'a> Invocation<'a> {
                 ));
             }
             let name = argv[0].clone();
-            if !is_special_builtin(&name) && self.functions.contains_key(&name) && name != "command"
-            {
+            let evaluates_source = matches!(direct_name(&argv), Some("eval" | "." | "source"));
+            let calls_function = !is_special_builtin(&name)
+                && self.functions.contains_key(&name)
+                && name != "command";
+            if evaluates_source || calls_function {
                 if self.agent_command() {
                     return Err(io::Error::other(
                         "shell functions must be submitted by the user",
