@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 const TIMEOUT: Duration = Duration::from_secs(8);
 static OPEN_PTY: Mutex<()> = Mutex::new(());
 const ROLE: &str = "ZLEDSH_TEST_TERMINAL_ROLE";
+const TEST_BINARY: &str = "ZLEDSH_TEST_BINARY";
 
 pub struct Terminal {
     child: Child,
@@ -61,6 +62,7 @@ impl Terminal {
             .env("HOME", home.path())
             .env("PROMPT", prompt)
             .envs(env.iter().copied())
+            .envs(std::env::var_os(TEST_BINARY).map(|path| (TEST_BINARY, path)))
             .current_dir(home.path())
             .stdin(slave.try_clone().unwrap())
             .stdout(slave.try_clone().unwrap())
@@ -68,6 +70,13 @@ impl Terminal {
         // SAFETY: only async-signal-safe calls before exec. stdin is already the slave.
         unsafe {
             command.pre_exec(|| {
+                // An asynchronous launcher can ignore these signals. Start the
+                // PTY session with normal dispositions, like a terminal login.
+                for signal in [libc::SIGINT, libc::SIGQUIT] {
+                    if libc::signal(signal, libc::SIG_DFL) == libc::SIG_ERR {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
                 cvt(libc::setsid())?;
                 cvt(libc::ioctl(0, libc::TIOCSCTTY as _, 0))?;
                 Ok(())
@@ -204,7 +213,14 @@ fn terminal_child() {
     }
     let before = modes();
     let fd9 = File::create("fd9").unwrap();
-    let mut shell = Command::new(env!("CARGO_BIN_EXE_zledsh"));
+    let binary =
+        std::env::var_os(TEST_BINARY).unwrap_or_else(|| env!("CARGO_BIN_EXE_zledsh").into());
+    assert!(
+        Path::new(&binary).is_absolute(),
+        "{TEST_BINARY} must be an absolute path"
+    );
+    let mut shell = Command::new(binary);
+    shell.env_remove(TEST_BINARY);
     // SAFETY: dup2 is async-signal-safe and fd9 is owned until the child exits.
     unsafe {
         shell.pre_exec(move || {

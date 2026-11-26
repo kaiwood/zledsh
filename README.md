@@ -178,6 +178,12 @@ To run just the terminal integration tests:
 cargo test --locked --test terminal
 ```
 
+To run the same PTY tests against an installed binary, pass its absolute path:
+
+```sh
+ZLEDSH_TEST_BINARY="$HOME/.cargo/bin/zledsh" cargo test --locked --test terminal
+```
+
 If Git is installed on the system PATH, you can also exercise a local `git switch` branch completion callback against a temporary repository:
 
 ```sh
