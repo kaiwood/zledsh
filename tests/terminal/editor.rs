@@ -486,3 +486,27 @@ fn meta_word_cuts_and_yank_pop_are_local_to_public_edits() {
     tty.expect("cuts> ");
     tty.finish();
 }
+
+#[test]
+fn forward_history_search_cycles_switches_direction_and_restores_draft() {
+    let mut tty = Terminal::start("forward> ", &[], |_| {});
+    tty.expect("forward> ");
+    for word in ["first-match", "second-match"] {
+        tty.send(&format!("/bin/echo {word}\n"));
+        tty.expect(&format!("\r\n{word}\r\n"));
+        tty.expect("forward> ");
+    }
+    tty.send("/bin/echo draft\x13match");
+    tty.expect("(forward-i-search)`match': /bin/echo first-match");
+    tty.send("\x13");
+    tty.expect("(forward-i-search)`match': /bin/echo second-match");
+    tty.send("\x12");
+    tty.expect("(reverse-i-search)`match': /bin/echo first-match");
+    tty.send("\x07\n");
+    tty.expect("\r\ndraft\r\n");
+    tty.expect("forward> ");
+    tty.send("\x13match\x13\n");
+    tty.expect("\r\nsecond-match\r\n");
+    tty.expect("forward> ");
+    tty.finish();
+}

@@ -723,12 +723,20 @@ fn read_keys(
                 completion_menu::dismiss(echo, down)?;
             }
         }
-        if key == Key::Byte(18) {
+        if matches!(key, Key::Byte(18 | 19)) {
             let Some(history) = history.as_deref_mut().filter(|history| !history.paused) else {
                 continue;
             };
             history.refresh();
-            let Some(result) = reverse_search(input, echo, history, shell)? else {
+            let Some(result) = search_history(
+                input,
+                echo,
+                history,
+                shell,
+                key == Key::Byte(18),
+                history_index,
+            )?
+            else {
                 return Ok(Line::End);
             };
             if let Some((text, position)) = result.selected {
@@ -988,35 +996,41 @@ struct SearchExit<'a> {
     next: Key,
 }
 
-fn reverse_search<'a>(
+fn search_history<'a>(
     input: &mut impl BufRead,
     echo: &mut impl Write,
     history: &'a History,
     shell: &mut Invocation<'_>,
+    mut backward: bool,
+    anchor: Option<usize>,
 ) -> io::Result<Option<SearchExit<'a>>> {
     let mut query = Vec::new();
     let mut found = None;
     let count = history.entries().len();
     loop {
-        let prompt = format!("(reverse-i-search)`{}': ", display(&query));
+        let direction = if backward { "reverse" } else { "forward" };
+        let prompt = format!("({direction}-i-search)`{}': ", display(&query));
         let text = found.map_or("", |(_, text, _)| text);
         redraw(echo, &prompt, text.as_bytes(), text.len())?;
         echo.flush()?;
         let Some(key) = read_key(input, shell)? else {
             return Ok(None);
         };
-        let bound = match key {
-            Key::Byte(18) => found.map_or(count, |(index, _, _)| index),
+        let repeat = match key {
+            Key::Byte(18 | 19) => {
+                backward = key == Key::Byte(18);
+                true
+            }
             Key::Byte(8 | 127) => {
                 query.truncate(previous_char(&query, query.len()));
-                count
+                false
             }
             Key::Byte(byte @ (b' '..=b'~' | 128..=255)) => {
                 if query.len() >= 4096 {
                     continue;
                 }
                 query.push(byte);
-                count
+                false
             }
             Key::Byte(12) => {
                 echo.write_all(b"\x1b[H\x1b[2J")?;
@@ -1045,16 +1059,35 @@ fn reverse_search<'a>(
             .ok()
             .filter(|text| !text.is_empty());
         if let Some(pattern) = pattern {
-            let matched =
-                history
-                    .entries()
-                    .take(bound)
-                    .enumerate()
-                    .rev()
-                    .find_map(|(index, text)| {
-                        text.find(pattern).map(|position| (index, text, position))
-                    });
-            if key != Key::Byte(18) || matched.is_some() {
+            let current = repeat.then_some(found).flatten().map(|(index, _, _)| index);
+            let mut entries = history.entries().enumerate();
+            let mut matching = |(index, text): (usize, &'a str)| {
+                let within = if let Some(current) = current {
+                    if backward {
+                        index < current
+                    } else {
+                        index > current
+                    }
+                } else {
+                    anchor.is_none_or(|anchor| {
+                        if backward {
+                            index <= anchor
+                        } else {
+                            index >= anchor
+                        }
+                    })
+                };
+                within
+                    .then(|| text.find(pattern))
+                    .flatten()
+                    .map(|position| (index, text, position))
+            };
+            let matched = if backward {
+                entries.rev().find_map(matching)
+            } else {
+                entries.find_map(&mut matching)
+            };
+            if !repeat || matched.is_some() || count == 0 {
                 found = matched;
             }
         } else {
