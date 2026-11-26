@@ -33,42 +33,50 @@ fn field_text(field: Field) -> String {
     field.into_iter().map(|part| part.text).collect()
 }
 
-fn split_field(field: Field, ifs: &str, output: &mut Vec<String>) {
+fn split_field(field: Field, ifs: &str) -> Vec<Field> {
     // POSIX.1-2024 2.6.5: IFS whitespace can precede a non-whitespace
     // delimiter as part of the same terminator. Only the latter forces a field.
-    let mut candidate = String::new();
-    let mut present = false;
+    let mut output = Vec::new();
+    let mut candidate = Field::new();
     let mut whitespace = false;
-    for Fragment { text, origin } in field {
-        if origin != Origin::Expansion {
-            if whitespace && present {
+    for part in field {
+        if part.origin != Origin::Expansion {
+            if whitespace && !candidate.is_empty() {
                 output.push(std::mem::take(&mut candidate));
             }
             whitespace = false;
-            candidate.push_str(&text);
-            present = true;
+            candidate.push(part);
             continue;
         }
-        for ch in text.chars() {
+        for ch in part.text.chars() {
             if !ifs.contains(ch) {
-                if whitespace && present {
+                if whitespace && !candidate.is_empty() {
                     output.push(std::mem::take(&mut candidate));
                 }
                 whitespace = false;
-                candidate.push(ch);
-                present = true;
+                if let Some(last) = candidate
+                    .last_mut()
+                    .filter(|last| last.origin == Origin::Expansion)
+                {
+                    last.text.push(ch);
+                } else {
+                    candidate.push(Fragment {
+                        text: ch.into(),
+                        origin: Origin::Expansion,
+                    });
+                }
             } else if DEFAULT_IFS.contains(ch) {
                 whitespace = true;
             } else {
                 output.push(std::mem::take(&mut candidate));
                 whitespace = false;
-                present = false;
             }
         }
     }
-    if present {
+    if !candidate.is_empty() {
         output.push(candidate);
     }
+    output
 }
 
 pub(crate) struct Invocation<'a> {
@@ -1342,7 +1350,7 @@ impl<'a> Invocation<'a> {
     fn expand_words(&self, words: &[Word], status: &mut Option<u8>) -> Result<Vec<String>, String> {
         let mut fields = Vec::new();
         for word in words {
-            self.split_word(word, status, &mut fields)?;
+            self.expand_argument(word, status, &mut fields)?;
         }
         Ok(fields)
     }
@@ -1360,13 +1368,13 @@ impl<'a> Invocation<'a> {
             {
                 fields.extend(self.expand(word, status)?);
             } else {
-                self.split_word(word, status, &mut fields)?;
+                self.expand_argument(word, status, &mut fields)?;
             }
         }
         Ok(fields)
     }
 
-    fn split_word(
+    fn expand_argument(
         &self,
         word: &Word,
         status: &mut Option<u8>,
@@ -1374,7 +1382,23 @@ impl<'a> Invocation<'a> {
     ) -> Result<(), String> {
         let ifs = self.variable("IFS");
         for field in self.expand_parts(word, status, true)? {
-            split_field(field, ifs.as_deref().unwrap_or(DEFAULT_IFS), output);
+            for field in split_field(field, ifs.as_deref().unwrap_or(DEFAULT_IFS)) {
+                let chars = field.iter().flat_map(|part| {
+                    let quoted = part.origin == Origin::Quoted;
+                    part.text.chars().map(move |ch| (ch, quoted))
+                });
+                if let Some(pattern) = crate::pathname::pattern(chars) {
+                    if self.agent_command() {
+                        return Err("pathname expansion must be submitted by the user".into());
+                    }
+                    let matches = crate::pathname::expand(pattern)?;
+                    if !matches.is_empty() {
+                        output.extend(matches);
+                        continue;
+                    }
+                }
+                output.push(field_text(field));
+            }
         }
         Ok(())
     }

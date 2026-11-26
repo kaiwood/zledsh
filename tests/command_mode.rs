@@ -102,12 +102,12 @@ fn eval_runs_native_code_with_current_state_and_redirects() {
         .args(["-c", r#"
             eval "$(printf '%s' 'name=loaded; if true; then printf "%s" "$name" | /bin/cat; fi')" > fixture
             printf '%s:' "$name"; /bin/cat fixture
-            eval 'for?'; printf ':%s' "$?"
+            eval 'printf wrong; printf %s $((1 + 2))'; printf ':%s' "$?"
         "#])
         .output().unwrap();
     assert!(output.status.success());
     assert_eq!(output.stdout, b"loaded:loaded:2");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("eval:"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("eval: arithmetic expansion"));
 }
 
 #[test]
