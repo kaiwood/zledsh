@@ -392,3 +392,41 @@ fn shell_private_descriptors_are_not_available_as_duplication_sources() {
     assert!(errors.contains("3: bad file descriptor"));
     assert!(errors.contains("9: bad file descriptor"));
 }
+
+#[test]
+fn compound_and_function_redirects_are_ordered_and_scoped() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = r#"
+path=initial
+f() { printf 'function\n'; printf 'diagnostic\n' >&2; } >"$path" 2>&1
+path=called
+f
+{ printf 'group\n'; printf 'group-err\n' >&2; } 2>&1 >group
+( printf 'subshell\n' ) >sub
+{ printf wrong; } >partial <missing || printf 'failed\n'
+f 3>&1 <missing || printf 'failed call\n'
+printf 'restored\n'
+"#;
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
+        .current_dir(dir.path())
+        .args(["-c", source])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"group-err\nfailed\nfailed call\nrestored\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr)
+            .matches("missing")
+            .count(),
+        2
+    );
+    assert!(!dir.path().join("initial").exists());
+    for (file, expected) in [
+        ("called", "function\ndiagnostic\n"),
+        ("group", "group\n"),
+        ("sub", "subshell\n"),
+        ("partial", ""),
+    ] {
+        assert_eq!(fs::read_to_string(dir.path().join(file)).unwrap(), expected);
+    }
+}

@@ -243,6 +243,10 @@ pub(crate) type Script = Vec<Statement>;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Statement {
     Group(Script),
+    Redirected {
+        command: Box<Statement>,
+        redirects: Vec<Redirect>,
+    },
     Subshell(Script),
     Pipeline(Vec<Command>),
     Array {
@@ -455,11 +459,38 @@ fn statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement> {
     } else {
         Statement::Pipeline(pipeline(input)?)
     };
+    let statement = match statement {
+        Statement::Pipeline(_) | Statement::Array { .. } => statement,
+        Statement::Function { name, body } => Statement::Function {
+            name,
+            body: vec![compound_redirects(input, Statement::Group(body))?],
+        },
+        compound => compound_redirects(input, compound)?,
+    };
     Ok(if negated {
         Statement::Negated(Box::new(statement))
     } else {
         statement
     })
+}
+
+fn compound_redirects(input: &mut Source<'_>, command: Statement) -> ParseResult<Statement> {
+    let mut redirects = Vec::new();
+    loop {
+        skip_space(input);
+        let Some(redirect) = redirect(input)? else {
+            break;
+        };
+        redirects.push(redirect);
+    }
+    if redirects.is_empty() {
+        Ok(command)
+    } else {
+        Ok(Statement::Redirected {
+            command: Box::new(command),
+            redirects,
+        })
+    }
 }
 
 fn array_header(input: &mut Source<'_>) -> Option<(String, bool)> {

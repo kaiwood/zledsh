@@ -227,7 +227,7 @@ impl<'a> Invocation<'a> {
                         self.expand_alias(command)?;
                     }
                 }
-                Statement::Negated(inner) => {
+                Statement::Negated(inner) | Statement::Redirected { command: inner, .. } => {
                     self.expand_aliases(std::slice::from_mut(inner.as_mut()))?
                 }
                 Statement::AndOr { first, rest } => {
@@ -365,6 +365,19 @@ impl<'a> Invocation<'a> {
                     self.run_pipeline_with_descriptors(pipeline, input, descriptors)
                 }
                 Statement::Group(body) => self.run_with_descriptors(body, input, descriptors),
+                Statement::Redirected { command, redirects } => {
+                    let mut local = descriptors.clone();
+                    if let Err(error) = self.redirect(redirects, &mut local, &mut None) {
+                        report(&local[2], &error);
+                        self.status = if self.exited { 2 } else { 1 };
+                    } else {
+                        self.run_with_descriptors(
+                            std::slice::from_ref(command.as_ref()),
+                            input,
+                            &local,
+                        );
+                    }
+                }
                 Statement::Subshell(body) => {
                     self.status = match self
                         .subshell_stage(body, descriptors)
