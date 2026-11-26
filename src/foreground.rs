@@ -265,13 +265,13 @@ impl Foreground {
             Outcome::TimedOut => {
                 drop(job);
                 terminal.restore()?;
-                eprintln!("kwsh: shell agent command timed out");
+                eprintln!("zledsh: shell agent command timed out");
                 Ok(124)
             }
             Outcome::Stopped(code) if deadline.is_some() => {
                 drop(job);
                 terminal.restore()?;
-                eprintln!("kwsh: shell agent command stopped and was cancelled");
+                eprintln!("zledsh: shell agent command stopped and was cancelled");
                 Ok(code)
             }
             Outcome::Stopped(code) => {

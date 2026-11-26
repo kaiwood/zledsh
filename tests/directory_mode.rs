@@ -2,7 +2,7 @@ use std::{fs, process::Command};
 
 #[test]
 fn directory_changes_are_live_and_failed_changes_preserve_the_previous_directory() {
-    let root = std::env::temp_dir().join(format!("kwsh-directory-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!("zledsh-directory-{}", std::process::id()));
     fs::create_dir(&root).unwrap();
     let home = root.join("home with spaces");
     let nested = home.join("nested");
@@ -10,7 +10,7 @@ fn directory_changes_are_live_and_failed_changes_preserve_the_previous_directory
     let root = root.canonicalize().unwrap();
     let home = home.canonicalize().unwrap();
     let nested = nested.canonicalize().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .current_dir(&root)
         .env("HOME", &home)
         .args(["-c", "cd; cd nested; cd missing; printf 'new cwd' > artifact; pwd; /bin/pwd; cd -; printf '%s\\n' \"$PWD\" \"$OLDPWD\""])

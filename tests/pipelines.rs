@@ -1,7 +1,7 @@
 use std::process::{Command, Output};
 
 fn run(source: &str) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .args(["-c", source])
         .output()
         .unwrap()

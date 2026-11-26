@@ -44,7 +44,7 @@ const STORE_ERROR: Error = Error::Message("could not access the private ChatGPT 
 
 impl Store {
     pub fn lock(home: &Path, cancelled: &AtomicBool) -> Result<Self> {
-        let directory = home.join(".kwsh");
+        let directory = home.join(".zledsh");
         prepare_directory(&directory)?;
         let lock = lock_file(&directory.join("chatgpt-session.lock"), cancelled)?;
         migrate(home, &directory, cancelled)?;
@@ -59,13 +59,13 @@ impl Store {
     }
 
     pub fn forget(home: &Path, cancelled: &AtomicBool) -> Result<bool> {
-        let legacy = home.join(".kwsh-chatgpt-session");
-        if !exists(&home.join(".kwsh"))? && !exists(&legacy)? {
+        let legacy = home.join(".zledsh-chatgpt-session");
+        if !exists(&home.join(".zledsh"))? && !exists(&legacy)? {
             return Ok(false);
         }
         let store = Self::lock(home, cancelled)?;
         let legacy_removed = if exists(&legacy)? {
-            let _legacy_lock = lock_file(&home.join(".kwsh-chatgpt-session.lock"), cancelled)?;
+            let _legacy_lock = lock_file(&home.join(".zledsh-chatgpt-session.lock"), cancelled)?;
             remove_session(&legacy)?
         } else {
             false
@@ -126,7 +126,7 @@ fn remove_session(path: &Path) -> Result<bool> {
 
 fn prepare_directory(path: &Path) -> Result<()> {
     const DIRECTORY_ERROR: Error =
-        Error::Message("~/.kwsh must be a directory you own with mode 0700 (not a symlink)");
+        Error::Message("~/.zledsh must be a directory you own with mode 0700 (not a symlink)");
     match DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -141,9 +141,9 @@ fn prepare_directory(path: &Path) -> Result<()> {
 
 fn migrate(home: &Path, directory: &Path, cancelled: &AtomicBool) -> Result<()> {
     let paths = [
-        (home.join(".kwsh-chatgpt-host"), directory.join(HOST_FILE)),
+        (home.join(".zledsh-chatgpt-host"), directory.join(HOST_FILE)),
         (
-            home.join(".kwsh-chatgpt-session"),
+            home.join(".zledsh-chatgpt-session"),
             directory.join(SESSION_FILE),
         ),
     ];
@@ -155,7 +155,7 @@ fn migrate(home: &Path, directory: &Path, cancelled: &AtomicBool) -> Result<()> 
         return Ok(());
     }
     // Coordinate with a previous build that might still be rotating credentials.
-    let _legacy_lock = lock_file(&home.join(".kwsh-chatgpt-session.lock"), cancelled)?;
+    let _legacy_lock = lock_file(&home.join(".zledsh-chatgpt-session.lock"), cancelled)?;
     for (old, new) in paths {
         if !exists(&new)? && exists(&old)? {
             let file = options().open(&old).map_err(|_| STORE_ERROR)?;
@@ -228,8 +228,8 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let home = home.path();
         let running = AtomicBool::new(false);
-        let legacy_host = home.join(".kwsh-chatgpt-host");
-        let legacy_session = home.join(".kwsh-chatgpt-session");
+        let legacy_host = home.join(".zledsh-chatgpt-host");
+        let legacy_session = home.join(".zledsh-chatgpt-session");
         let write_private = |path: &Path, contents: &[u8]| {
             use std::io::Write;
             options()
@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn rejects_insecure_or_symlinked_state_directories() {
         let home = tempfile::tempdir().unwrap();
-        let directory = home.path().join(".kwsh");
+        let directory = home.path().join(".zledsh");
         let running = AtomicBool::new(false);
         DirBuilder::new().mode(0o755).create(&directory).unwrap();
         assert!(Store::lock(home.path(), &running).is_err());

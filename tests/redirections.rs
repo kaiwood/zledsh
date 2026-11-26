@@ -7,7 +7,7 @@ fn input_redirect_is_local_to_the_command_and_works_for_builtins_and_children() 
     fs::write(dir.path().join("input file"), "file line\nfile tail\n").unwrap();
     let stdin = dir.path().join("stdin");
     fs::write(&stdin, "original stdin\n").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .current_dir(dir.path())
         .stdin(fs::File::open(stdin).unwrap())
         .args([
@@ -30,7 +30,7 @@ printf '<%s>\n' "$line"
 fn pipeline_input_can_be_overridden_by_an_explicit_redirect() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("file with spaces"), "from file\n").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .current_dir(dir.path())
         .args([
             "-c",
@@ -48,7 +48,7 @@ fn failed_input_redirect_skips_the_command_and_leaves_input_intact() {
     let dir = tempfile::tempdir().unwrap();
     let stdin = dir.path().join("stdin");
     fs::write(&stdin, "still here\n").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .current_dir(dir.path())
         .stdin(fs::File::open(stdin).unwrap())
         .args([
@@ -68,7 +68,7 @@ fn append_preserves_existing_output_and_force_write_replaces_it() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("log"), "first\n").unwrap();
     fs::write(dir.path().join("replace"), "old longer contents\n").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .current_dir(dir.path())
         .args([
             "-c",
@@ -100,7 +100,7 @@ fn read_write_redirection_creates_files_without_truncating_existing_files() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("data"), "head\ntail\n").unwrap();
     fs::write(dir.path().join("output"), "old suffix\n").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .current_dir(dir.path())
         .args([
             "-c",
@@ -127,7 +127,7 @@ printf '%s' new 1<>output
 // POSIX Shell Command Language 2.7.4.
 #[test]
 fn here_document_quotes_and_tab_stripping_control_expansion() {
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .args([
             "-c",
             concat!(
@@ -158,7 +158,7 @@ fn here_document_quotes_and_tab_stripping_control_expansion() {
 #[test]
 fn here_document_bodies_are_read_in_order_but_only_expanded_if_executed() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .current_dir(dir.path())
         .args([
             "-c",
@@ -185,7 +185,7 @@ printf '<%s>\n' "$value"
 
 #[test]
 fn nested_substitution_reads_its_own_here_documents() {
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .args([
             "-c",
             r#"name=inside
@@ -215,10 +215,10 @@ SECOND
 #[test]
 fn here_document_larger_than_a_pipe_buffer_is_delivered_in_full() {
     let dir = tempfile::tempdir().unwrap();
-    let script = dir.path().join("large.kwsh");
+    let script = dir.path().join("large.zledsh");
     let body = "x".repeat(512 * 1024);
     fs::write(&script, format!("/bin/cat <<'EOF'\n{body}\nEOF\n")).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .arg(script)
         .output()
         .unwrap();
@@ -231,7 +231,7 @@ fn here_document_larger_than_a_pipe_buffer_is_delivered_in_full() {
 
 #[test]
 fn unterminated_here_document_does_not_execute_its_command() {
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .args(["-c", "printf wrong <<EOF\nunterminated\n"])
         .output()
         .unwrap();
@@ -244,7 +244,7 @@ fn unterminated_here_document_does_not_execute_its_command() {
 #[test]
 fn descriptor_duplication_obeys_redirection_order_and_uses_the_pipeline() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .current_dir(dir.path())
         .args([
             "-c",
@@ -269,7 +269,7 @@ printf '%s' built-in 3>via-three 1>&3 3>&-
 fn a_function_shares_open_descriptors_with_builtins_and_children() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("input"), "first\nrest\n").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .current_dir(dir.path())
         .args([
             "-c",
@@ -298,7 +298,7 @@ fn closing_an_inherited_descriptor_is_local_to_one_command() {
             "-c",
             "exec \"$1\" -c \"$2\" 9>inherited",
             "fixture",
-            env!("CARGO_BIN_EXE_kwsh"),
+            env!("CARGO_BIN_EXE_zledsh"),
             r#"printf before >&9
 /bin/sh -c 'if ( : >&9 ) 2>/dev/null; then exit 77; fi' 9>&-
 printf 'child=%s\n' "$?"
@@ -321,7 +321,7 @@ printf after >&9
 
 #[test]
 fn a_builtin_with_closed_standard_descriptors_fails_without_leaking_the_close() {
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .args([
             "-c",
             r#"true | printf wrong >&-
@@ -335,14 +335,14 @@ printf 'read=%s\n' "$?"
     assert!(output.status.success());
     assert_eq!(output.stdout, b"write=1\nread=1\n");
     let errors = String::from_utf8_lossy(&output.stderr);
-    assert!(errors.contains("kwsh: printf:"));
-    assert!(errors.contains("kwsh: read:"));
+    assert!(errors.contains("zledsh: printf:"));
+    assert!(errors.contains("zledsh: read:"));
 }
 
 #[test]
 fn shell_private_descriptors_are_not_available_as_duplication_sources() {
     let dir = tempfile::tempdir().unwrap();
-    let script = dir.path().join("private.kwsh");
+    let script = dir.path().join("private.zledsh");
     fs::write(
         &script,
         "printf wrong 9>first-out >&3\nprintf 'first=%s\\n' \"$?\"\nprintf wrong >&9\nprintf 'second=%s\\n' \"$?\"\n",
@@ -354,7 +354,7 @@ fn shell_private_descriptors_are_not_available_as_duplication_sources() {
             "-c",
             "exec \"$1\" \"$2\" 3>&- 4>&- 5>&- 6>&- 7>&- 8>&- 9>&-",
             "fixture",
-            env!("CARGO_BIN_EXE_kwsh"),
+            env!("CARGO_BIN_EXE_zledsh"),
         ])
         .arg(script)
         .output()

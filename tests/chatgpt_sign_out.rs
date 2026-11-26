@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 fn sign_out(home: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .arg("--chatgpt-sign-out")
         .env("HOME", home)
         .output()
@@ -28,12 +28,12 @@ fn private_file(path: &Path) {
 #[test]
 fn sign_out_removes_current_and_legacy_sessions_but_not_preferences() {
     let home = tempfile::tempdir().unwrap();
-    let directory = home.path().join(".kwsh");
+    let directory = home.path().join(".zledsh");
     assert!(sign_out(home.path()).status.success());
     assert!(!directory.exists());
     DirBuilder::new().mode(0o700).create(&directory).unwrap();
     let session = directory.join("chatgpt-session");
-    let legacy = home.path().join(".kwsh-chatgpt-session");
+    let legacy = home.path().join(".zledsh-chatgpt-session");
     let preferences = directory.join("chatgpt.json");
     let host = directory.join("chatgpt-host");
     for path in [&session, &legacy, &preferences, &host] {
@@ -50,7 +50,7 @@ fn sign_out_removes_current_and_legacy_sessions_but_not_preferences() {
 #[test]
 fn sign_out_does_not_follow_a_session_symlink() {
     let home = tempfile::tempdir().unwrap();
-    let directory = home.path().join(".kwsh");
+    let directory = home.path().join(".zledsh");
     DirBuilder::new().mode(0o700).create(&directory).unwrap();
     let target = home.path().join("fixture");
     private_file(&target);

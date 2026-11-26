@@ -62,7 +62,7 @@ pub(super) fn authorize(
         ("code_challenge", &challenge),
     ];
     if previous.is_none() {
-        fields.push(("agent_name_hint", "kwsh"));
+        fields.push(("agent_name_hint", "zledsh"));
     }
     let query = form(&fields);
     let url = format!("{ISSUER}/api/accounts/authorize?{query}");
@@ -354,7 +354,7 @@ fn await_callback(
                 let (status, message) = match callback {
                     Some(Callback::Accepted(_)) => (
                         "200 OK",
-                        "Authorization received. Return to kwsh to finish signing in.",
+                        "Authorization received. Return to zledsh to finish signing in.",
                     ),
                     Some(Callback::Denied) => {
                         ("200 OK", "Authorization declined. You may close this tab.")

@@ -356,23 +356,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kwsh"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "form_urlencoded",
- "httparse",
- "jsonwebtoken",
- "libc",
- "ring",
- "serde",
- "serde_json",
- "tempfile",
- "unicode-width",
- "ureq",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.190"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1010,6 +993,23 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "zledsh"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "form_urlencoded",
+ "httparse",
+ "jsonwebtoken",
+ "libc",
+ "ring",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "unicode-width",
+ "ureq",
 ]
 
 [[package]]

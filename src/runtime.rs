@@ -1718,8 +1718,8 @@ fn stage(exec: process::Exec, name: &str, descriptors: &Descriptors) -> io::Resu
     Ok(process::Stage {
         exec,
         streams,
-        missing: format!("kwsh: {name}: command not found\n").into_bytes(),
-        failed: format!("kwsh: {name}: cannot execute\n").into_bytes(),
+        missing: format!("zledsh: {name}: command not found\n").into_bytes(),
+        failed: format!("zledsh: {name}: cannot execute\n").into_bytes(),
     })
 }
 
@@ -1775,7 +1775,7 @@ fn read_from<T>(
 }
 
 fn report(output: &Descriptor, message: &str) {
-    let _ = output.write(&format!("kwsh: {message}\n"));
+    let _ = output.write(&format!("zledsh: {message}\n"));
 }
 
 fn printf(args: &[String]) -> Result<String, String> {
@@ -1821,11 +1821,11 @@ mod tests {
 
     #[test]
     fn agent_external_command_keeps_terminal_handoff_with_null_stdin() {
-        const CHILD: &str = "KWSH_TEST_AGENT_FOREGROUND_CHILD";
+        const CHILD: &str = "ZLEDSH_TEST_AGENT_FOREGROUND_CHILD";
         const TEST: &str =
             "runtime::tests::agent_external_command_keeps_terminal_handoff_with_null_stdin";
         if std::env::var_os(CHILD).is_some() {
-            let mut invocation = Invocation::new("kwsh", &[]);
+            let mut invocation = Invocation::new("zledsh", &[]);
             invocation.foreground = Some(crate::foreground::Foreground::new().unwrap());
             let mut run = |source| {
                 let mut commands = crate::syntax::parse(source).ok().unwrap();

@@ -6,10 +6,10 @@ use std::time::Duration;
 
 #[test]
 fn hosted_turns_in_a_real_terminal() {
-    const CHILD: &str = "KWSH_TEST_HOSTED_PTY_CHILD";
+    const CHILD: &str = "ZLEDSH_TEST_HOSTED_PTY_CHILD";
     if env::var_os(CHILD).is_some() {
         let status = transcript::run(|transcript| {
-            let mut shell = Invocation::new("kwsh", &[]);
+            let mut shell = Invocation::new("zledsh", &[]);
             let mut input = io::BufReader::with_capacity(1, crate::process::Stdin);
             let session = chatgpt::Session::fixture(respond);
             std::process::exit(i32::from(
@@ -31,7 +31,7 @@ fn hosted_turns_in_a_real_terminal() {
 
     let work = tempfile::tempdir().unwrap();
     let name =
-        concat!(module_path!(), "::hosted_turns_in_a_real_terminal").trim_start_matches("kwsh::");
+        concat!(module_path!(), "::hosted_turns_in_a_real_terminal").trim_start_matches("zledsh::");
     let mut child = crate::test_terminal::test_command(name, true)
         .current_dir(work.path())
         .envs([

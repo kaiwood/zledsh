@@ -31,13 +31,13 @@ use std::{
 };
 
 const SHELL_FDS: usize = 10;
-const SUBSTITUTION: &str = "--kwsh-substitution";
-const PIPELINE_BUILTIN: &str = "--kwsh-pipeline-builtin";
+const SUBSTITUTION: &str = "--zledsh-substitution";
+const PIPELINE_BUILTIN: &str = "--zledsh-pipeline-builtin";
 
-/// Launch the standalone `kwsh` shell.
+/// Launch the standalone `zledsh` shell.
 pub fn launch() -> ExitCode {
     let mut args = env::args_os();
-    let name = args.next().unwrap_or_else(|| "kwsh".into());
+    let name = args.next().unwrap_or_else(|| "zledsh".into());
     let mut args = args.peekable();
     if args.next_if(|arg| arg == PIPELINE_BUILTIN).is_some() {
         return run_pipeline_builtin(args);
@@ -50,7 +50,7 @@ pub fn launch() -> ExitCode {
     match result {
         Ok(status) => status.into(),
         Err(error) => {
-            eprintln!("kwsh: {error}");
+            eprintln!("zledsh: {error}");
             2.into()
         }
     }
@@ -73,7 +73,7 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
         return 2.into();
     }
     if matches!(name.as_str(), "fg" | "bg" | "jobs" | "wait") {
-        eprintln!("kwsh: {name}: not available in a pipeline stage");
+        eprintln!("zledsh: {name}: not available in a pipeline stage");
         return 1.into();
     }
     let command = syntax::Command {
@@ -90,7 +90,7 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
         background: false,
     };
     let mut input = BufReader::with_capacity(1, process::Stdin);
-    let mut invocation = runtime::Invocation::new("kwsh", &[]);
+    let mut invocation = runtime::Invocation::new("zledsh", &[]);
     invocation.run_pipeline_builtin(&command, &mut input, closed);
     invocation.status.into()
 }
@@ -163,11 +163,11 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
     let option = option.as_ref().unwrap();
     match flag {
         Some("--help") => {
-            println!("Usage: kwsh [-i] [-c command [name [args...]]]");
-            println!("       kwsh [-i] [--] script [args...]");
-            println!("       kwsh [-i] -s [--] [args...]");
+            println!("Usage: zledsh [-i] [-c command [name [args...]]]");
+            println!("       zledsh [-i] [--] script [args...]");
+            println!("       zledsh [-i] -s [--] [args...]");
             #[cfg(any(target_os = "macos", target_os = "linux"))]
-            println!("       kwsh --chatgpt | --chatgpt-sign-out");
+            println!("       zledsh --chatgpt | --chatgpt-sign-out");
             Ok(0)
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -251,7 +251,7 @@ fn run_input(
             Ok(commands) => invocation.run(&commands, input),
             Err(syntax::ParseError::Incomplete(_)) if count != 0 => continue,
             Err(error) if interactive => {
-                eprintln!("kwsh: {}", error.message());
+                eprintln!("zledsh: {}", error.message());
                 invocation.status = 2;
             }
             Err(error) => return Err(error.message().to_owned()),

@@ -8,8 +8,8 @@ require "timeout"
 require "tmpdir"
 
 class TerminalSpikeTest < Minitest::Test
-  SPIKE = File.expand_path(ENV.fetch("KWSH_SPIKE", File.expand_path("../target/debug/examples/terminal_spike", __dir__)))
-  KWSH = File.expand_path("../target/debug/kwsh", __dir__)
+  SPIKE = File.expand_path(ENV.fetch("ZLEDSH_SPIKE", File.expand_path("../target/debug/examples/terminal_spike", __dir__)))
+  ZLEDSH = File.expand_path("../target/debug/zledsh", __dir__)
   PROMPT = "spike> "
   TIMEOUT = 5
 
@@ -74,7 +74,7 @@ class TerminalSpikeTest < Minitest::Test
   end
 
   def test_real_interpreter_cancels_draft_and_restores_terminal
-    with_terminal(KWSH, env: { "PROMPT" => "rust> ", "TERM" => "xterm" }, prompt: "rust> ") do |reader, writer, pid|
+    with_terminal(ZLEDSH, env: { "PROMPT" => "rust> ", "TERM" => "xterm" }, prompt: "rust> ") do |reader, writer, pid|
       writer.write("exit 17\x03")
       read_until(reader, "^C\r\n")
       read_until(reader, "rust> ")
@@ -89,7 +89,7 @@ class TerminalSpikeTest < Minitest::Test
     prompt = "here> "
     continuation = "body> "
     env = { "PROMPT" => prompt, "PS2" => continuation, "TERM" => "xterm" }
-    with_terminal(KWSH, "-i", env: env, prompt: prompt) do |reader, writer, pid, work|
+    with_terminal(ZLEDSH, "-i", env: env, prompt: prompt) do |reader, writer, pid, work|
       writer.write("printf wrong > marker <<END\n")
       read_until(reader, continuation)
       writer.write("not submitted\n")
@@ -112,7 +112,7 @@ class TerminalSpikeTest < Minitest::Test
     probe = "#{Shellwords.escape(SPIKE)} --foreground-probe\n"
     prompt = "jobs> "
     env = { "PS1" => prompt, "PROMPT" => nil, "TERM" => "xterm" }
-    with_terminal(KWSH, env: env, prompt: prompt) do |reader, writer, pid|
+    with_terminal(ZLEDSH, env: env, prompt: prompt) do |reader, writer, pid|
       writer.write(probe)
       read_until(reader, "foreground ready\r\n")
       writer.write("\x03")
@@ -135,7 +135,7 @@ class TerminalSpikeTest < Minitest::Test
   def test_pipeline_interrupts_and_resumes_as_one_foreground_job
     probe = "#{Shellwords.escape(SPIKE)} --foreground-probe"
     prompt = "pipeline> "
-    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
+    with_terminal(ZLEDSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
       writer.write("#{probe} | /bin/cat\n")
       read_until(reader, "foreground ready\r\n")
       writer.write("\x03")
@@ -157,7 +157,7 @@ class TerminalSpikeTest < Minitest::Test
 
   def test_stopped_job_can_run_in_background_and_return_to_foreground
     prompt = "job> "
-    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
+    with_terminal(ZLEDSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
       writer.write("/bin/sleep 30\n")
       read_until(reader, "/bin/sleep 30\e[?2004l\r\n")
       # The foreground command must own the terminal before it receives Ctrl+Z.
@@ -187,10 +187,10 @@ class TerminalSpikeTest < Minitest::Test
 
   def test_startup_and_prompt
     env = { "ENV" => '$HOME/startup file', "PS1" => '$MARK! !!> ', "PROMPT" => nil, "TERM" => "xterm" }
-    with_terminal(KWSH, env: env, prompt: "~ [0] %> ", setup: ->(home) {
+    with_terminal(ZLEDSH, env: env, prompt: "~ [0] %> ", setup: ->(home) {
       Dir.mkdir(File.join(home, ".kward"))
-      File.write(File.join(home, ".kward/kwshrc"), "RC=primary\n")
-      File.write(File.join(home, ".kwshrc"), "RC=\"$RC:personal\"\nENV=ignored\nPROMPT='%~ [%?] %%> '\n")
+      File.write(File.join(home, ".kward/zledshrc"), "RC=primary\n")
+      File.write(File.join(home, ".zledshrc"), "RC=\"$RC:personal\"\nENV=ignored\nPROMPT='%~ [%?] %%> '\n")
       File.write(File.join(home, "startup file"), "printf 'startup:%s\\n' \"$RC\"\nMARK=env\n")
       File.write(File.join(home, "ignored"), "exit 42\n")
     }, start: false) do |reader, writer, pid|
@@ -205,7 +205,7 @@ class TerminalSpikeTest < Minitest::Test
 
   def test_private_commands_are_not_persisted_or_recalled
     env = { "PROMPT" => "hist> ", "HISTFILE" => "history.jsonl", "TERM" => "xterm" }
-    with_terminal(KWSH, env: env, prompt: "hist> ") do |reader, writer, pid, home|
+    with_terminal(ZLEDSH, env: env, prompt: "hist> ") do |reader, writer, pid, home|
       writer.write("printf 'public-output\\n'\n")
       read_until(reader, "public-output\r\n")
       read_until(reader, "hist> ")
@@ -228,7 +228,7 @@ class TerminalSpikeTest < Minitest::Test
   end
 
   def test_bracketed_paste_is_an_editable_draft_until_enter
-    with_terminal(KWSH, env: { "TERM" => "xterm", "PROMPT" => "paste> " }, prompt: "paste> ") do |reader, writer, pid, home|
+    with_terminal(ZLEDSH, env: { "TERM" => "xterm", "PROMPT" => "paste> " }, prompt: "paste> ") do |reader, writer, pid, home|
       writer.write("\e[200~printf first > one\n" + "printf bad > two\e[201~")
       read_until(reader, "printf bad > two")
       refute_path_exists File.join(home, "one")
@@ -246,7 +246,7 @@ class TerminalSpikeTest < Minitest::Test
 
   def test_tab_completion_and_word_deletion
     env = { "PROMPT" => "edit> ", "TERM" => "xterm" }
-    with_terminal(KWSH, env: env, prompt: "edit> ", setup: ->(home) {
+    with_terminal(ZLEDSH, env: env, prompt: "edit> ", setup: ->(home) {
       File.write(File.join(home, "file with space"), "completed-content\n")
     }) do |reader, writer, pid|
       writer.write("/bin/cat wrong\x17fi\t\n")
@@ -258,7 +258,7 @@ class TerminalSpikeTest < Minitest::Test
 
   def test_tab_completes_paths_under_the_current_home_without_replacing_the_tilde
     prompt = "home-complete> "
-    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt, setup: ->(home) {
+    with_terminal(ZLEDSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt, setup: ->(home) {
       other_home = File.join(home, "other home")
       notes = File.join(other_home, "notes")
       Dir.mkdir(other_home)
@@ -282,18 +282,18 @@ class TerminalSpikeTest < Minitest::Test
 
   def test_tab_lists_ambiguous_home_paths_and_cycles_in_both_directions
     prompt = "suggest> "
-    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt, setup: ->(home) {
-      Dir.mkdir(File.join(home, ".kward"))
-      File.write(File.join(home, ".kwsh notes"), "selected-file-content\n")
-      File.write(File.join(home, ".kwshrc.example"), "different-file-content\n")
+    with_terminal(ZLEDSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt, setup: ->(home) {
+      Dir.mkdir(File.join(home, ".zled-dir"))
+      File.write(File.join(home, ".zledsh notes"), "selected-file-content\n")
+      File.write(File.join(home, ".zledshrc.example"), "different-file-content\n")
     }) do |reader, writer, pid|
-      writer.write("/bin/cat ~/.kw\t")
+      writer.write("/bin/cat ~/.zled\t")
       caret_restored = /\e\[1A\r\e\[\d+C\z/
       suggestions = read_until(reader, caret_restored)
-      assert_includes suggestions, "#{prompt}/bin/cat ~/.kw\r\eD.kward/  .kwsh\\ notes  .kwshrc.example"
+      assert_includes suggestions, "#{prompt}/bin/cat ~/.zled\r\eD.zled-dir/  .zledsh\\ notes  .zledshrc.example"
 
-      forward = [".kward/", ".kwsh\\ notes", ".kwshrc.example", ".kward/"]
-      backward = [".kwshrc.example", ".kwsh\\ notes"]
+      forward = [".zled-dir/", ".zledsh\\ notes", ".zledshrc.example", ".zled-dir/"]
+      backward = [".zledshrc.example", ".zledsh\\ notes"]
       [["\t", forward], ["\e[Z", backward]].each do |key, candidates|
         candidates.each do |candidate|
           writer.write(key)
@@ -312,7 +312,7 @@ class TerminalSpikeTest < Minitest::Test
 
   def test_tab_extends_shared_prefix_and_starts_over_after_an_edit
     prompt = "suggest> "
-    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt, setup: ->(home) {
+    with_terminal(ZLEDSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt, setup: ->(home) {
       File.write(File.join(home, "report-a"), "report-a-content\n")
       File.write(File.join(home, "report-b"), "report-b-content\n")
     }) do |reader, writer, pid|
@@ -332,7 +332,7 @@ class TerminalSpikeTest < Minitest::Test
 
   def test_ctrl_k_deletes_to_end_of_current_line_without_moving_cursor
     prompt = "kill-line> "
-    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
+    with_terminal(ZLEDSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
       prefix = "printf '%s\\n' gardé"
       writer.write("\e[200~#{prefix} unwanted\nprintf 'next\\n'\e[201~")
       writer.write("\x01" + "\x06" * prefix.length + "\x0b-edited\n")
@@ -344,7 +344,7 @@ class TerminalSpikeTest < Minitest::Test
 
   def test_word_motion_and_clear_screen_keep_the_draft_editable
     prompt = "move> "
-    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
+    with_terminal(ZLEDSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
       writer.write("printf '<%s>\\n' one café\ebpré-\ef-fin\x0c")
       read_until(reader, "\e[H\e[2J")
       read_until(reader, "#{prompt}printf '<%s>\\n' one pré-café-fin".b)
@@ -357,7 +357,7 @@ class TerminalSpikeTest < Minitest::Test
 
   def test_yank_restores_cuts_across_prompts_and_private_mode_clears_them
     prompt = "yank> "
-    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
+    with_terminal(ZLEDSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
       writer.write("/bin/echo first café\x17\x17\x19\n")
       read_until(reader, "\r\nfirst café\r\n".b)
       read_until(reader, prompt)
@@ -388,8 +388,8 @@ class TerminalSpikeTest < Minitest::Test
   def test_rbenv_bootstrap_loads_and_completes_subcommands_and_values
     prompt = "rbenv> "
     env = { "PROMPT" => prompt, "TERM" => "xterm", "ENV" => nil }
-    with_terminal(KWSH, env: env, prompt: prompt, setup: method(:write_rbenv_fixture), start: false) do |reader, writer, pid|
-      refute_includes read_until(reader, prompt), "kwsh:"
+    with_terminal(ZLEDSH, env: env, prompt: prompt, setup: method(:write_rbenv_fixture), start: false) do |reader, writer, pid|
+      refute_includes read_until(reader, prompt), "zledsh:"
       writer.write("rbenv ver\t\n")
       read_until(reader, "\r\nversion\r\n")
       read_until(reader, prompt)
@@ -407,8 +407,8 @@ class TerminalSpikeTest < Minitest::Test
   def test_slow_completion_does_not_stall_the_editor_or_leave_a_worker_running
     prompt = "complete> "
     env = { "PROMPT" => prompt, "TERM" => "xterm", "ENV" => nil }
-    with_terminal(KWSH, env: env, prompt: prompt, setup: ->(home) {
-      File.write(File.join(home, ".kwshrc"), <<~'SH')
+    with_terminal(ZLEDSH, env: env, prompt: prompt, setup: ->(home) {
+      File.write(File.join(home, ".zledshrc"), <<~'SH')
         _slow() { /bin/sh -c 'echo $$ > worker; exec /bin/sleep 15'; }
         complete -F _slow printf
       SH
@@ -430,7 +430,7 @@ class TerminalSpikeTest < Minitest::Test
 
   def test_history_arrows_search_the_draft_prefix
     prompt = "prefix> "
-    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
+    with_terminal(ZLEDSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
       %w[match-first match-second unrelated].each do |word|
         writer.write("/bin/echo #{word}\n")
         read_until(reader, "\r\n#{word}\r\n")
@@ -449,7 +449,7 @@ class TerminalSpikeTest < Minitest::Test
 
   def test_reverse_search_cycles_substring_matches_and_preserves_cancelled_draft
     prompt = "history> "
-    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
+    with_terminal(ZLEDSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|
       %w[first-café second-café unrelated].each do |word|
         writer.write("/bin/echo #{word}\n")
         read_until(reader, "\r\n#{word}\r\n".b)
@@ -477,7 +477,7 @@ class TerminalSpikeTest < Minitest::Test
 
   def test_assistant_changes_live_directory_but_does_not_execute_draft
     env = { "PROMPT" => "%1~> ", "TERM" => "xterm" }
-    with_terminal(KWSH, env: env, prompt: "~> ", setup: ->(home) {
+    with_terminal(ZLEDSH, env: env, prompt: "~> ", setup: ->(home) {
       provider = File.join(home, "provider")
       File.write(provider, <<~'SCRIPT')
         #!/bin/sh
@@ -489,7 +489,7 @@ class TerminalSpikeTest < Minitest::Test
         esac
       SCRIPT
       File.chmod(0o700, provider)
-      File.write(File.join(home, ".kwshrc"), 'KWSH_ASSISTANT_EXEC="$HOME/provider"' + "\n")
+      File.write(File.join(home, ".zledshrc"), 'ZLEDSH_ASSISTANT_EXEC="$HOME/provider"' + "\n")
     }) do |reader, writer, pid, home|
       writer.write("history pause\n")
       read_until(reader, "[private] ~> ")
@@ -580,7 +580,7 @@ class TerminalSpikeTest < Minitest::Test
 
   def with_context_provider
     prompt = "context> "
-    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt, setup: ->(home) {
+    with_terminal(ZLEDSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt, setup: ->(home) {
       provider = File.join(home, "provider")
       File.write(provider, <<~'SCRIPT')
         #!/bin/sh
@@ -588,7 +588,7 @@ class TerminalSpikeTest < Minitest::Test
         printf '%s\n' '{"answer":"request captured"}'
       SCRIPT
       File.chmod(0o700, provider)
-      File.write(File.join(home, ".kwshrc"), 'KWSH_ASSISTANT_EXEC="$HOME/provider"' + "\n")
+      File.write(File.join(home, ".zledshrc"), 'ZLEDSH_ASSISTANT_EXEC="$HOME/provider"' + "\n")
     }) do |reader, writer, pid, home|
       yield reader, writer, pid, home, prompt
     end
@@ -605,7 +605,7 @@ class TerminalSpikeTest < Minitest::Test
     %w[rbenv-generated-startup.sh rbenv-completion.sh].zip(%w[generated-rbenv-startup mock-completions]).each do |from, to|
       File.write(File.join(home, to), File.read(File.join(__dir__, "fixtures", from)))
     end
-    File.write(File.join(home, ".kwshrc"), <<~'SH')
+    File.write(File.join(home, ".zledshrc"), <<~'SH')
       export PATH="$HOME:/usr/bin:/bin"
       if command -v rbenv >/dev/null 2>&1; then
         eval "$(rbenv init - bash)"
@@ -635,7 +635,7 @@ class TerminalSpikeTest < Minitest::Test
   end
 
   def with_terminal(executable, *args, env:, prompt:, setup: nil, start: true)
-    Dir.mktmpdir("kwsh-terminal-") do |work|
+    Dir.mktmpdir("zledsh-terminal-") do |work|
       Dir.mkdir(File.join(work, "moved"))
       setup&.call(work)
       # Keep the session leader alive: macOS revokes the tty when it exits.

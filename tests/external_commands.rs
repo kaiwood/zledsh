@@ -7,7 +7,7 @@ use std::{
 };
 
 fn shell() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    Command::new(env!("CARGO_BIN_EXE_zledsh"))
 }
 
 struct Scratch(PathBuf);
@@ -16,7 +16,7 @@ impl Scratch {
     fn new() -> Self {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
-            "kwsh-external-{}-{}",
+            "zledsh-external-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
@@ -40,12 +40,12 @@ impl Drop for Scratch {
 #[test]
 fn path_lookup_preserves_arguments_exports_redirections_and_status() {
     let scratch = Scratch::new();
-    scratch.file("probe", "#!/bin/sh\nprintf '<%s>\\n' \"$@\" \"$KWSH_EXPORT\"\nprintf 'diagnostic\\n' >&2\nexit 17\n", 0o700);
+    scratch.file("probe", "#!/bin/sh\nprintf '<%s>\\n' \"$@\" \"$ZLEDSH_EXPORT\"\nprintf 'diagnostic\\n' >&2\nexit 17\n", 0o700);
     let output = shell()
         .current_dir(&scratch.0)
         .args([
             "-c",
-            "PATH=.; export KWSH_EXPORT=visible; probe \"$@\" > result 2>&1; exit",
+            "PATH=.; export ZLEDSH_EXPORT=visible; probe \"$@\" > result 2>&1; exit",
             "name",
             "a b",
             "",

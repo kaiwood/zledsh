@@ -9,14 +9,14 @@ require "timeout"
 require "tmpdir"
 
 REFERENCE_REV = "051440ed6ae26d6cd99a33200e387f9df2462a31"
-command = if ENV.key?("KWSH_CMD")
-  argv = Shellwords.split(ENV.fetch("KWSH_CMD"))
-  abort "Set KWSH_CMD to a nonempty command" if argv.empty?
+command = if ENV.key?("ZLEDSH_CMD")
+  argv = Shellwords.split(ENV.fetch("ZLEDSH_CMD"))
+  abort "Set ZLEDSH_CMD to a nonempty command" if argv.empty?
 
   argv[0] = File.expand_path(argv[0]) if argv[0].include?("/")
   argv
 else
-  reference = File.expand_path(ENV.fetch("KWSH_REFERENCE") { File.expand_path("../../kward", __dir__) })
+  reference = File.expand_path(ENV.fetch("ZLEDSH_REFERENCE") { File.expand_path("../../kward", __dir__) })
   revision, error, status = Open3.capture3("git", "-C", reference, "rev-parse", "HEAD")
   abort "Cannot locate Kward reference at #{reference}: #{error}" unless status.success?
   abort "Expected Kward #{REFERENCE_REV}, got #{revision.strip} at #{reference}" unless revision.strip == REFERENCE_REV
@@ -33,13 +33,14 @@ class ShellParityTest < Minitest::Test
   TIMEOUT = 5
   DEFAULT_PROMPT = "parity> "
   RC_PROMPT = "parity-rc> "
+  RC_FILE = ENV.key?("ZLEDSH_CMD") ? ".zledshrc" : ".kwshrc" # The pinned Kward reference still uses the old name.
 
   def setup
-    @scratch = Dir.mktmpdir("kwsh-parity-")
+    @scratch = Dir.mktmpdir("zledsh-parity-")
     @home = File.join(@scratch, "home")
     @work = File.join(@scratch, "work")
     FileUtils.mkdir_p([@home, @work])
-    File.write(File.join(@home, ".kwshrc"), "PS1='#{RC_PROMPT}'\nexport PARITY_RC=loaded\n")
+    File.write(File.join(@home, RC_FILE), "PS1='#{RC_PROMPT}'\nexport PARITY_RC=loaded\n")
     @env = {
       "HOME" => @home, "PATH" => ENV.fetch("PATH", "/usr/bin:/bin"), "LC_ALL" => "C",
       "TERM" => "xterm", "PS1" => DEFAULT_PROMPT, "HISTFILE" => ""
@@ -140,7 +141,7 @@ class ShellParityTest < Minitest::Test
   end
 
   def test_startup_and_cancelled_interactive_conditionals
-    File.open(File.join(@home, ".kwshrc"), "a") do |rc|
+    File.open(File.join(@home, RC_FILE), "a") do |rc|
       rc.puts "if /usr/bin/true; then export PARITY_IF=loaded; fi"
     end
     executable, *args = COMMAND
@@ -171,7 +172,7 @@ class ShellParityTest < Minitest::Test
     rbenv = File.join(bin, "rbenv")
     File.write(rbenv, "#!/bin/sh\nexit 0\n")
     @env["PATH"] = "#{bin}:/usr/bin:/bin"
-    File.open(File.join(@home, ".kwshrc"), "a") do |rc|
+    File.open(File.join(@home, RC_FILE), "a") do |rc|
       rc.puts <<~'SH'
         if command -v rbenv >/dev/null 2>&1; then
           export PATH="${RBENV_ROOT:-$HOME/.rbenv}/shims:$PATH"
@@ -310,7 +311,7 @@ class ShellParityTest < Minitest::Test
     SH
     File.chmod(0o755, rbenv)
     FileUtils.cp(File.join(__dir__, "fixtures/rbenv-generated-startup.sh"), File.join(@work, "generated-rbenv-startup"))
-    File.open(File.join(@home, ".kwshrc"), "a") do |rc|
+    File.open(File.join(@home, RC_FILE), "a") do |rc|
       rc.puts <<~'SH'
         if command -v rbenv >/dev/null 2>&1; then
           eval "$(rbenv init - bash)"

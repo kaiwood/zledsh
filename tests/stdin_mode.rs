@@ -2,7 +2,7 @@ use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
 fn from_pipe(args: &[&str], input: &[u8]) -> Output {
-    run_with_pipe(Command::new(env!("CARGO_BIN_EXE_kwsh")).args(args), input)
+    run_with_pipe(Command::new(env!("CARGO_BIN_EXE_zledsh")).args(args), input)
 }
 
 fn run_with_pipe(command: &mut Command, input: &[u8]) -> Output {
@@ -57,7 +57,7 @@ fn s_flag_reads_commands_from_stdin_and_treats_operands_as_arguments() {
         String::from_utf8(output.stdout).unwrap(),
         format!(
             "<{}>\n<2>\n<-first>\n<two words>\nstdin data\n",
-            env!("CARGO_BIN_EXE_kwsh")
+            env!("CARGO_BIN_EXE_zledsh")
         )
     );
     assert!(output.stderr.is_empty());
@@ -68,7 +68,7 @@ fn s_flag_reads_commands_from_stdin_and_treats_operands_as_arguments() {
 fn named_script_preserves_arguments_and_separates_commands_from_stdin() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
-        dir.path().join("test script.kwsh"),
+        dir.path().join("test script.zledsh"),
         r#"printf '<%s>\n' "$0" "$#" "$1" "$2"
 read -r first
 printf '<%s>\n' "$first"
@@ -78,20 +78,20 @@ printf wrong
 "#,
     )
     .unwrap();
-    std::fs::write(dir.path().join(".kwshrc"), "exit 99\n").unwrap();
+    std::fs::write(dir.path().join(".zledshrc"), "exit 99\n").unwrap();
     let output = run_with_pipe(
-        Command::new(env!("CARGO_BIN_EXE_kwsh"))
+        Command::new(env!("CARGO_BIN_EXE_zledsh"))
             .current_dir(dir.path())
             .env("HOME", dir.path())
             .env_remove("KWARD_CONFIG_PATH")
             .env_remove("ENV")
-            .args(["test script.kwsh", "two words", "-x"]),
+            .args(["test script.zledsh", "two words", "-x"]),
         b"first input line\nexternal command input\n",
     );
     assert_eq!(output.status.code(), Some(17));
     assert_eq!(
         output.stdout,
-        b"<test script.kwsh>\n<2>\n<two words>\n<-x>\n<first input line>\nexternal command input\n"
+        b"<test script.zledsh>\n<2>\n<two words>\n<-x>\n<first input line>\nexternal command input\n"
     );
     assert!(output.stderr.is_empty());
 }
@@ -101,7 +101,7 @@ fn end_of_options_allows_a_script_name_starting_with_a_dash() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("--help"), "printf '%s' \"$0\"").unwrap();
     let output = run_with_pipe(
-        Command::new(env!("CARGO_BIN_EXE_kwsh"))
+        Command::new(env!("CARGO_BIN_EXE_zledsh"))
             .current_dir(dir.path())
             .args(["--", "--help"]),
         b"",
@@ -116,26 +116,26 @@ fn missing_named_script_fails_without_reading_stdin_as_commands() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("stdin");
     std::fs::write(&input, "printf wrong\n").unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .current_dir(dir.path())
-        .arg("missing.kwsh")
+        .arg("missing.zledsh")
         .stdin(std::fs::File::open(input).unwrap())
         .output()
         .unwrap();
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("missing.kwsh"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("missing.zledsh"));
 }
 
 // POSIX sh: OPTIONS (-i) and Shell Language 2.8.1 (interactive syntax errors).
 #[test]
 fn forced_interactive_pipe_loads_startup_and_recovers_without_terminal_editing() {
     let dir = tempfile::tempdir().unwrap();
-    let startup = dir.path().join("env.kwsh");
+    let startup = dir.path().join("env.zledsh");
     std::fs::write(&startup, "startup=from-env\n").unwrap();
-    std::fs::write(dir.path().join(".kwshrc"), "local_rc=from-rc\n").unwrap();
+    std::fs::write(dir.path().join(".zledshrc"), "local_rc=from-rc\n").unwrap();
     let output = run_with_pipe(
-        Command::new(env!("CARGO_BIN_EXE_kwsh"))
+        Command::new(env!("CARGO_BIN_EXE_zledsh"))
             .env("HOME", dir.path())
             .env("ENV", &startup)
             .env("PROMPT", "ready> ")
@@ -147,16 +147,16 @@ fn forced_interactive_pipe_loads_startup_and_recovers_without_terminal_editing()
     );
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stdout, b"from-rc:from-env:arg\nafter:2\n");
-    assert!(output.stderr.starts_with(b"ready> ready> kwsh:"));
+    assert!(output.stderr.starts_with(b"ready> ready> zledsh:"));
     assert!(!output.stderr.contains(&27), "unexpected terminal controls");
 }
 
 #[test]
 fn forced_interactive_command_string_loads_startup_without_prompts() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join(".kwshrc"), "startup=loaded\n").unwrap();
+    std::fs::write(dir.path().join(".zledshrc"), "startup=loaded\n").unwrap();
     let output = run_with_pipe(
-        Command::new(env!("CARGO_BIN_EXE_kwsh"))
+        Command::new(env!("CARGO_BIN_EXE_zledsh"))
             .env("HOME", dir.path())
             .env_remove("ENV")
             .env_remove("KWARD_CONFIG_PATH")

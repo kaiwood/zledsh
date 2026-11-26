@@ -1,10 +1,10 @@
 [package]
-name = "kwsh"
+name = "zledsh"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 
-default-run = "kwsh"
+default-run = "zledsh"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

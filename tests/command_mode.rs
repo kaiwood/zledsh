@@ -1,10 +1,10 @@
 use std::process::{Command, Output};
 
 fn run(script: &str, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .args(["-c", script])
         .args(args)
-        .env_remove("KWSH_TEST_DEFAULT")
+        .env_remove("ZLEDSH_TEST_DEFAULT")
         .output()
         .unwrap()
 }
@@ -12,7 +12,7 @@ fn run(script: &str, args: &[&str]) -> Output {
 #[test]
 fn quoted_arguments_are_fields_not_shell_source() {
     let output = run(
-        r#"printf '<%s>\n' "$0" "pre$@/post" "${KWSH_TEST_DEFAULT-fallback}" '$0'"#,
+        r#"printf '<%s>\n' "$0" "pre$@/post" "${ZLEDSH_TEST_DEFAULT-fallback}" '$0'"#,
         &["name", "", "a b; exit 9", "*"],
     );
     assert!(output.status.success());
@@ -97,7 +97,7 @@ fn substitution_drains_pipes_and_rejects_binary_output() {
 #[test]
 fn eval_runs_native_code_with_current_state_and_redirects() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .current_dir(dir.path())
         .args(["-c", r#"
             eval "$(printf '%s' 'name=loaded; if true; then printf "%s" "$name" | /bin/cat; fi')" > fixture
@@ -118,7 +118,7 @@ fn source_uses_native_state_and_its_own_arguments() {
         "value=loaded; printf '<%s>' \"$@\"\n",
     )
     .unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .current_dir(dir.path())
         .args([
             "-c",
@@ -135,9 +135,9 @@ fn source_uses_native_state_and_its_own_arguments() {
 
 #[test]
 fn status_expands_and_unset_removes_inherited_environment() {
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
-        .env("KWSH_TEST_UNSET", "inherited")
-        .args(["-c", r#"/usr/bin/false; printf '%s\n' "$?"; unset -v KWSH_TEST_UNSET; printf '%s\n' "${KWSH_TEST_UNSET-missing}"; KWSH_TEST_UNSET=local; /usr/bin/printenv KWSH_TEST_UNSET; printf '%s\n' "$?"; export KWSH_TEST_UNSET; /usr/bin/printenv KWSH_TEST_UNSET"#])
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
+        .env("ZLEDSH_TEST_UNSET", "inherited")
+        .args(["-c", r#"/usr/bin/false; printf '%s\n' "$?"; unset -v ZLEDSH_TEST_UNSET; printf '%s\n' "${ZLEDSH_TEST_UNSET-missing}"; ZLEDSH_TEST_UNSET=local; /usr/bin/printenv ZLEDSH_TEST_UNSET; printf '%s\n' "$?"; export ZLEDSH_TEST_UNSET; /usr/bin/printenv ZLEDSH_TEST_UNSET"#])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -147,7 +147,7 @@ fn status_expands_and_unset_removes_inherited_environment() {
 
 #[test]
 fn chatgpt_login_requires_a_terminal() {
-    let output = Command::new(env!("CARGO_BIN_EXE_kwsh"))
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .arg("--chatgpt")
         .output()
         .unwrap();
@@ -192,9 +192,9 @@ fn unquoted_home_prefix_expands_as_one_field() {
     let output = run(
         r#"
         HOME="$1"
-        printf 'contents\n' > ~/.kwshrc
-        /bin/cat ~/.kwshrc
-        printf '<%s>\n' ~ "~/.kwshrc" \~/.kwshrc
+        printf 'contents\n' > ~/.zledshrc
+        /bin/cat ~/.zledshrc
+        printf '<%s>\n' ~ "~/.zledshrc" \~/.zledshrc
         "#,
         &["fixture", home.to_str().unwrap()],
     );
@@ -202,7 +202,14 @@ fn unquoted_home_prefix_expands_as_one_field() {
     assert!(output.stderr.is_empty());
     assert_eq!(
         output.stdout,
-        format!("contents\n<{}>\n<~/.kwshrc>\n<~/.kwshrc>\n", home.display()).as_bytes()
+        format!(
+            "contents\n<{}>\n<~/.zledshrc>\n<~/.zledshrc>\n",
+            home.display()
+        )
+        .as_bytes()
     );
-    assert_eq!(std::fs::read(home.join(".kwshrc")).unwrap(), b"contents\n");
+    assert_eq!(
+        std::fs::read(home.join(".zledshrc")).unwrap(),
+        b"contents\n"
+    );
 }

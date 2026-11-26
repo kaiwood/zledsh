@@ -13,7 +13,7 @@ pub fn render(shell: &Invocation<'_>, continuation: bool, number: usize) -> Stri
     };
     let value = shell.variable(name).unwrap_or_else(|| default.into());
     let value = shell.parameter_text(&value).unwrap_or_else(|error| {
-        eprintln!("kwsh: {name}: {error}");
+        eprintln!("zledsh: {name}: {error}");
         default.into()
     });
     if continuation {

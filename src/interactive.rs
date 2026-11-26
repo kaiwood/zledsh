@@ -74,8 +74,8 @@ fn run_shell(
             .map(PathBuf::from)
             .filter(|path| path.is_absolute())
             .ok_or_else(|| io::Error::other("ChatGPT sign-in requires an absolute HOME"))?;
-        let model = invocation.variable("KWSH_CHATGPT_MODEL");
-        let effort = invocation.variable("KWSH_CHATGPT_REASONING_EFFORT");
+        let model = invocation.variable("ZLEDSH_CHATGPT_MODEL");
+        let effort = invocation.variable("ZLEDSH_CHATGPT_REASONING_EFFORT");
         eprintln!("Connecting to ChatGPT. If sign-in is needed, continue in your browser.");
         match editor.chatgpt_task(input, move |cancelled| {
             chatgpt::Session::connect(&home, model.as_deref(), effort.as_deref(), true, cancelled)
@@ -142,7 +142,7 @@ fn run_shell(
                 eprintln!("Shell prompt instruction required after ?");
             } else if let Some(editor) = &editor {
                 let context = ShellContext::current(last_command.as_ref());
-                let program = invocation.variable("KWSH_ASSISTANT_EXEC");
+                let program = invocation.variable("ZLEDSH_ASSISTANT_EXEC");
                 if let Some(program) = program.filter(|_| chatgpt.is_none() && !connect_chatgpt) {
                     pending_draft = ask(
                         editor,
@@ -171,14 +171,14 @@ fn run_shell(
                             conversation.remember(instruction.trim(), &answer);
                             show_answer(&answer);
                         }
-                        Some(Err(error)) => eprintln!("kwsh: ChatGPT: {error}"),
+                        Some(Err(error)) => eprintln!("zledsh: ChatGPT: {error}"),
                         None => eprintln!("^C\nturn cancelled"),
                     }
                 } else {
-                    eprintln!("kwsh: ChatGPT is unavailable when real and effective IDs differ");
+                    eprintln!("zledsh: ChatGPT is unavailable when real and effective IDs differ");
                 }
             } else {
-                eprintln!("kwsh: assistant requires the line editor");
+                eprintln!("zledsh: assistant requires the line editor");
             }
             source.clear();
             continue;
@@ -209,7 +209,7 @@ fn run_shell(
         match parsed {
             Ok(commands) => invocation.run(&commands, input),
             Err(error) => {
-                eprintln!("kwsh: {}", error.message());
+                eprintln!("zledsh: {}", error.message());
                 invocation.status = 2;
             }
         }
@@ -228,7 +228,7 @@ fn run_shell(
         source.clear();
     }
     if !source.is_empty() {
-        eprintln!("kwsh: incomplete command at end of input");
+        eprintln!("zledsh: incomplete command at end of input");
         return Ok(2);
     }
     Ok(invocation.status)
@@ -262,7 +262,7 @@ impl AgentShell<'_, '_> {
         let pipeline = match self.invocation.parse(&command) {
             Ok(script) => match <[syntax::Statement; 1]>::try_from(script) {
                 Ok([syntax::Statement::Pipeline(pipeline)]) => pipeline,
-                _ => return Ok(json!({"error": "expected one kwsh command or pipeline"})),
+                _ => return Ok(json!({"error": "expected one zledsh command or pipeline"})),
             },
             Err(error) => return Ok(json!({"error": error.message()})),
         };
@@ -308,8 +308,8 @@ fn ask_chatgpt(
         let home = env::var_os("HOME")
             .map(PathBuf::from)
             .filter(|path| path.is_absolute());
-        let model = shell.invocation.variable("KWSH_CHATGPT_MODEL");
-        let effort = shell.invocation.variable("KWSH_CHATGPT_REASONING_EFFORT");
+        let model = shell.invocation.variable("ZLEDSH_CHATGPT_MODEL");
+        let effort = shell.invocation.variable("ZLEDSH_CHATGPT_REASONING_EFFORT");
         match editor.chatgpt_task(input, move |cancelled| {
             chatgpt::Session::connect(
                 home.as_deref()
@@ -409,7 +409,7 @@ fn ask(
             Ok(String::new())
         }
         Err(error) => {
-            eprintln!("kwsh: assistant: {error}");
+            eprintln!("zledsh: assistant: {error}");
             Ok(String::new())
         }
     }
@@ -435,25 +435,25 @@ pub(crate) fn load_startup(invocation: &mut Invocation<'_>, input: &mut impl Buf
         return;
     }
     let startup = invocation.variable("ENV");
-    load_kwshrc(invocation, input);
+    load_zledshrc(invocation, input);
     if let Some(value) = startup.filter(|_| !invocation.exited) {
         match invocation.parameter_text(&value) {
             Ok(path) if Path::new(&path).is_file() => load_rc(Path::new(&path), invocation, input),
             Ok(_) => {}
-            Err(error) => eprintln!("kwsh: ENV: {error}"),
+            Err(error) => eprintln!("zledsh: ENV: {error}"),
         }
     }
 }
 
-fn load_kwshrc(invocation: &mut Invocation<'_>, input: &mut impl BufRead) {
+fn load_zledshrc(invocation: &mut Invocation<'_>, input: &mut impl BufRead) {
     let home = env::var_os("HOME")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from);
     let primary = env::var_os("KWARD_CONFIG_PATH")
         .filter(|path| !path.is_empty())
-        .and_then(|path| Path::new(&path).parent().map(|dir| dir.join("kwshrc")))
-        .or_else(|| home.as_ref().map(|path| path.join(".kward/kwshrc")));
-    let personal = home.map(|path| path.join(".kwshrc"));
+        .and_then(|path| Path::new(&path).parent().map(|dir| dir.join("zledshrc")))
+        .or_else(|| home.as_ref().map(|path| path.join(".kward/zledshrc")));
+    let personal = home.map(|path| path.join(".zledshrc"));
     if let Some(path) = &primary {
         load_rc(path, invocation, input);
     }
@@ -469,11 +469,11 @@ fn load_rc(path: &Path, invocation: &mut Invocation<'_>, input: &mut impl BufRea
     match fs::read_to_string(path) {
         Ok(source) => {
             if let Err(error) = invocation.run_source(&source, input) {
-                eprintln!("kwsh: {}: {error}", path.display());
+                eprintln!("zledsh: {}: {error}", path.display());
             }
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => eprintln!("kwsh: {}: {error}", path.display()),
+        Err(error) => eprintln!("zledsh: {}: {error}", path.display()),
     }
 }
 
@@ -559,7 +559,7 @@ fn run_chatgpt_task<T: Send + 'static>(
     let cancelled = Arc::new(AtomicBool::new(false));
     let worker_flag = Arc::clone(&cancelled);
     std::thread::Builder::new()
-        .name("kwsh-chatgpt".into())
+        .name("zledsh-chatgpt".into())
         .spawn(move || {
             let guard = ACTIVE.try_lock();
             if ready.send(guard.is_ok()).is_err() || guard.is_err() {
@@ -1219,7 +1219,7 @@ mod tests {
         let work = tempfile::tempdir().unwrap();
         let path = work.path().join("foo.txt");
         let command = format!("/usr/bin/touch '{}'", path.display());
-        let mut invocation = Invocation::new("kwsh", &[]);
+        let mut invocation = Invocation::new("zledsh", &[]);
         let mut draft = String::new();
         let mut last_command = None;
         let mut shell = AgentShell {

@@ -66,7 +66,7 @@ pub(crate) fn run(shell: impl FnOnce(Option<Transcript>) -> io::Result<u8>) -> i
         unsafe { UnixStream::from_raw_fd(child_fd) }
     };
     let mut master = -1;
-    // Launch occurs before kwsh starts threads. forkpty makes the slave the
+    // Launch occurs before zledsh starts threads. forkpty makes the slave the
     // child's controlling terminal; foreground handoff stays in that session.
     let pid =
         cvt(unsafe { libc::forkpty(&mut master, std::ptr::null_mut(), &mut original, &mut size) })?;
@@ -317,7 +317,7 @@ fn reap(pid: libc::pid_t) -> io::Result<u8> {
         std::thread::sleep(Duration::from_millis(10));
     }
     // The master is closed. If the child didn't exit on terminal loss,
-    // clean it up rather than leaving kwsh behind.
+    // clean it up rather than leaving zledsh behind.
     unsafe { libc::kill(pid, libc::SIGKILL) };
     Ok(wait(pid, 0)?.unwrap_or(1))
 }
@@ -344,7 +344,7 @@ mod tests {
         use super::*;
         use std::process::Stdio;
 
-        const CHILD: &str = "KWSH_TEST_AGENT_OUTPUT_CHILD";
+        const CHILD: &str = "ZLEDSH_TEST_AGENT_OUTPUT_CHILD";
         const TEST: &str = "transcript::tests::agent_output_with_or_without_a_final_newline_leaves_the_prompt_on_its_own_line";
         if std::env::var_os(CHILD).is_some() {
             let status = run(|transcript| {
