@@ -1,4 +1,6 @@
-use std::ffi::{CString, OsString};
+use std::ffi::OsString;
+
+use crate::pattern::{self, TextPattern};
 use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -7,22 +9,20 @@ pub(crate) struct Pattern(Vec<Component>);
 
 enum Component {
     Literal(String),
-    Wildcard { pattern: CString, leading_dot: bool },
+    Wildcard {
+        pattern: TextPattern,
+        leading_dot: bool,
+    },
 }
 
 // POSIX 2.14.3: separate components before interpreting brackets, and keep
 // shell quoting independent of backslashes that come from expansion results.
 pub(crate) fn pattern(
-    mut chars: impl Iterator<Item = (char, bool)>,
+    chars: impl Iterator<Item = (char, bool)>,
 ) -> Result<Option<Pattern>, String> {
     let mut components = Vec::new();
     let mut component = Vec::new();
-    while let Some((ch, quoted)) = chars.next() {
-        let (ch, quoted) = if ch == '\\' && !quoted {
-            chars.next().map_or(('\\', true), |(ch, _)| (ch, true))
-        } else {
-            (ch, quoted)
-        };
+    for (ch, quoted) in pattern::unescape(chars) {
         if ch == '/' {
             components.push(compile_component(&component)?);
             component.clear();
@@ -38,26 +38,10 @@ pub(crate) fn pattern(
 }
 
 fn compile_component(chars: &[(char, bool)]) -> Result<Component, String> {
-    let closing_bracket = chars.iter().rposition(|&(ch, quoted)| ch == ']' && !quoted);
-    let mut active = false;
-    let mut encoded = String::new();
-    for (i, &(ch, quoted)) in chars.iter().enumerate() {
-        let unmatched_bracket = ch == '[' && closing_bracket.is_none_or(|end| i >= end);
-        active |= !quoted && !unmatched_bracket && matches!(ch, '*' | '?' | '[');
-        if unmatched_bracket
-            || (quoted
-                && matches!(
-                    ch,
-                    '*' | '?' | '[' | ']' | '\\' | '-' | '!' | '^' | ':' | '=' | '.'
-                ))
-        {
-            encoded.push('\\');
-        }
-        encoded.push(ch);
-    }
+    let (pattern, active) = TextPattern::encode(chars)?;
     if active {
         Ok(Component::Wildcard {
-            pattern: CString::new(encoded).map_err(|_| "pathname pattern contains a NUL byte")?,
+            pattern,
             leading_dot: chars.first().is_some_and(|&(ch, _)| ch == '.'),
         })
     } else {
@@ -104,11 +88,7 @@ pub(crate) fn expand(Pattern(components): Pattern) -> Result<Vec<String>, String
                         if !leading_dot && bytes.starts_with(b".") {
                             continue;
                         }
-                        let Ok(name_c) = CString::new(bytes) else {
-                            continue;
-                        };
-                        // SAFETY: both arguments are live NUL-terminated strings.
-                        if unsafe { libc::fnmatch(pattern.as_ptr(), name_c.as_ptr(), 0) } == 0 {
+                        if pattern.matches(bytes) {
                             let mut path = prefix.clone();
                             path.push(name);
                             matches.push(path);

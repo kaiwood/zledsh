@@ -9,8 +9,8 @@ use std::rc::Rc;
 use crate::process;
 
 use crate::syntax::{
-    self, ArrayIndex, CasePattern, Command, ParameterOperator, ParseError, Part, Redirect,
-    RedirectKind, Script, Statement, Word, WordPart,
+    self, ArrayIndex, Command, ParameterOperator, ParseError, Part, Redirect, RedirectKind, Script,
+    Statement, Word, WordPart,
 };
 
 const DEFAULT_IFS: &str = " \t\n";
@@ -493,22 +493,38 @@ impl<'a> Invocation<'a> {
     fn select_case<'b>(
         &mut self,
         word: &Word,
-        clauses: &'b [(Vec<CasePattern>, Script)],
+        clauses: &'b [(Vec<Word>, Script)],
     ) -> Result<Option<&'b Script>, String> {
         let word = self.expand(word, &mut None)?.join(" ");
         for (patterns, body) in clauses {
             for pattern in patterns {
-                if match pattern {
-                    CasePattern::Any => true,
-                    CasePattern::Exact(pattern) => {
-                        self.expand(pattern, &mut None)?.join(" ") == word
-                    }
-                } {
+                if self
+                    .expand_pattern(pattern, &mut None)?
+                    .matches(word.as_bytes())
+                {
                     return Ok(Some(body));
                 }
             }
         }
         Ok(None)
+    }
+
+    fn expand_pattern(
+        &mut self,
+        word: &Word,
+        status: &mut Option<u8>,
+    ) -> Result<crate::pattern::TextPattern, String> {
+        let fields = self.expand_parts(word, status, false, false)?;
+        let chars = fields.iter().enumerate().flat_map(|(index, field)| {
+            (index != 0)
+                .then_some((' ', false))
+                .into_iter()
+                .chain(field.iter().flat_map(|part| {
+                    let quoted = part.origin == Origin::Quoted;
+                    part.text.chars().map(move |ch| (ch, quoted))
+                }))
+        });
+        crate::pattern::TextPattern::compile(chars)
     }
 
     fn interrupted(&self) -> bool {

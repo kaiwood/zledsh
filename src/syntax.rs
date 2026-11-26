@@ -261,18 +261,12 @@ pub(crate) enum Statement {
     },
     Case {
         word: Word,
-        clauses: Vec<(Vec<CasePattern>, Script)>,
+        clauses: Vec<(Vec<Word>, Script)>,
     },
     If {
         branches: Vec<(Script, Script)>,
         otherwise: Script,
     },
-}
-
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) enum CasePattern {
-    Any,
-    Exact(Word),
 }
 
 pub(crate) fn parse(source: &str) -> ParseResult<Script> {
@@ -601,12 +595,7 @@ fn case_statement(input: &mut Source<'_>, depth: usize) -> ParseResult<Statement
         let mut patterns = Vec::new();
         loop {
             skip_space(input);
-            let pattern = if input.next_if_eq(&'*').is_some() {
-                CasePattern::Any
-            } else {
-                CasePattern::Exact(parse_word(input, false)?)
-            };
-            patterns.push(pattern);
+            patterns.push(word(input)?);
             skip_space(input);
             match input.next() {
                 Some('|') => continue,
@@ -808,10 +797,6 @@ fn here_delimiter(input: &mut Source<'_>) -> ParseResult<(String, bool)> {
 }
 
 fn word(input: &mut Source<'_>) -> ParseResult<Word> {
-    parse_word(input, true)
-}
-
-fn parse_word(input: &mut Source<'_>, allow_glob: bool) -> ParseResult<Word> {
     let mut ahead = input.clone();
     let assignment = variable_name(&mut ahead).is_some() && ahead.next_if_eq(&'=').is_some();
     let mut word = Word {
@@ -854,8 +839,7 @@ fn parse_word(input: &mut Source<'_>, allow_glob: bool) -> ParseResult<Word> {
                 }
             }
             '(' if word.assignment => return Err("array literals are not supported".into()),
-            '*' | '?' | '[' if allow_glob => literal(&mut word, ch, false),
-            '<' | '(' | '{' | '}' | '`' | '*' | '?' | '[' => {
+            '<' | '(' | '{' | '}' | '`' => {
                 return Err(ParseError::Invalid(format!(
                     "unsupported unquoted syntax: {ch}"
                 )));

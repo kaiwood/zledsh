@@ -261,3 +261,33 @@ printf ':%s:%s' "${value+x}" "${value:+x}"
     );
     assert!(!home.path().join("skipped").exists());
 }
+
+#[test]
+fn case_patterns_match_text_without_pathname_rules() {
+    let home = tempfile::tempdir().unwrap();
+    let source = r#"
+pattern='.*[0-9]'
+case '/.app/7' in
+  '/.*[0-9]') printf wrong;;
+  /$pattern) printf 'matched\n';;
+  *) printf wrong;;
+esac
+case 'a*b' in
+  a\*b|x?) printf 'literal\n';;
+  *) printf wrong;;
+esac
+case '.hidden' in [!x]hidden) printf 'leading dot\n';; esac
+case 'a/b' in a?b) printf 'slash\n';; esac
+case 'a*b' in
+  a*b) printf 'first\n';;
+  "$(printf wrong > skipped)") printf wrong;;
+esac
+"#;
+    assert_output(
+        shell(home.path()).args(["-c", source]).output().unwrap(),
+        0,
+        "matched\nliteral\nleading dot\nslash\nfirst\n",
+        "",
+    );
+    assert!(!home.path().join("skipped").exists());
+}
