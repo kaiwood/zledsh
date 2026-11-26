@@ -33,6 +33,11 @@ pub(crate) fn pattern(
         }
     }
     components.push(compile_component(&component, globstar)?);
+    // Adjacent recursive components select the same paths as one, but would
+    // otherwise walk each matching subtree again before the final dedup.
+    components.dedup_by(|current, previous| {
+        matches!(current, Component::Recursive) && matches!(previous, Component::Recursive)
+    });
     Ok(components
         .iter()
         .any(|part| !matches!(part, Component::Literal(_)))

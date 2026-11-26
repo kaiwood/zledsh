@@ -189,3 +189,24 @@ printf '<%s>\n' **/*.txt
         "<a/next.txt>\n<a/b/deep.txt>\n<a/next.txt>\n<top.txt>\n<a/>\n<a/b/>\n<**/*.txt>\n<**/*.txt>\n",
     );
 }
+
+#[test]
+fn adjacent_globstars_preserve_matches_without_following_discovered_symlinks() {
+    assert_paths(
+        &[
+            "top.txt",
+            "a/next.txt",
+            "a/b/deep.txt",
+            ".hidden/secret.txt",
+        ],
+        r#"
+/bin/ln -s a linked
+set -o globstar
+base=$(pwd)
+for path in "$base"/**/**; do printf '<%s>\n' "${path#"$base"/}"; done
+printf '<%s>\n' **/**/
+printf '<%s>\n' linked/**/**/deep.txt
+"#,
+        "<a>\n<a/b>\n<a/b/deep.txt>\n<a/next.txt>\n<linked>\n<top.txt>\n<a/>\n<a/b/>\n<linked/b/deep.txt>\n",
+    );
+}
