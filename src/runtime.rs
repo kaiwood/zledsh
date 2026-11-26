@@ -722,6 +722,7 @@ impl<'a> Invocation<'a> {
             }
         };
         let mut descriptors = original.clone();
+        let direct_special = argv.first().is_some_and(|name| is_special_builtin(name));
         if let Err(error) = self.redirect(
             &command.redirects,
             &mut descriptors,
@@ -729,9 +730,10 @@ impl<'a> Invocation<'a> {
         ) {
             report(&descriptors[2], &error);
             self.status = if self.exited { 2 } else { 1 };
+            self.special_builtin_error(direct_special);
             return;
         }
-        let temporary = argv.first().is_some_and(|name| !is_special_builtin(name));
+        let temporary = !argv.is_empty() && !direct_special;
         let mut saved = HashMap::new();
         let result = (|| -> Result<(), String> {
             for word in prefix {
@@ -826,6 +828,7 @@ impl<'a> Invocation<'a> {
             }
             return;
         }
+        let direct_special = !bypass_functions && is_special_builtin(name);
         match name.as_str() {
             ":" | "true" => self.status = 0,
             "false" => self.status = 1,
@@ -848,6 +851,7 @@ impl<'a> Invocation<'a> {
                         &format!("{name}: expected a valid enclosing loop level"),
                     );
                     self.status = 2;
+                    self.special_builtin_error(direct_special);
                 }
             }
             "local" => {
@@ -858,6 +862,7 @@ impl<'a> Invocation<'a> {
                     Ok(()) => 0,
                     Err(error) => {
                         report(&descriptors[2], &format!("set: {error}"));
+                        self.special_builtin_error(direct_special);
                         2
                     }
                 };
@@ -891,13 +896,19 @@ impl<'a> Invocation<'a> {
                         "return: expected a function and an optional numeric status",
                     );
                     self.status = 2;
+                    self.special_builtin_error(direct_special);
                 }
             }
-            "eval" => self.run_nested(name, &args.join(" "), input, &descriptors),
+            "eval" => {
+                if !self.run_nested(name, &args.join(" "), input, &descriptors) {
+                    self.special_builtin_error(direct_special);
+                }
+            }
             "." | "source" => {
                 let Some((path, args)) = args.split_first() else {
                     report(&descriptors[2], &format!("{name}: expected a file"));
                     self.status = 2;
+                    self.special_builtin_error(direct_special);
                     return;
                 };
                 let path = if path.contains('/') {
@@ -912,7 +923,7 @@ impl<'a> Invocation<'a> {
                     Ok(source) => {
                         let saved = (!args.is_empty())
                             .then(|| std::mem::replace(&mut self.args, args.to_vec()));
-                        self.run_nested(
+                        let ran = self.run_nested(
                             &format!("{name}: {}", path.display()),
                             &source,
                             input,
@@ -921,6 +932,9 @@ impl<'a> Invocation<'a> {
                         if let Some(saved) = saved {
                             self.args = saved;
                         }
+                        if !ran {
+                            self.special_builtin_error(direct_special);
+                        }
                     }
                     Err(error) => {
                         report(
@@ -928,25 +942,30 @@ impl<'a> Invocation<'a> {
                             &format!("{name}: {}: {error}", path.display()),
                         );
                         self.status = 1;
+                        self.special_builtin_error(direct_special);
                     }
                 }
             }
             "exit" => {
-                self.exited = true;
-                self.status = match args {
-                    [] => self.status,
-                    [arg] => match arg.parse::<i64>() {
-                        Ok(value) => value as u8,
-                        Err(_) => {
-                            report(&descriptors[2], "exit: expected numeric status");
-                            2
-                        }
-                    },
-                    _ => {
-                        report(&descriptors[2], "exit: too many arguments");
-                        2
-                    }
+                let code = match args {
+                    [] => Ok(self.status),
+                    [arg] => arg
+                        .parse::<i64>()
+                        .map(|value| value as u8)
+                        .map_err(|_| "expected numeric status"),
+                    _ => Err("too many arguments"),
                 };
+                match code {
+                    Ok(code) => {
+                        self.exited = true;
+                        self.status = code;
+                    }
+                    Err(error) => {
+                        report(&descriptors[2], &format!("exit: {error}"));
+                        self.status = 2;
+                        self.special_builtin_error(direct_special);
+                    }
+                }
             }
             "cd" | "pwd" => {
                 let result = if name == "cd" {
@@ -971,6 +990,7 @@ impl<'a> Invocation<'a> {
                     Ok(()) => 0,
                     Err(error) => {
                         report(&descriptors[2], &format!("readonly: {error}"));
+                        self.special_builtin_error(direct_special);
                         2
                     }
                 };
@@ -993,6 +1013,9 @@ impl<'a> Invocation<'a> {
                         break;
                     }
                     self.exported.insert(name.to_owned());
+                }
+                if self.status != 0 {
+                    self.special_builtin_error(direct_special);
                 }
             }
             "unset" => {
@@ -1027,6 +1050,9 @@ impl<'a> Invocation<'a> {
                     self.variables.remove(name);
                     self.exported.remove(name);
                     self.unset.insert(name.clone());
+                }
+                if self.status != 0 {
+                    self.special_builtin_error(direct_special);
                 }
             }
             "complete" => {
@@ -1246,19 +1272,28 @@ impl<'a> Invocation<'a> {
         source: &str,
         input: &mut dyn BufRead,
         descriptors: &Descriptors,
-    ) {
+    ) -> bool {
         if self.script_depth >= 32 {
             report(&descriptors[2], &format!("{name}: nesting too deep"));
             self.status = 2;
-            return;
+            return false;
         }
         self.script_depth += 1;
         self.status = 0;
-        if let Err(error) = self.run_source_with_descriptors(source, input, descriptors) {
+        let result = self.run_source_with_descriptors(source, input, descriptors);
+        self.script_depth -= 1;
+        if let Err(error) = result {
             report(&descriptors[2], &format!("{name}: {error}"));
             self.status = 2;
+            return false;
         }
-        self.script_depth -= 1;
+        true
+    }
+
+    fn special_builtin_error(&mut self, direct: bool) {
+        if direct && (!self.options.interactive || self.shell_worker) && !self.agent_command() {
+            self.exited = true;
+        }
     }
 
     fn update_aliases(

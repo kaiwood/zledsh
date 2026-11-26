@@ -102,7 +102,7 @@ fn eval_runs_native_code_with_current_state_and_redirects() {
         .args(["-c", r#"
             eval "$(printf '%s' 'name=loaded; if true; then printf "%s" "$name" | /bin/cat; fi')" > fixture
             printf '%s:' "$name"; /bin/cat fixture
-            eval 'printf wrong; printf %s $((1 + 2)'; printf ':%s' "$?"
+            command eval 'printf wrong; printf %s $((1 + 2)'; printf ':%s' "$?"
         "#])
         .output().unwrap();
     assert!(output.status.success());

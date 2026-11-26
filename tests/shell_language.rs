@@ -476,10 +476,10 @@ readonly -p
 ( fixed=changed; printf unexpected ) || printf 'assignment blocked\n'
 true | unset fixed
 printf 'worker status=%s\n' "$?"
-export fixed=changed || printf 'export assignment blocked\n'
+command export fixed=changed || printf 'export assignment blocked\n'
 export fixed
 /usr/bin/printenv fixed
-unset fixed || printf 'unset blocked\n'
+command unset fixed || printf 'unset blocked\n'
 printf '<%s>\n' "$fixed" "${missing-unset}"
 "#,
         ])
@@ -580,4 +580,60 @@ readonly fixed=old
         "zledsh: fixed: read-only variable\n",
     );
     assert!(!home.path().join("after").exists());
+}
+
+#[test]
+fn direct_special_builtin_errors_exit_noninteractive_but_command_errors_do_not() {
+    let home = tempfile::tempdir().unwrap();
+    let error = "zledsh: export: expected a variable name or assignment\n";
+    let direct = shell(home.path())
+        .args([
+            "-c",
+            "export bad-name || printf unexpected; printf also-unexpected",
+        ])
+        .output()
+        .unwrap();
+    assert_output(direct, 2, "", error);
+    let via_command = shell(home.path())
+        .args([
+            "-c",
+            "command export bad-name || printf recovered; eval false; printf ':%s' \"$?\"",
+        ])
+        .output()
+        .unwrap();
+    assert_output(via_command, 0, "recovered:1", error);
+    let interactive = shell(home.path())
+        .args(["-ic", "export bad-name || printf recovered"])
+        .output()
+        .unwrap();
+    assert_output(interactive, 0, "recovered", error);
+}
+
+#[test]
+fn special_builtins_take_precedence_and_failed_redirection_prevents_assignment() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+export() { printf unexpected; }
+export x=exported
+/usr/bin/printenv x
+( x=changed : > missing/file; printf unexpected ) || printf 'blocked\n'
+command : > missing/file || printf 'recovered\n'
+printf '%s\n' "$x"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stdout, b"exported\nblocked\nrecovered\nexported\n");
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(error.lines().count(), 2, "{error}");
+    assert!(
+        error
+            .lines()
+            .all(|line| line.starts_with("zledsh: missing/file:")),
+        "{error}"
+    );
 }
