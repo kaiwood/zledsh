@@ -8,13 +8,18 @@ use std::{
 
 use crate::runtime::{BUILTINS, Invocation};
 
-pub(crate) fn matches(line: &str, shell: &Invocation<'_>) -> Option<Matches> {
+pub(crate) fn matches(line: &str, at_end: bool, shell: &Invocation<'_>) -> Option<Matches> {
     let Draft {
         mut words,
         token,
         quote,
         expand_home,
     } = Draft::parse(line)?;
+    // A whitespace byte to the right of the cursor may be part of the
+    // quoted word, not an argument boundary. Do not insert a closing quote there.
+    if !at_end && quote != Quote::Bare {
+        return None;
+    }
     let command = words.is_empty();
     let programmed = if command {
         None

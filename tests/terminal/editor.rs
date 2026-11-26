@@ -586,6 +586,7 @@ printf 'printf saved > edited\n' > "$1"
 #[test]
 fn completion_keeps_paths_inside_quotes_and_respects_typed_escapes() {
     let mut tty = Terminal::start("quote-tab> ", &[], |home| {
+        fs::write(home.join("mid path.txt"), b"original path\n").unwrap();
         fs::create_dir(home.join("some directory")).unwrap();
         fs::write(home.join("some directory/file name"), b"escaped path\n").unwrap();
         fs::write(home.join("a'b.txt"), b"single quote\n").unwrap();
@@ -601,6 +602,13 @@ fn completion_keeps_paths_inside_quotes_and_respects_typed_escapes() {
         tty.expect(&format!("\r\n{expected}\r\n"));
         tty.expect("quote-tab> ");
     }
+    let tail = " path.txt'";
+    tty.send(&format!(
+        "/bin/cat 'mid{tail}{}\t\n",
+        "\x1b[D".repeat(tail.len())
+    ));
+    tty.expect("\r\noriginal path\r\n");
+    tty.expect("quote-tab> ");
     tty.finish();
 }
 

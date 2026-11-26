@@ -892,9 +892,12 @@ fn read_keys(
                     echo.flush()?;
                     continue;
                 } else {
-                    let Some(matches) = std::str::from_utf8(&line[..cursor])
-                        .ok()
-                        .and_then(|prefix| completion::matches(prefix, shell))
+                    let Some(matches) =
+                        std::str::from_utf8(&line[..cursor])
+                            .ok()
+                            .and_then(|prefix| {
+                                completion::matches(prefix, cursor == line.len(), shell)
+                            })
                     else {
                         continue;
                     };
