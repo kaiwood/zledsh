@@ -708,6 +708,8 @@ fn read_keys(
     let primary = history.is_some();
     let mut consecutive_cut = false;
     let mut yank = None;
+    let mut undo = VecDeque::new();
+    let mut before_edit: Option<(Vec<u8>, usize)> = None;
     let mut history_index = None;
     let mut saved_draft = (Vec::new(), 0);
     let mut completion: Option<CompletionCycle> = None;
@@ -716,6 +718,19 @@ fn read_keys(
     let mut line = draft.into_bytes();
     let mut cursor = line.len();
     while let Some(mut key) = read_key(input, shell)? {
+        if let Some(before) = before_edit.take().filter(|(text, _)| *text != line) {
+            undo.push_back(before);
+            if undo.len() > 32 {
+                undo.pop_front();
+            }
+        }
+        if key.edits_draft() {
+            if line.len() > 64 * 1024 {
+                undo.clear();
+            } else if std::str::from_utf8(&line).is_ok() {
+                before_edit = Some((line.clone(), cursor));
+            }
+        }
         let previous_yank = yank.take();
         let previous_cut = std::mem::take(&mut consecutive_cut);
         if !matches!(key, Key::Byte(b'\t') | Key::BackTab) {
@@ -778,6 +793,13 @@ fn read_keys(
                     previous_cut,
                     false,
                 );
+            }
+            Key::Byte(31) => {
+                let Some(previous) = undo.pop_back() else {
+                    continue;
+                };
+                (line, cursor) = previous;
+                history_index = None;
             }
             Key::Byte(12) => echo.write_all(b"\x1b[H\x1b[2J")?,
             Key::Byte(21) => {
@@ -935,6 +957,7 @@ fn read_keys(
                         .skip(index + 1)
                         .find_map(|(index, text)| matches_prefix(text).then_some(index));
                 }
+                undo.clear();
                 (line, cursor) = history_index
                     .and_then(|index| history.entries().nth(index))
                     .map_or_else(
@@ -982,6 +1005,15 @@ enum Key {
     BackwardKillWord,
     YankPop,
     Ignored,
+}
+
+impl Key {
+    fn edits_draft(&self) -> bool {
+        matches!(self,
+            Self::Byte(b' '..=b'~' | 128..=255 | b'\t' | 4 | 8 | 11 | 18 | 19 | 21 | 23 | 25 | 127)
+            | Self::Delete | Self::Paste | Self::KillWord | Self::BackwardKillWord | Self::YankPop | Self::BackTab
+        )
+    }
 }
 
 fn read_key(input: &mut impl BufRead, shell: &mut Invocation<'_>) -> io::Result<Option<Key>> {

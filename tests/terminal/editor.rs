@@ -510,3 +510,16 @@ fn forward_history_search_cycles_switches_direction_and_restores_draft() {
     tty.expect("forward> ");
     tty.finish();
 }
+
+#[test]
+fn undo_restores_multiline_edits_and_resets_on_submit() {
+    let mut tty = Terminal::start("undo> ", &[], |_| {});
+    tty.expect("undo> ");
+    tty.send("/bin/echo é\x1b[200~ bad\n/bin/echo wrong\x1b[201~\x1fX\x1f\n");
+    tty.expect("\r\né\r\n");
+    tty.expect("undo> ");
+    tty.send("\x1f/bin/echo next\n");
+    tty.expect("\r\nnext\r\n");
+    tty.expect("undo> ");
+    tty.finish();
+}
