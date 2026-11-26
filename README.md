@@ -55,7 +55,7 @@ Use `<<'EOF'` to keep the body literal, or `<<-EOF` to strip leading tabs, not s
 
 Unquoted parameter expansions and `$(...)` results in command arguments are split using `IFS` (space, tab, and newline by default). Quote expansions like `"$value"` to keep whitespace and empty values in one argument. Assignments, redirection filenames, and here-document bodies are not field-split.
 
-After field splitting, unquoted `*` and `?` expand to matching filenames. For example, `printf '%s\n' *.txt` lists matching paths, one argument per filename even if it contains spaces. Quote or escape patterns to pass them literally. A pattern with no matches stays unchanged.
+After field splitting, unquoted `*`, `?`, and bracket patterns such as `[a-z]` expand to matching filenames. For example, `printf '%s\n' *.txt` lists matching paths, one argument per filename even if it contains spaces. Quote or escape patterns to pass them literally. A pattern with no matches stays unchanged. Wildcards do not cross `/` or match a leading dot unless the pattern starts that part with a dot. Redirection filenames remain literal with respect to pathname expansion, including at the prompt.
 
 Use `"$@"` to forward each positional argument unchanged, including empty arguments. `"$*"` instead joins them into one argument using the first character of `IFS` (a space if unset, no separator if empty). Unquoted `$@` and `$*` split each positional argument separately.
 

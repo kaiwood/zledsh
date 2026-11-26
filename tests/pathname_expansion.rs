@@ -45,3 +45,50 @@ printf '<%s>\n' 'x*.txt' x\?.txt x"*"?.txt x\??.txt "$pattern" $pattern $(printf
         "<x*.txt>\n<x?.txt>\n<x*1.txt>\n<x?2.txt>\n<xy?.txt>\n<xy3.txt>\n<xy3.txt>\n",
     );
 }
+
+#[test]
+fn bracket_expressions_match_lists_ranges_negation_and_classes() {
+    assert_paths(
+        &["x1", "x2", "x3", "xa", "xb", "x-", "x]", "x[1]"],
+        r#"printf '<%s>\n' x[13] x[1-3] x[!2ab] x[[:digit:]] x[1'-'3] x[]] x\[1\] x[unterminated
+"#,
+        "<x1>\n<x3>\n<x1>\n<x2>\n<x3>\n<x->\n<x1>\n<x3>\n<x]>\n<x1>\n<x2>\n<x3>\n<x->\n<x1>\n<x3>\n<x]>\n<x[1]>\n<x[unterminated>\n",
+    );
+}
+
+#[test]
+fn pathname_components_and_explicit_leading_dots() {
+    assert_paths(
+        &[
+            "tree/one/a.txt",
+            "tree/one/.hidden.txt",
+            "tree/two/b.txt",
+            "tree/.secret/c.txt",
+            "tree/plain.txt",
+            "m[n/o]p.txt",
+        ],
+        r#"printf '<%s>\n' tree/*.txt tree/*/?.txt tree/.*/*.txt tree/*/"."*.txt m[n/o]p.*
+"#,
+        "<tree/plain.txt>\n<tree/one/a.txt>\n<tree/two/b.txt>\n<tree/.secret/c.txt>\n<tree/one/.hidden.txt>\n<m[n/o]p.txt>\n",
+    );
+}
+
+#[test]
+fn argument_and_for_list_patterns_expand_but_redirections_and_assignments_do_not() {
+    assert_paths(
+        &["report-1.txt", "report-2.txt", "report-?.txt"],
+        r#"saved=report-?.txt
+export other=report-[12].txt
+printf '<%s>\n' "$saved" "$other"
+for entry in report-[12].txt; do printf '<%s>\n' "$entry"; done
+printf 'only the literal file\n' >report-?.txt
+/bin/cat <$(printf 'report-?.txt') | /bin/cat
+/bin/cat <report-1.txt
+/bin/cat <<EOF
+report-[12].txt
+$saved
+EOF
+"#,
+        "<report-?.txt>\n<report-[12].txt>\n<report-1.txt>\n<report-2.txt>\nonly the literal file\nfile contents\nreport-[12].txt\nreport-?.txt\n",
+    );
+}

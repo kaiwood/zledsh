@@ -1,59 +1,133 @@
-use std::ffi::{CStr, CString};
-use std::mem;
+use std::ffi::{CString, OsString};
+use std::fs;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 
-// Translate shell quoting into the pattern notation understood by glob(3).
-// Return no pattern if there is nothing to expand (POSIX 2.14.3).
-pub(crate) fn pattern(chars: impl Iterator<Item = (char, bool)>) -> Option<String> {
-    let mut pattern = String::new();
-    let mut active = false;
-    let mut chars = chars;
+pub(crate) struct Pattern(Vec<Component>);
+
+enum Component {
+    Literal(String),
+    Wildcard { pattern: CString, leading_dot: bool },
+}
+
+// POSIX 2.14.3: separate components before interpreting brackets, and keep
+// shell quoting independent of backslashes that come from expansion results.
+pub(crate) fn pattern(
+    mut chars: impl Iterator<Item = (char, bool)>,
+) -> Result<Option<Pattern>, String> {
+    let mut components = Vec::new();
+    let mut component = Vec::new();
     while let Some((ch, quoted)) = chars.next() {
-        if ch == '\\' && !quoted {
-            // A backslash introduced by expansion can itself quote the next character.
-            let (escaped, _) = chars.next()?;
-            if escaped != '/' {
-                pattern.push('\\');
-            }
-            pattern.push(escaped);
+        let (ch, quoted) = if ch == '\\' && !quoted {
+            chars.next().map_or(('\\', true), |(ch, _)| (ch, true))
         } else {
-            active |= !quoted && matches!(ch, '*' | '?');
-            if (quoted && matches!(ch, '*' | '?' | '\\')) || ch == '[' {
-                pattern.push('\\');
-            }
-            pattern.push(ch);
+            (ch, quoted)
+        };
+        if ch == '/' {
+            components.push(compile_component(&component)?);
+            component.clear();
+        } else {
+            component.push((ch, quoted));
         }
     }
-    active.then_some(pattern)
+    components.push(compile_component(&component)?);
+    Ok(components
+        .iter()
+        .any(|part| matches!(part, Component::Wildcard { .. }))
+        .then_some(Pattern(components)))
 }
 
-pub(crate) fn expand(pattern: String) -> Result<Vec<String>, String> {
-    let pattern = CString::new(pattern).map_err(|_| "pathname pattern contains a NUL byte")?;
-    // SAFETY: glob_t is a C structure of integers and pointers. Starting with a
-    // zeroed record also makes it safe to free when glob returns an error.
-    let mut paths = Glob(unsafe { mem::zeroed() });
-    // SAFETY: pattern is NUL-terminated, and paths is a writable glob_t.
-    let result = unsafe { libc::glob(pattern.as_ptr(), 0, None, &mut paths.0) };
-    match result {
-        0 => (0..paths.0.gl_pathc)
-            .map(|i| {
-                // SAFETY: on success, glob provides gl_pathc non-null pointers
-                // to NUL-terminated strings, all owned by paths.
-                let path = unsafe { CStr::from_ptr(*paths.0.gl_pathv.add(i)) };
-                path.to_str()
-                    .map(str::to_owned)
-                    .map_err(|_| "pathname match is not UTF-8".into())
-            })
-            .collect(),
-        libc::GLOB_NOMATCH => Ok(Vec::new()),
-        _ => Err("pathname expansion failed".into()),
+fn compile_component(chars: &[(char, bool)]) -> Result<Component, String> {
+    let closing_bracket = chars.iter().rposition(|&(ch, quoted)| ch == ']' && !quoted);
+    let mut active = false;
+    let mut encoded = String::new();
+    for (i, &(ch, quoted)) in chars.iter().enumerate() {
+        let unmatched_bracket = ch == '[' && closing_bracket.is_none_or(|end| i >= end);
+        active |= !quoted && !unmatched_bracket && matches!(ch, '*' | '?' | '[');
+        if unmatched_bracket
+            || (quoted
+                && matches!(
+                    ch,
+                    '*' | '?' | '[' | ']' | '\\' | '-' | '!' | '^' | ':' | '=' | '.'
+                ))
+        {
+            encoded.push('\\');
+        }
+        encoded.push(ch);
+    }
+    if active {
+        Ok(Component::Wildcard {
+            pattern: CString::new(encoded).map_err(|_| "pathname pattern contains a NUL byte")?,
+            leading_dot: chars.first().is_some_and(|&(ch, _)| ch == '.'),
+        })
+    } else {
+        Ok(Component::Literal(
+            chars.iter().map(|&(ch, _)| ch).collect(),
+        ))
     }
 }
 
-struct Glob(libc::glob_t);
-
-impl Drop for Glob {
-    fn drop(&mut self) {
-        // SAFETY: this record was passed to glob and is freed exactly once.
-        unsafe { libc::globfree(&mut self.0) };
+pub(crate) fn expand(Pattern(components): Pattern) -> Result<Vec<String>, String> {
+    let mut paths = vec![OsString::new()];
+    let check_literal_tail = matches!(components.last(), Some(Component::Literal(_)));
+    for (i, component) in components.into_iter().enumerate() {
+        if i != 0 {
+            for path in &mut paths {
+                path.push("/");
+            }
+        }
+        match component {
+            Component::Literal(text) => {
+                for path in &mut paths {
+                    path.push(&text);
+                }
+            }
+            Component::Wildcard {
+                pattern,
+                leading_dot,
+            } => {
+                let mut matches = Vec::new();
+                for prefix in paths {
+                    let dir = if prefix.is_empty() {
+                        Path::new(".")
+                    } else {
+                        Path::new(&prefix)
+                    };
+                    // Missing or unreadable directories contribute no matches.
+                    for entry in fs::read_dir(dir)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Result::ok)
+                    {
+                        let name = entry.file_name();
+                        let bytes = name.as_bytes();
+                        if !leading_dot && bytes.starts_with(b".") {
+                            continue;
+                        }
+                        let Ok(name_c) = CString::new(bytes) else {
+                            continue;
+                        };
+                        // SAFETY: both arguments are live NUL-terminated strings.
+                        if unsafe { libc::fnmatch(pattern.as_ptr(), name_c.as_ptr(), 0) } == 0 {
+                            let mut path = prefix.clone();
+                            path.push(name);
+                            matches.push(path);
+                        }
+                    }
+                }
+                paths = matches;
+            }
+        }
     }
+    if check_literal_tail {
+        paths.retain(|path| fs::symlink_metadata(path).is_ok());
+    }
+    paths.sort_unstable();
+    paths
+        .into_iter()
+        .map(|path| {
+            path.into_string()
+                .map_err(|_| "pathname match is not UTF-8".into())
+        })
+        .collect()
 }

@@ -829,7 +829,7 @@ fn parse_word(input: &mut Source<'_>, allow_glob: bool) -> ParseResult<Word> {
                 word.push(Part::Home, true);
             }
             '(' if word.assignment => return Err("array literals are not supported".into()),
-            '*' | '?' if allow_glob => literal(&mut word, ch, false),
+            '*' | '?' | '[' if allow_glob => literal(&mut word, ch, false),
             '<' | '(' | '{' | '}' | '`' | '*' | '?' | '[' | '~' => {
                 return Err(ParseError::Invalid(format!(
                     "unsupported unquoted syntax: {ch}"
