@@ -132,6 +132,7 @@ pub(crate) enum FdAction {
 pub(crate) struct Stage {
     pub exec: Exec,
     pub streams: [FdAction; crate::SHELL_FDS],
+    pub worker_state: Option<OwnedFd>,
     pub missing: Vec<u8>,
     pub failed: Vec<u8>,
 }
@@ -189,6 +190,12 @@ pub(crate) fn fork_stage(
                 continue;
             }
             libc::_exit(126);
+        }
+        // Only this worker inherits its state file; all other copies stay close-on-exec.
+        if let Some(state) = &stage.worker_state {
+            if libc::fcntl(state.as_raw_fd(), libc::F_SETFD, 0) < 0 {
+                libc::_exit(126);
+            }
         }
         let missing = stage.exec.invoke().raw_os_error() == Some(libc::ENOENT);
         let message = if missing {

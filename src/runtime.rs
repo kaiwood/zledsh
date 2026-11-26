@@ -117,6 +117,13 @@ enum LoopControl {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
+struct PipelineVariables {
+    variables: HashMap<String, String>,
+    exported: HashSet<String>,
+    unset: HashSet<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Substitution {
     task: WorkerTask,
     name: String,
@@ -494,18 +501,25 @@ impl<'a> Invocation<'a> {
     }
 
     pub fn run_pipeline_builtin(
-        &mut self,
         command: &Command,
         input: &mut impl BufRead,
         closed: u8,
-    ) {
+        state: File,
+    ) -> serde_json::Result<u8> {
+        // Consume and close the private descriptor before evaluating any commands.
+        let state: PipelineVariables = serde_json::from_reader(BufReader::new(state))?;
+        let mut shell = Invocation::new("zledsh", &[]);
+        shell.variables = state.variables;
+        shell.exported = state.exported;
+        shell.unset = state.unset;
         let mut descriptors = inherited_descriptors();
         for (fd, stream) in descriptors[..3].iter_mut().enumerate() {
             if closed & (1 << fd) != 0 {
                 *stream = Descriptor::Closed;
             }
         }
-        self.run_pipeline_with_descriptors(std::slice::from_ref(command), input, &descriptors);
+        shell.run_pipeline_with_descriptors(std::slice::from_ref(command), input, &descriptors);
+        Ok(shell.status)
     }
 
     fn run_pipeline_with_descriptors(
@@ -1196,8 +1210,14 @@ impl<'a> Invocation<'a> {
                     "shell functions are not supported in pipeline stages; use command to bypass them",
                 ));
             }
-            let exec = if is_builtin(&name) {
+            let (exec, worker_state) = if is_builtin(&name) {
                 let executable = std::env::current_exe()?;
+                let state = worker_payload(&PipelineVariables {
+                    variables: self.variables.clone(),
+                    exported: self.exported.clone(),
+                    unset: self.unset.clone(),
+                })?;
+                let state_fd = process::duplicate(state.as_raw_fd())?;
                 let mut args = vec![
                     executable
                         .to_str()
@@ -1206,19 +1226,19 @@ impl<'a> Invocation<'a> {
                     crate::PIPELINE_BUILTIN.into(),
                     // Some runtimes reopen closed standard descriptors at startup.
                     closed_stdio(&descriptors).to_string(),
+                    state_fd.as_raw_fd().to_string(),
                 ];
                 args.extend(argv);
-                let mut local_env = env.clone();
-                local_env.extend(
-                    self.variables
-                        .iter()
-                        .map(|(key, value)| (key.into(), value.into())),
-                );
-                process::Exec::new(&args, &path, local_env)?
+                (
+                    process::Exec::new(&args, &path, env.clone())?,
+                    Some(state_fd),
+                )
             } else {
-                process::Exec::new(&argv, &path, env.clone())?
+                (process::Exec::new(&argv, &path, env.clone())?, None)
             };
-            stages.push(stage(exec, &name, &descriptors)?);
+            let mut child = stage(exec, &name, &descriptors)?;
+            child.worker_state = worker_state;
+            stages.push(child);
             match next_input {
                 Some(read) => stdin = Descriptor::File(Rc::new(File::from(read))),
                 None => break,
@@ -1498,12 +1518,10 @@ impl<'a> Invocation<'a> {
             depth: self.substitution_depth + 1,
             status: self.status,
         };
-        // Send private shell variables via an anonymous fd, not argv or the environment.
-        let mut payload = tempfile::tempfile()?;
-        serde_json::to_writer(&mut payload, &saved)?;
-        payload.rewind()?;
         let mut command = std::process::Command::new(std::env::current_exe()?);
-        command.arg(crate::SUBSTITUTION).stdin(payload);
+        command
+            .arg(crate::SUBSTITUTION)
+            .stdin(worker_payload(&saved)?);
         Ok(command)
     }
 
@@ -1823,6 +1841,14 @@ impl<'a> Invocation<'a> {
     }
 }
 
+// Send private shell variables via an anonymous fd, not argv or the environment.
+fn worker_payload(state: &impl serde::Serialize) -> io::Result<File> {
+    let mut payload = tempfile::tempfile()?;
+    serde_json::to_writer(&mut payload, state)?;
+    payload.rewind()?;
+    Ok(payload)
+}
+
 fn here_document_error(error: io::Error) -> String {
     format!("here-document: {error}")
 }
@@ -1906,6 +1932,7 @@ fn stage(exec: process::Exec, name: &str, descriptors: &Descriptors) -> io::Resu
     Ok(process::Stage {
         exec,
         streams,
+        worker_state: None,
         missing: format!("zledsh: {name}: command not found\n").into_bytes(),
         failed: format!("zledsh: {name}: cannot execute\n").into_bytes(),
     })

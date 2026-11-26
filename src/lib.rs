@@ -28,6 +28,7 @@ use std::{
     ffi::OsString,
     fs::File,
     io::{self, BufRead, BufReader},
+    os::fd::{FromRawFd, RawFd},
     process::ExitCode,
 };
 
@@ -64,7 +65,7 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
     else {
         return 2.into();
     };
-    let [closed, name, ..] = args.as_slice() else {
+    let [closed, state_fd, name, ..] = args.as_slice() else {
         return 2.into();
     };
     let Ok(closed @ 0..=7) = closed.parse::<u8>() else {
@@ -77,19 +78,27 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
         eprintln!("zledsh: {name}: not available in a pipeline stage");
         return 1.into();
     }
+    let Ok(state_fd) = state_fd.parse::<RawFd>() else {
+        return 2.into();
+    };
+    if state_fd < SHELL_FDS as RawFd || !process::inherited_descriptor(state_fd) {
+        return 2.into();
+    }
+    // The launcher reserved this inherited descriptor for the worker state.
+    let state = unsafe { File::from_raw_fd(state_fd) };
     let command = syntax::Command {
         words: args
             .into_iter()
-            .skip(1)
+            .skip(2)
             .map(syntax::Word::literal)
             .collect(),
         redirects: Vec::new(),
         background: false,
     };
     let mut input = BufReader::with_capacity(1, process::Stdin);
-    let mut invocation = runtime::Invocation::new("zledsh", &[]);
-    invocation.run_pipeline_builtin(&command, &mut input, closed);
-    invocation.status.into()
+    runtime::Invocation::run_pipeline_builtin(&command, &mut input, closed, state)
+        .unwrap_or(2)
+        .into()
 }
 
 fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Result<u8, String> {
