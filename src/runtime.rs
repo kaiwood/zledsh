@@ -743,6 +743,7 @@ impl<'a> Invocation<'a> {
             return;
         }
         let temporary = !argv.is_empty() && !direct_special;
+        let export_prefix = temporary || argv.first().is_some_and(|name| name == "exec");
         let mut saved = HashMap::new();
         let result = (|| -> Result<(), String> {
             for word in prefix {
@@ -756,6 +757,8 @@ impl<'a> Invocation<'a> {
                     saved
                         .entry(name.to_owned())
                         .or_insert_with(|| self.save_variable(name));
+                }
+                if export_prefix {
                     self.exported.insert(name.into());
                 }
                 self.assign(field)?;
@@ -811,6 +814,7 @@ impl<'a> Invocation<'a> {
                     | "bg"
                     | "wait"
                     | "eval"
+                    | "exec"
                     | "."
                     | "source"
                     | "complete"
@@ -955,6 +959,19 @@ impl<'a> Invocation<'a> {
                         self.special_builtin_error(direct_special);
                     }
                 }
+            }
+            "exec" => {
+                let args = args.strip_prefix(&[String::from("--")]).unwrap_or(args);
+                if args.is_empty() {
+                    report(
+                        &descriptors[2],
+                        "exec: persistent redirections are not supported yet",
+                    );
+                    self.status = 2;
+                } else {
+                    self.status = self.replace_shell(args, &descriptors);
+                }
+                self.special_builtin_error(true);
             }
             "exit" => {
                 let code = match args {
@@ -1610,7 +1627,16 @@ impl<'a> Invocation<'a> {
             if self.agent_command()
                 && matches!(
                     direct_name(&argv),
-                    Some("eval" | "." | "source" | "complete" | "set" | "readonly" | "umask")
+                    Some(
+                        "eval"
+                            | "exec"
+                            | "."
+                            | "source"
+                            | "complete"
+                            | "set"
+                            | "readonly"
+                            | "umask"
+                    )
                 )
             {
                 return Err(io::Error::other(
@@ -1718,6 +1744,24 @@ impl<'a> Invocation<'a> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub fn run_editor(&mut self, argv: &[String]) -> bool {
         self.external(argv, inherited_descriptors()) == 0
+    }
+
+    fn replace_shell(&self, argv: &[String], descriptors: &Descriptors) -> u8 {
+        let (path, env) = self.execution_environment();
+        let name = &argv[0];
+        let error = match process::Exec::new(argv, &path, env)
+            .and_then(|exec| stage(exec, name, descriptors))
+        {
+            Ok(stage) => process::replace(&stage),
+            Err(error) => error,
+        };
+        if error.raw_os_error() == Some(libc::ENOENT) {
+            report(&descriptors[2], &format!("exec: {name}: command not found"));
+            127
+        } else {
+            report(&descriptors[2], &format!("exec: {name}: {error}"));
+            126
+        }
     }
 
     fn external(&mut self, argv: &[String], mut descriptors: Descriptors) -> u8 {
@@ -2640,9 +2684,9 @@ fn here_document_error(error: io::Error) -> String {
 }
 
 pub(crate) const BUILTINS: &[&str] = &[
-    "exit", "cd", "pwd", "export", "readonly", "unset", "read", "printf", "fg", "alias", "unalias",
-    "jobs", "bg", "wait", "command", ":", "true", "false", "eval", "break", "continue", ".",
-    "source", "local", "set", "shift", "getopts", "umask", "return", "complete", "compgen",
+    "exit", "exec", "cd", "pwd", "export", "readonly", "unset", "read", "printf", "fg", "alias",
+    "unalias", "jobs", "bg", "wait", "command", ":", "true", "false", "eval", "break", "continue",
+    ".", "source", "local", "set", "shift", "getopts", "umask", "return", "complete", "compgen",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {
@@ -2656,6 +2700,7 @@ fn is_special_builtin(name: &str) -> bool {
             | "break"
             | "continue"
             | "eval"
+            | "exec"
             | "exit"
             | "export"
             | "readonly"

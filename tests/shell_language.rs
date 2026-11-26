@@ -752,3 +752,61 @@ umask
         );
     }
 }
+
+#[test]
+fn exec_replacement_probe() {
+    if std::env::var_os("ZLEDSH_EXEC_PROBE").is_some() {
+        println!("exec-pid={}", std::process::id());
+        println!("exec-value={}", std::env::var("probe_value").unwrap());
+    }
+}
+
+#[test]
+fn exec_replaces_the_same_process_with_redirected_descriptors() {
+    let home = tempfile::tempdir().unwrap();
+    let probe = std::env::current_exe().unwrap();
+    let child = shell(home.path()).env("ZLEDSH_EXEC_PROBE", "yes")
+        .args(["-c", r#"probe_value=inherited exec "$1" exec_replacement_probe --exact --nocapture > capture; printf unexpected"#, "name"])
+        .arg(probe).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let pid = child.id();
+    assert_output(child.wait_with_output().unwrap(), 0, "", "");
+    let capture = fs::read_to_string(home.path().join("capture")).unwrap();
+    assert!(
+        capture
+            .lines()
+            .any(|line| line == format!("exec-pid={pid}")),
+        "{capture}"
+    );
+    assert!(
+        capture.lines().any(|line| line == "exec-value=inherited"),
+        "{capture}"
+    );
+}
+
+#[test]
+fn exec_failure_terminates_only_its_noninteractive_environment() {
+    let home = tempfile::tempdir().unwrap();
+    let direct = shell(home.path())
+        .args(["-c", "exec ./missing; printf unexpected"])
+        .output()
+        .unwrap();
+    assert_output(
+        direct,
+        127,
+        "",
+        "zledsh: exec: ./missing: command not found\n",
+    );
+    let nested = shell(home.path())
+        .args([
+            "-c",
+            "(exec ./missing; printf unexpected) || printf 'status=%s' \"$?\"",
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        nested,
+        0,
+        "status=127",
+        "zledsh: exec: ./missing: command not found\n",
+    );
+}

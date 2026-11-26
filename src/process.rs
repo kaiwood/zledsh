@@ -137,6 +137,81 @@ pub(crate) struct Stage {
     pub failed: Vec<u8>,
 }
 
+const CHILD_SIGNALS: [libc::c_int; 6] = [
+    libc::SIGPIPE,
+    libc::SIGINT,
+    libc::SIGQUIT,
+    libc::SIGTSTP,
+    libc::SIGTTIN,
+    libc::SIGTTOU,
+];
+
+pub(crate) fn replace(stage: &Stage) -> io::Error {
+    let mut descriptors = Vec::new();
+    for (fd, action) in stage.streams.iter().enumerate() {
+        if matches!(action, FdAction::Keep) {
+            continue;
+        }
+        let fd = fd as RawFd;
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        let saved = if flags >= 0 {
+            match duplicate(fd) {
+                Ok(copy) => Some(copy),
+                Err(error) => return error,
+            }
+        } else if io::Error::last_os_error().raw_os_error() == Some(libc::EBADF) {
+            None
+        } else {
+            return io::Error::last_os_error();
+        };
+        descriptors.push((fd, flags, saved, action));
+    }
+    let mut signals = Vec::new();
+    let result = (|| -> io::Result<()> {
+        for &(fd, _, _, action) in &descriptors {
+            match action {
+                FdAction::Set(source) => {
+                    if unsafe { libc::dup2(source.as_raw_fd(), fd) } < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                }
+                FdAction::Close => {
+                    unsafe { libc::close(fd) };
+                }
+                FdAction::Keep => unreachable!(),
+            }
+        }
+        for signal in CHILD_SIGNALS {
+            let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+            action.sa_sigaction = libc::SIG_DFL;
+            let mut old = std::mem::MaybeUninit::uninit();
+            if unsafe { libc::sigaction(signal, &action, old.as_mut_ptr()) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            signals.push((signal, unsafe { old.assume_init() }));
+        }
+        Err(stage.exec.invoke())
+    })();
+    for (signal, old) in signals.into_iter().rev() {
+        unsafe { libc::sigaction(signal, &old, std::ptr::null_mut()) };
+    }
+    for (fd, flags, saved, _) in descriptors {
+        if let Some(saved) = saved {
+            // None of these descriptors are handed to other shell code until
+            // rollback finishes. Retry dup2 if a signal interrupted it.
+            while unsafe { libc::dup2(saved.as_raw_fd(), fd) } < 0 {
+                if io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                    break;
+                }
+            }
+            unsafe { libc::fcntl(fd, libc::F_SETFD, flags) };
+        } else {
+            unsafe { libc::close(fd) };
+        }
+    }
+    result.unwrap_err()
+}
+
 pub(crate) fn fork_stage(
     stage: &Stage,
     gate: &(OwnedFd, OwnedFd),
@@ -156,14 +231,7 @@ pub(crate) fn fork_stage(
         if group.is_some_and(|group| libc::setpgid(0, group) < 0) {
             libc::_exit(126);
         }
-        for signal in [
-            libc::SIGPIPE,
-            libc::SIGINT,
-            libc::SIGQUIT,
-            libc::SIGTSTP,
-            libc::SIGTTIN,
-            libc::SIGTTOU,
-        ] {
+        for signal in CHILD_SIGNALS {
             libc::signal(signal, libc::SIG_DFL);
         }
         for (fd, action) in stage.streams.iter().enumerate() {
