@@ -28,6 +28,7 @@ mod syntax;
 mod terminal_modes;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod transcript;
+mod traps;
 mod umask;
 
 use std::{
@@ -214,7 +215,8 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
         if chatgpt {
             return Err("--chatgpt requires an interactive terminal on macOS or Linux".into());
         }
-        return run_input(&mut invocation, &mut input, None, false);
+        let result = run_input(&mut invocation, &mut input, None, false);
+        return Ok(invocation.finish(&mut input, result));
     }
     let option = option.as_ref().ok_or("-c requires a command")?;
     match flag {
@@ -246,10 +248,14 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
             let mut invocation = runtime::Invocation::new(name, &args);
             invocation.options = options;
             load_forced_startup(options.interactive, &mut invocation, &mut input);
-            if !invocation.exited {
-                invocation.run_source(source, &mut input)?;
-            }
-            Ok(invocation.status)
+            let result = if invocation.exited {
+                Ok(invocation.status)
+            } else {
+                invocation
+                    .run_source(source, &mut input)
+                    .map(|()| invocation.status)
+            };
+            Ok(invocation.finish(&mut input, result))
         }
         _ if end_options || !option.as_encoded_bytes().starts_with(b"-") => {
             let path = option.to_str().ok_or("script name must be UTF-8")?;
@@ -265,13 +271,14 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
             let mut invocation = runtime::Invocation::new(path, &args);
             invocation.options = options;
             load_forced_startup(options.interactive, &mut invocation, &mut input);
-            run_input(
+            let result = run_input(
                 &mut invocation,
                 &mut input,
                 Some(BufReader::new(script)),
                 options.interactive,
             )
-            .map_err(|error| format!("{path}: {error}"))
+            .map_err(|error| format!("{path}: {error}"));
+            Ok(invocation.finish(&mut input, result))
         }
         _ => Err(format!("unsupported option: {}", option.to_string_lossy())),
     }

@@ -893,3 +893,169 @@ pwd
         "{stderr}"
     );
 }
+
+#[test]
+fn exit_traps_run_in_the_final_environment_and_reset_in_workers() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+trap 'printf "outer:%s:%s\n" "$?" "$value"' EXIT
+value=live
+( exit 3 ); printf 'subshell:%s\n' "$?"
+( trap 'printf "inner:%s\n" "$?"' 0; exit 4 ); printf 'subshell:%s\n' "$?"
+printf 'capture=<%s>\n' "$(trap 'printf "capture:%s" "$?"' EXIT; exit 6)"
+exit 7
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        7,
+        "subshell:3\ninner:4\nsubshell:4\ncapture=<capture:6>\nouter:7:live\n",
+        "",
+    );
+}
+
+#[test]
+fn trap_listing_is_reusable_and_reset_restores_default() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+trap 'printf "%s" "a'\''b"' EXIT
+saved=$(trap)
+trap 0
+trap -p EXIT
+eval "$saved"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(output, 0, "trap -- '-' EXIT\na'b", "");
+}
+
+#[test]
+fn trap_signal_probe() {
+    if let Ok(mode) = std::env::var("ZLEDSH_TRAP_TEST") {
+        if mode == "ignored" {
+            unsafe { libc::raise(libc::SIGUSR1) };
+            return;
+        }
+        if mode == "wait" {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+        }
+        assert_eq!(unsafe { libc::kill(libc::getppid(), libc::SIGUSR1) }, 0);
+        if mode == "wait" {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        } else {
+            println!("foreground finished");
+        }
+    }
+}
+
+#[test]
+fn trapped_signal_runs_after_foreground_completion_and_interrupts_wait() {
+    let home = tempfile::tempdir().unwrap();
+    let probe = std::env::current_exe().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+trap 'printf "signal:%s\n" "$?"; false' USR1
+export ZLEDSH_TRAP_TEST=foreground
+"$1" trap_signal_probe --exact --nocapture
+printf 'after:%s\n' "$?"
+export ZLEDSH_TRAP_TEST=wait
+"$1" trap_signal_probe --exact > probe-output &
+pid=$!
+wait "$pid"
+printf 'wait:%s\n' "$?"
+wait "$pid"
+printf 'reaped:%s\n' "$?"
+"#,
+            "name",
+        ])
+        .arg(probe)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let interrupted = 128 + libc::SIGUSR1;
+    assert!(
+        stdout.ends_with(&format!(
+            "signal:0\nafter:0\nsignal:{interrupted}\nwait:{interrupted}\nreaped:0\n"
+        )),
+        "{stdout}"
+    );
+    assert!(
+        stdout.find("foreground finished").unwrap() < stdout.find("signal:0").unwrap(),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn ignored_signals_survive_subshells_and_cannot_be_reset_on_noninteractive_entry() {
+    use std::os::unix::process::CommandExt;
+
+    let home = tempfile::tempdir().unwrap();
+    let mut command = shell(home.path());
+    // Set an inherited disposition in the child only.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::signal(libc::SIGUSR1, libc::SIG_IGN) == libc::SIG_ERR {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = command
+        .env("ZLEDSH_TRAP_TEST", "ignored")
+        .args([
+            "-c",
+            r#"
+trap 'printf unexpected' USR1
+trap - USR1
+trap -p USR1
+( "$1" trap_signal_probe --exact > probe-output )
+printf 'probe:%s\n' "$?"
+"#,
+            "name",
+        ])
+        .arg(std::env::current_exe().unwrap())
+        .output()
+        .unwrap();
+    assert_output(output, 0, "trap -- '' USR1\nprobe:0\n", "");
+}
+
+#[test]
+fn exit_trap_runs_on_stdin_eof_and_named_script_errors() {
+    let home = tempfile::tempdir().unwrap();
+    let script = home.path().join("input");
+    fs::write(
+        &script,
+        b"trap 'printf \"exit:%s\\n\" \"$?\"' EXIT\nfalse\n",
+    )
+    .unwrap();
+    let output = shell(home.path())
+        .stdin(fs::File::open(&script).unwrap())
+        .output()
+        .unwrap();
+    assert_output(output, 1, "exit:1\n", "");
+    fs::write(
+        &script,
+        b"trap 'printf \"exit:%s\\n\" \"$?\"' EXIT\nif true\n",
+    )
+    .unwrap();
+    let output = shell(home.path()).arg(&script).output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(output.stdout, b"exit:2\n");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("input:"),
+        "{output:?}"
+    );
+}

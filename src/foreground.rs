@@ -143,6 +143,9 @@ impl Foreground {
         for index in (0..self.jobs.len()).rev() {
             if !self.jobs[index].stopped {
                 self.wait_job(index)?;
+                if let Some(signal) = crate::traps::pending() {
+                    return Ok(128 + signal as u8);
+                }
             }
         }
         Ok(0)
@@ -154,7 +157,16 @@ impl Foreground {
             self.jobs.remove(index);
             return Ok(code);
         }
-        match job.pipeline.wait(None)? {
+        let outcome = loop {
+            if let Some(signal) = crate::traps::pending() {
+                return Ok(128 + signal as u8);
+            }
+            if let Some(outcome) = job.pipeline.poll()? {
+                break outcome;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        match outcome {
             Outcome::Exited { code, .. } => {
                 self.jobs.remove(index);
                 Ok(code)

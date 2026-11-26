@@ -54,6 +54,8 @@ Use `umask 077` to restrict new files to their owner. `umask -S` shows permitted
 
 `exec program args…` replaces `zledsh` with an external program without changing its process ID. A failed replacement exits a noninteractive shell. With no program, `exec` keeps its redirections in the current shell. For example, `exec 3>log` opens a log descriptor, and `exec 3>&-` closes it.
 
+Use `trap 'cleanup_command' EXIT` to run cleanup when the shell exits. The action sees the original exit status in `$?`. Use `trap 'printf "interrupted\n"' INT` to catch a signal, `trap '' INT` to ignore it, or `trap - INT` to reset it. Signal actions run after a foreground command completes; the `wait` builtin returns early if a trapped signal arrives. Caught actions reset in subshells, while ignored signals stay ignored. Delivery while the shell is blocked reading input can be deferred until it resumes command processing.
+
 `cd` and `pwd` preserve logical paths by default, including symbolic links. Use `cd -P` or `pwd -P` for physical paths. `cd -` returns to the previous directory and prints it. Set `CDPATH` to a colon-separated list to search for relative directory names; use `cd ./name` to bypass that search.
 
 A direct special builtin can terminate a noninteractive script on a usage or redirection error, even without `set -e`. Use `command` to handle the error as a status instead: `command export 'bad-name' || printf 'export failed\n'`. A nonzero result from successfully executed code, such as `eval false`, is not itself a builtin error.

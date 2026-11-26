@@ -142,6 +142,8 @@ pub(crate) struct Invocation<'a> {
     pub status: u8,
     pub exited: bool,
     pub options: ShellOptions,
+    traps: crate::traps::Traps,
+    running_trap: bool,
     ignore_errexit: bool,
 }
 
@@ -166,6 +168,7 @@ struct PipelineVariables {
     args: Vec<String>,
     getopts_offset: usize,
     options: ShellOptions,
+    trap_snapshot: BTreeMap<libc::c_int, String>,
     ignore_errexit: bool,
     variables: HashMap<String, String>,
     exported: HashSet<String>,
@@ -177,6 +180,7 @@ struct PipelineVariables {
 struct Substitution {
     task: WorkerTask,
     options: ShellOptions,
+    trap_snapshot: BTreeMap<libc::c_int, String>,
     ignore_errexit: bool,
     name: String,
     args: Vec<String>,
@@ -235,6 +239,8 @@ impl<'a> Invocation<'a> {
             status: 0,
             exited: false,
             options: ShellOptions::default(),
+            traps: crate::traps::Traps::default(),
+            running_trap: false,
             ignore_errexit: false,
         }
     }
@@ -405,10 +411,15 @@ impl<'a> Invocation<'a> {
             }
             let base = descriptors;
             let current = self.updated_descriptors(base, versions);
+            self.dispatch_traps(input, &current);
+            if self.interrupted() {
+                break;
+            }
             let descriptors = &current;
             match statement {
                 Statement::Pipeline(pipeline) => {
                     self.run_pipeline_with_descriptors(pipeline, input, descriptors);
+                    self.dispatch_traps(input, &self.updated_descriptors(base, versions));
                     self.check_errexit();
                 }
                 Statement::Arithmetic(expression) => {
@@ -619,6 +630,105 @@ impl<'a> Invocation<'a> {
         }
     }
 
+    fn inherit_traps(&mut self, snapshot: BTreeMap<libc::c_int, String>) {
+        let pipe_ignored = snapshot.get(&libc::SIGPIPE).is_some_and(String::is_empty);
+        crate::traps::inherit_pipe_ignore(pipe_ignored);
+        self.traps.inherited_pipe_ignore = pipe_ignored;
+        self.traps.inherited = Some(snapshot);
+    }
+
+    fn dispatch_traps(&mut self, input: &mut dyn BufRead, descriptors: &Descriptors) {
+        if self.running_trap || self.exited || self.agent_command() {
+            return;
+        }
+        for signal in crate::traps::take_pending() {
+            if let Some(action) = self.traps.get(signal).map(str::to_owned) {
+                self.run_trap_action(&action, input, descriptors);
+                if self.exited {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn run_trap_action(
+        &mut self,
+        action: &str,
+        input: &mut dyn BufRead,
+        descriptors: &Descriptors,
+    ) {
+        let status = self.status;
+        self.running_trap = true;
+        if let Err(error) = self.run_source_with_descriptors(action, input, descriptors) {
+            report(&descriptors[2], &format!("trap: {error}"));
+        }
+        self.running_trap = false;
+        if !self.exited {
+            self.status = status;
+        }
+    }
+
+    pub fn finish(&mut self, input: &mut dyn BufRead, result: Result<u8, String>) -> u8 {
+        self.status = match result {
+            Ok(status) => status,
+            Err(error) => {
+                report(&self.persistent_fds[2], &error);
+                2
+            }
+        };
+        self.dispatch_traps(input, &self.persistent_fds.clone());
+        if let Some(action) = self.traps.take_exit() {
+            self.exited = false;
+            self.run_trap_action(&action, input, &self.persistent_fds.clone());
+            self.exited = true;
+        }
+        self.status
+    }
+
+    fn trap(&mut self, args: &[String], output: &Descriptor) -> Result<(), String> {
+        let (defaults, args) = match args {
+            [flag, rest @ ..] if flag == "-p" => (true, rest),
+            _ => (false, args),
+        };
+        let args = args.strip_prefix(&[String::from("--")]).unwrap_or(args);
+        if defaults || args.is_empty() {
+            let conditions = args
+                .iter()
+                .map(|name| crate::traps::condition(name))
+                .collect::<Result<Vec<_>, _>>()?;
+            for (name, action) in self.traps.listing(defaults, &conditions) {
+                output
+                    .write(&format!("trap -- {} {name}\n", quote_value(&action)))
+                    .map_err(|error| error.to_string())?;
+            }
+            return Ok(());
+        }
+        let (action, names) =
+            if args[0].bytes().all(|byte| byte.is_ascii_digit()) && !args[0].is_empty() {
+                ("-", args)
+            } else {
+                (args[0].as_str(), &args[1..])
+            };
+        if names.is_empty() {
+            return Err("expected an action and at least one condition".into());
+        }
+        let conditions = names
+            .iter()
+            .map(|name| crate::traps::condition(name))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.traps.inherited = None;
+        for signal in conditions {
+            self.traps
+                .set(
+                    signal,
+                    action,
+                    self.options.interactive && !self.shell_worker,
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+
     fn updated_descriptors(
         &self,
         base: &Descriptors,
@@ -736,6 +846,7 @@ impl<'a> Invocation<'a> {
         let state: PipelineVariables = serde_json::from_reader(BufReader::new(state))?;
         let mut shell = Invocation::new(&state.name, &state.args);
         shell.options = state.options;
+        shell.inherit_traps(state.trap_snapshot);
         shell.getopts_offset = state.getopts_offset;
         shell.ignore_errexit = state.ignore_errexit;
         shell.shell_worker = true;
@@ -750,7 +861,7 @@ impl<'a> Invocation<'a> {
             }
         }
         shell.run_pipeline_with_descriptors(std::slice::from_ref(command), input, &descriptors);
-        Ok(shell.status)
+        Ok(shell.finish(input, Ok(shell.status)))
     }
 
     fn run_pipeline_with_descriptors(
@@ -892,6 +1003,7 @@ impl<'a> Invocation<'a> {
                     | "set"
                     | "readonly"
                     | "umask"
+                    | "trap"
             )
         {
             report(
@@ -1074,6 +1186,16 @@ impl<'a> Invocation<'a> {
                     Err(error) => {
                         report(&descriptors[2], &format!("{name}: {error}"));
                         1
+                    }
+                };
+            }
+            "trap" => {
+                self.status = match self.trap(args, &descriptors[1]) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        report(&descriptors[2], &format!("trap: {error}"));
+                        self.special_builtin_error(direct_special);
+                        2
                     }
                 };
             }
@@ -1752,6 +1874,7 @@ impl<'a> Invocation<'a> {
                             | "set"
                             | "readonly"
                             | "umask"
+                            | "trap"
                     )
                 )
             {
@@ -1785,6 +1908,7 @@ impl<'a> Invocation<'a> {
                     args: self.args.clone(),
                     getopts_offset: self.getopts_offset,
                     options: self.options,
+                    trap_snapshot: self.traps.snapshot(),
                     ignore_errexit: self.ignore_errexit,
                     variables: self.variables.clone(),
                     exported: self.exported.clone(),
@@ -2193,6 +2317,7 @@ impl<'a> Invocation<'a> {
             serde_json::from_reader(state).map_err(|_| "invalid shell worker state")?;
         let mut shell = Invocation::new(&saved.name, &saved.args);
         shell.options = saved.options;
+        shell.inherit_traps(saved.trap_snapshot);
         shell.getopts_offset = saved.getopts_offset;
         shell.ignore_errexit = saved.ignore_errexit;
         shell.shell_worker = true;
@@ -2218,13 +2343,15 @@ impl<'a> Invocation<'a> {
             shell.persistent_fds = descriptors.clone();
             let mut input = BufReader::with_capacity(1, process::Stdin);
             shell.run_with_descriptors(&body, &mut input, &descriptors);
-            return Ok(shell.status);
+            return Ok(shell.finish(&mut input, Ok(shell.status)));
         }
         process::null_stdin().map_err(|error| error.to_string())?;
         match saved.task {
             WorkerTask::Script(source) => {
-                shell.run_source(&source, &mut io::empty())?;
-                Ok(shell.status)
+                let result = shell
+                    .run_source(&source, &mut io::empty())
+                    .map(|()| shell.status);
+                Ok(shell.finish(&mut io::empty(), result))
             }
             WorkerTask::Complete { function, words } => shell.complete_in_worker(&function, words),
             WorkerTask::List(_) => Err("invalid command substitution task".into()),
@@ -2288,6 +2415,7 @@ impl<'a> Invocation<'a> {
         Substitution {
             task,
             options: self.options,
+            trap_snapshot: self.traps.snapshot(),
             ignore_errexit: self.ignore_errexit,
             name: self.name.into(),
             args: self.args.clone(),
@@ -2876,7 +3004,8 @@ fn here_document_error(error: io::Error) -> String {
 pub(crate) const BUILTINS: &[&str] = &[
     "exit", "exec", "cd", "pwd", "export", "readonly", "unset", "read", "printf", "fg", "alias",
     "unalias", "jobs", "bg", "wait", "command", ":", "true", "false", "eval", "break", "continue",
-    ".", "source", "local", "set", "shift", "getopts", "umask", "return", "complete", "compgen",
+    ".", "source", "local", "set", "shift", "getopts", "umask", "trap", "return", "complete",
+    "compgen",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {
@@ -2897,6 +3026,7 @@ fn is_special_builtin(name: &str) -> bool {
             | "return"
             | "set"
             | "shift"
+            | "trap"
             | "unset"
     )
 }

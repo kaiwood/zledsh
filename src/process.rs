@@ -182,6 +182,9 @@ pub(crate) fn replace(stage: &Stage) -> io::Error {
             }
         }
         for signal in CHILD_SIGNALS {
+            if crate::traps::child_ignores(signal) {
+                continue;
+            }
             let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
             action.sa_sigaction = libc::SIG_DFL;
             let mut old = std::mem::MaybeUninit::uninit();
@@ -232,6 +235,9 @@ pub(crate) fn fork_stage(
             libc::_exit(126);
         }
         for signal in CHILD_SIGNALS {
+            if crate::traps::child_ignores(signal) {
+                continue;
+            }
             libc::signal(signal, libc::SIG_DFL);
         }
         for (fd, action) in stage.streams.iter().enumerate() {

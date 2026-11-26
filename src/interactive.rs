@@ -55,7 +55,7 @@ fn run_shell(
     }
     load_startup(invocation, input);
     if invocation.exited {
-        return Ok(invocation.status);
+        return Ok(invocation.finish(input, Ok(invocation.status)));
     }
     let mut editor = if terminal && invocation.variable("TERM").as_deref() != Some("dumb") {
         Some(EditorTerminal::new()?)
@@ -230,9 +230,9 @@ fn run_shell(
     }
     if !source.is_empty() {
         eprintln!("zledsh: incomplete command at end of input");
-        return Ok(2);
+        return Ok(invocation.finish(input, Ok(2)));
     }
-    Ok(invocation.status)
+    Ok(invocation.finish(input, Ok(invocation.status)))
 }
 
 struct AgentShell<'a, 'invocation> {

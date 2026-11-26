@@ -711,3 +711,18 @@ fn read_prompts_for_an_escaped_terminal_newline() {
     tty.expect("read> ");
     tty.finish();
 }
+
+#[test]
+fn exit_trap_runs_when_leaving_an_interactive_shell() {
+    let mut tty = Terminal::start("trap> ", &[], |_| {});
+    tty.expect("trap> ");
+    tty.send("trap 'printf \"%s\\n\" \"$value\" > on-exit' EXIT\n");
+    tty.expect("trap> ");
+    tty.send("value=interactive\n");
+    tty.expect("trap> ");
+    let home = tty.finish();
+    assert_eq!(
+        fs::read(home.path().join("on-exit")).unwrap(),
+        b"interactive\n"
+    );
+}
