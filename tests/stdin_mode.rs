@@ -63,7 +63,8 @@ fn s_flag_reads_commands_from_stdin_and_treats_operands_as_arguments() {
     assert!(output.stderr.is_empty());
 }
 
-// POSIX sh: OPERANDS (command_file, argument) and STDIN.
+// POSIX.1-2024 sh: OPERANDS (command_file, argument) and STDIN.
+// https://pubs.opengroup.org/onlinepubs/9799919799/utilities/sh.html
 #[test]
 fn named_script_preserves_arguments_and_separates_commands_from_stdin() {
     let dir = tempfile::tempdir().unwrap();
@@ -96,6 +97,28 @@ printf wrong
     assert!(output.stderr.is_empty());
 }
 
+// sh OPERANDS: a pathname with a slash need not be executable; $0 is the operand.
+#[test]
+fn named_script_with_slash_preserves_operand_spelling() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("script"),
+        r#"printf '<%s>\n' "$0" "$#" "$1""#,
+    )
+    .unwrap();
+    let output = run_with_pipe(
+        Command::new(env!("CARGO_BIN_EXE_zledsh"))
+            .current_dir(dir.path())
+            .env("HOME", dir.path())
+            .args(["./script", ""]),
+        b"",
+    );
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"<./script>\n<1>\n<>\n");
+    assert!(output.stderr.is_empty());
+}
+
+// sh OPTIONS refers to XBD 12.2 Utility Syntax Guidelines (guideline 10).
 #[test]
 fn end_of_options_allows_a_script_name_starting_with_a_dash() {
     let dir = tempfile::tempdir().unwrap();
@@ -111,6 +134,7 @@ fn end_of_options_allows_a_script_name_starting_with_a_dash() {
     assert!(output.stderr.is_empty());
 }
 
+// sh STDIN and EXIT STATUS: a missing command file is an error, not stdin mode.
 #[test]
 fn missing_named_script_fails_without_reading_stdin_as_commands() {
     let dir = tempfile::tempdir().unwrap();

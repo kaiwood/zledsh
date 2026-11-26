@@ -1,6 +1,7 @@
 use std::{fs, process::Command};
 
-// POSIX Shell Command Language 2.7.1 and 2.9.2.
+// POSIX.1-2024 Shell Command Language 2.7.1 (descriptor 0), 2.9.1 and 2.9.5.
+// https://pubs.opengroup.org/onlinepubs/9799919799/utilities/V3_chap02.html#tag_19_07_01
 #[test]
 fn input_redirect_is_local_to_the_command_and_works_for_builtins_and_children() {
     let dir = tempfile::tempdir().unwrap();
@@ -26,6 +27,7 @@ printf '<%s>\n' "$line"
     assert!(output.stderr.is_empty());
 }
 
+// Sections 2.7 and 2.9.2: no field splitting on the operand; redirects override pipes.
 #[test]
 fn pipeline_input_can_be_overridden_by_an_explicit_redirect() {
     let dir = tempfile::tempdir().unwrap();
@@ -43,6 +45,7 @@ fn pipeline_input_can_be_overridden_by_an_explicit_redirect() {
     assert!(output.stderr.is_empty());
 }
 
+// Sections 2.7 and 2.8.1: an open failure prevents the utility from running.
 #[test]
 fn failed_input_redirect_skips_the_command_and_leaves_input_intact() {
     let dir = tempfile::tempdir().unwrap();
