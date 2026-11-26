@@ -13,6 +13,60 @@ use crate::syntax::{
     Statement, Word, WordPart,
 };
 
+const DEFAULT_IFS: &str = " \t\n";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Literal,
+    Quoted,
+    Expansion,
+}
+
+struct Fragment {
+    text: String,
+    origin: Origin,
+}
+
+type Field = Vec<Fragment>;
+
+fn split_field(field: Field, ifs: &str, output: &mut Vec<String>) {
+    // POSIX.1-2024 2.6.5: IFS whitespace can precede a non-whitespace
+    // delimiter as part of the same terminator. Only the latter forces a field.
+    let mut candidate = String::new();
+    let mut present = false;
+    let mut whitespace = false;
+    for Fragment { text, origin } in field {
+        if origin != Origin::Expansion {
+            if whitespace && present {
+                output.push(std::mem::take(&mut candidate));
+            }
+            whitespace = false;
+            candidate.push_str(&text);
+            present = true;
+            continue;
+        }
+        for ch in text.chars() {
+            if !ifs.contains(ch) {
+                if whitespace && present {
+                    output.push(std::mem::take(&mut candidate));
+                }
+                whitespace = false;
+                candidate.push(ch);
+                present = true;
+            } else if DEFAULT_IFS.contains(ch) {
+                whitespace = true;
+            } else {
+                output.push(std::mem::take(&mut candidate));
+                whitespace = false;
+                present = false;
+            }
+        }
+    }
+    if present {
+        output.push(candidate);
+    }
+}
+
 pub(crate) struct Invocation<'a> {
     name: &'a str,
     args: Vec<String>,
@@ -79,7 +133,7 @@ impl<'a> Invocation<'a> {
         Self {
             name,
             args: args.to_vec(),
-            variables: HashMap::new(),
+            variables: HashMap::from([("IFS".into(), DEFAULT_IFS.into())]),
             arrays: HashMap::new(),
             aliases: HashMap::new(),
             functions: HashMap::new(),
@@ -490,7 +544,7 @@ impl<'a> Invocation<'a> {
             self.status = substitution_status.unwrap_or(0);
             return;
         }
-        let argv = match self.expand_words(&command.words, &mut substitution_status) {
+        let argv = match self.expand_command_words(&command.words, &mut substitution_status) {
             Ok(argv) => argv,
             Err(error) => {
                 report(&descriptors[2], &error);
@@ -1090,7 +1144,7 @@ impl<'a> Invocation<'a> {
             descriptors[0] = stdin;
             descriptors[1] = stdout;
             let mut status = None;
-            let argv = match self.expand_words(&command.words, &mut status) {
+            let argv = match self.expand_command_words(&command.words, &mut status) {
                 Err(error) => {
                     report(&descriptors[2], &error);
                     vec!["exit".into(), "2".into()]
@@ -1284,9 +1338,41 @@ impl<'a> Invocation<'a> {
     fn expand_words(&self, words: &[Word], status: &mut Option<u8>) -> Result<Vec<String>, String> {
         let mut fields = Vec::new();
         for word in words {
-            fields.extend(self.expand(word, status)?);
+            self.split_word(word, status, &mut fields)?;
         }
         Ok(fields)
+    }
+
+    fn expand_command_words(
+        &self,
+        words: &[Word],
+        status: &mut Option<u8>,
+    ) -> Result<Vec<String>, String> {
+        let mut fields = Vec::new();
+        let assignment_only = words.iter().all(|word| word.assignment);
+        for word in words {
+            if word.assignment
+                && (assignment_only || matches!(direct_name(&fields), Some("export" | "local")))
+            {
+                fields.extend(self.expand(word, status)?);
+            } else {
+                self.split_word(word, status, &mut fields)?;
+            }
+        }
+        Ok(fields)
+    }
+
+    fn split_word(
+        &self,
+        word: &Word,
+        status: &mut Option<u8>,
+        output: &mut Vec<String>,
+    ) -> Result<(), String> {
+        let ifs = self.variable("IFS");
+        for field in self.expand_parts(word, status)? {
+            split_field(field, ifs.as_deref().unwrap_or(DEFAULT_IFS), output);
+        }
+        Ok(())
     }
 
     pub fn run_substitution() -> Result<u8, String> {
@@ -1434,33 +1520,59 @@ impl<'a> Invocation<'a> {
     }
 
     fn expand(&self, word: &Word, status: &mut Option<u8>) -> Result<Vec<String>, String> {
+        Ok(self
+            .expand_parts(word, status)?
+            .into_iter()
+            .map(|field| field.into_iter().map(|part| part.text).collect())
+            .collect())
+    }
+
+    fn expand_parts(&self, word: &Word, status: &mut Option<u8>) -> Result<Vec<Field>, String> {
         let mut fields = Vec::new();
-        let mut field = String::new();
-        let mut present = false;
+        let mut field = Field::new();
         for part in &word.parts {
+            let origin = if part.quoted {
+                Origin::Quoted
+            } else {
+                Origin::Expansion
+            };
+            let fragment = |text| Fragment { text, origin };
+            let protected = |text: &str| Fragment {
+                text: text.into(),
+                origin: Origin::Quoted,
+            };
             match &part.kind {
-                Part::Literal(text) => field.push_str(text),
-                Part::Home => field.push_str(self.variable("HOME").as_deref().unwrap_or("~")),
-                Part::Name => field.push_str(self.name),
-                Part::Status => field.push_str(&self.status.to_string()),
+                Part::Literal(text) => field.push(Fragment {
+                    text: text.clone(),
+                    origin: if part.quoted {
+                        Origin::Quoted
+                    } else {
+                        Origin::Literal
+                    },
+                }),
+                Part::Home => {
+                    field.push(protected(self.variable("HOME").as_deref().unwrap_or("~")))
+                }
+                Part::Name => field.push(fragment(self.name.into())),
+                Part::Status => field.push(fragment(self.status.to_string())),
                 Part::LastBackground => {
                     #[cfg(any(target_os = "macos", target_os = "linux"))]
-                    if let Some(pid) = self
+                    let pid = self
                         .foreground
                         .as_ref()
-                        .and_then(|jobs| jobs.last_background)
-                    {
-                        field.push_str(&pid.to_string());
-                    }
+                        .and_then(|jobs| jobs.last_background);
+                    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                    let pid: Option<u32> = None;
+                    field.push(fragment(pid.map(|pid| pid.to_string()).unwrap_or_default()));
                 }
                 Part::Arguments => {
                     let Some((first, rest)) = self.args.split_first() else {
                         continue;
                     };
-                    field.push_str(first);
+                    field.push(protected(first));
                     for arg in rest {
                         fields.push(std::mem::take(&mut field));
-                        field.push_str(arg);
+                        field.push(protected(arg));
                     }
                 }
                 Part::Array { name, index } => {
@@ -1470,18 +1582,19 @@ impl<'a> Invocation<'a> {
                             if let Some(array) = array {
                                 let mut values = array.values();
                                 let Some(first) = values.next() else { continue };
-                                field.push_str(first);
+                                field.push(protected(first));
                                 for value in values {
                                     fields.push(std::mem::take(&mut field));
-                                    field.push_str(value);
+                                    field.push(protected(value));
                                 }
                             } else if let Some(value) = self.variable(name) {
-                                field.push_str(&value);
+                                field.push(protected(&value));
                             } else {
                                 continue;
                             }
                         }
                         _ => {
+                            let mut text = String::new();
                             let index = match index {
                                 ArrayIndex::Number(index) => Some(*index),
                                 ArrayIndex::Variable(name) => {
@@ -1491,32 +1604,19 @@ impl<'a> Invocation<'a> {
                             };
                             if let Some(index) = index {
                                 if let Some(value) = array.and_then(|array| array.get(&index)) {
-                                    field.push_str(value);
+                                    text.push_str(value);
                                 } else if index == 0 && array.is_none() {
-                                    field.push_str(&self.variable(name).unwrap_or_default());
+                                    text = self.variable(name).unwrap_or_default();
                                 }
                             }
+                            field.push(fragment(text));
                         }
                     }
                 }
-                Part::Substitution { source, split } => {
+                Part::Substitution(source) => {
                     let (text, code) = self.substitute(source)?;
                     *status = Some(code);
-                    if *split {
-                        for ch in text.chars() {
-                            if matches!(ch, ' ' | '\t' | '\n') {
-                                if present {
-                                    fields.push(std::mem::take(&mut field));
-                                }
-                                present = false;
-                            } else {
-                                field.push(ch);
-                                present = true;
-                            }
-                        }
-                        continue;
-                    }
-                    field.push_str(&text);
+                    field.push(fragment(text));
                 }
                 Part::Variable {
                     name,
@@ -1538,16 +1638,37 @@ impl<'a> Invocation<'a> {
                     let value = value.filter(|value| !if_empty || !value.is_empty());
                     if value.is_some() == *alternate {
                         if let Some(default) = default {
-                            field.push_str(&self.expand(default, status)?.join(" "));
+                            let mut expanded = self.expand_parts(default, status)?.into_iter();
+                            if let Some(first) = expanded.next() {
+                                let append = |field: &mut Field, parts: Field| {
+                                    field.extend(parts.into_iter().map(|mut part| {
+                                        if part.origin == Origin::Literal {
+                                            part.origin = origin;
+                                        }
+                                        part
+                                    }));
+                                };
+                                append(&mut field, first);
+                                for next in expanded {
+                                    fields.push(std::mem::take(&mut field));
+                                    append(&mut field, next);
+                                }
+                                continue;
+                            }
                         }
-                    } else if !alternate {
-                        field.push_str(&value.unwrap().to_string_lossy());
+                        field.push(fragment(String::new()));
+                    } else {
+                        field.push(fragment(
+                            value
+                                .filter(|_| !alternate)
+                                .map(|value| value.to_string_lossy().into_owned())
+                                .unwrap_or_default(),
+                        ));
                     }
                 }
             }
-            present = true;
         }
-        if present {
+        if !field.is_empty() {
             fields.push(field);
         }
         Ok(fields)

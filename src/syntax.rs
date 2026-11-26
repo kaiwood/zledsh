@@ -81,10 +81,7 @@ pub(crate) enum Part {
         name: String,
         index: ArrayIndex,
     },
-    Substitution {
-        source: String,
-        split: bool,
-    },
+    Substitution(String),
     Variable {
         name: String,
         default: Option<Word>,
@@ -730,12 +727,7 @@ fn redirect(input: &mut Source<'_>) -> ParseResult<Option<Redirect>> {
     if matches!(ahead.peek(), None | Some('#')) {
         return Err("missing redirection target".into());
     }
-    let mut target = word(&mut ahead)?;
-    for part in &mut target.parts {
-        if let Part::Substitution { split, .. } = &mut part.kind {
-            *split = false;
-        }
-    }
+    let target = word(&mut ahead)?;
     *input = ahead;
     Ok(Some(Redirect::File { fd, target, kind }))
 }
@@ -823,10 +815,7 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
                 Some(ch) => literal(&mut word, ch, true),
                 None => return Err("trailing backslash".into()),
             },
-            '$' if input.peek() == Some(&'(') => {
-                let split = !word.assignment;
-                substitution(input, &mut word, false, split)?;
-            }
+            '$' => parameter_at(input, &mut word, false, 0)?,
             '[' if !started && input.peek().is_none_or(|&ch| boundary(ch)) => {
                 literal(&mut word, ch, false)
             }
@@ -834,7 +823,7 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
                 word.push(Part::Home, true);
             }
             '(' if word.assignment => return Err("array literals are not supported".into()),
-            '<' | '(' | '{' | '}' | '`' | '$' | '*' | '?' | '[' | '~' => {
+            '<' | '(' | '{' | '}' | '`' | '*' | '?' | '[' | '~' => {
                 return Err(ParseError::Invalid(format!(
                     "unsupported unquoted syntax: {ch}"
                 )));
@@ -923,7 +912,7 @@ fn parameter_at(
         return Err("parameter expansion nested too deeply".into());
     }
     let part = match input.peek() {
-        Some('(') => return substitution(input, word, quoted, false),
+        Some('(') => return substitution(input, word, quoted),
         Some('!') => {
             input.next();
             Part::LastBackground
@@ -1023,12 +1012,7 @@ fn parameter_at(
     Ok(())
 }
 
-fn substitution(
-    input: &mut Source<'_>,
-    word: &mut Word,
-    quoted: bool,
-    split: bool,
-) -> ParseResult<()> {
+fn substitution(input: &mut Source<'_>, word: &mut Word, quoted: bool) -> ParseResult<()> {
     let Some(depth) = input.substitutions else {
         return Err("command substitution is not supported here".into());
     };
@@ -1050,13 +1034,7 @@ fn substitution(
     if input.next_if_eq(&')').is_none() {
         return Err(ParseError::Incomplete("unclosed command substitution"));
     }
-    word.push(
-        Part::Substitution {
-            source: input.source[start..end].into(),
-            split,
-        },
-        quoted,
-    );
+    word.push(Part::Substitution(input.source[start..end].into()), quoted);
     Ok(())
 }
 
