@@ -1800,6 +1800,17 @@ impl<'a> Invocation<'a> {
                     *status = Some(code);
                     field.push(fragment(text));
                 }
+                Part::Trim {
+                    name,
+                    pattern,
+                    prefix,
+                    longest,
+                } => {
+                    let value = self.parameter_value(name).unwrap_or_default();
+                    let value = value.to_string_lossy();
+                    let pattern = self.expand_pattern(pattern, status)?;
+                    field.push(fragment(pattern.trim(&value, *prefix, *longest).into()));
+                }
                 Part::Length(name) => {
                     let length = self
                         .parameter_value(name)

@@ -89,6 +89,12 @@ pub(crate) enum Part {
     },
     Substitution(String),
     Length(String),
+    Trim {
+        name: String,
+        pattern: Word,
+        prefix: bool,
+        longest: bool,
+    },
     Variable {
         name: String,
         default: Option<Word>,
@@ -1036,6 +1042,24 @@ fn parameter_at(
                     .next_if_eq(&'}')
                     .ok_or("expected } after array index")?;
                 word.push(Part::Array { name, index }, quoted);
+                return Ok(());
+            }
+            if let Some(op) = input.next_if(|ch| matches!(ch, '#' | '%')) {
+                let longest = input.next_if_eq(&op).is_some();
+                // Outer double quotes protect the result, not the pattern (2.6.2).
+                let pattern = parameter_word(input, false, depth + 1)?;
+                input
+                    .next_if_eq(&'}')
+                    .ok_or(ParseError::Incomplete("unclosed parameter trim"))?;
+                word.push(
+                    Part::Trim {
+                        name,
+                        pattern,
+                        prefix: op == '#',
+                        longest,
+                    },
+                    quoted,
+                );
                 return Ok(());
             }
             let if_empty = input.next_if_eq(&':').is_some();

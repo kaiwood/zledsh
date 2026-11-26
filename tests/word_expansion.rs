@@ -223,3 +223,18 @@ fn parameter_error_terminates_noninteractive_execution() {
         assert!(!dir.path().join("continued").exists());
     }
 }
+
+#[test]
+fn parameter_trimming_uses_shortest_or_longest_text_match() {
+    assert_expansion(
+        r#"value='.a/b/c.txt.txt'; slash='*/'; tail='.*'
+show "${value#$slash}" "${value##$slash}" "${value%$tail}" "${value%%$tail}"
+show "${value#nomatch}" "${value#*}" "${value##*}" "${value%*}" "${value%%*}"
+value='*a*b'; star='*'
+show "${value#"$star"}" "${value#\*a}" "${value%"*b"}" "${value##[!*]}"
+unset value; show "${value#*}" ${value%*}
+"#,
+        &[],
+        "argc=4\n<b/c.txt.txt>\n<c.txt.txt>\n<.a/b/c.txt>\n<>\nargc=5\n<.a/b/c.txt.txt>\n<.a/b/c.txt.txt>\n<>\n<.a/b/c.txt.txt>\n<>\nargc=4\n<a*b>\n<*b>\n<*a>\n<*a*b>\nargc=1\n<>\n",
+    );
+}

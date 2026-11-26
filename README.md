@@ -57,6 +57,8 @@ Unquoted `~` uses `HOME`; `~login` looks up the account’s initial directory. I
 
 Use `${#value}` to get a value’s character count. `${value:=default}` sets and substitutes the default if `value` is unset or empty; `${value:?message}` reports an error instead and exits a non-interactive shell. Without the colon, these operators test only for an unset parameter. Quote text inside an operator word when it should stay together, as in `${value:-"two words"}`.
 
+`${value#pattern}` removes the shortest matching prefix and `${value%pattern}` removes the shortest matching suffix. Use `##` or `%%` for the longest match. With no match, the value is unchanged. Quote the pattern itself to make its metacharacters literal, as in `${value#"*"}`.
+
 Unquoted parameter expansions and `$(...)` results in command arguments are split using `IFS` (space, tab, and newline by default). Quote expansions like `"$value"` to keep whitespace and empty values in one argument. Assignments, redirection filenames, and here-document bodies are not field-split.
 
 After field splitting, unquoted `*`, `?`, and bracket patterns such as `[a-z]` expand to matching filenames. For example, `printf '%s\n' *.txt` lists matching paths, one argument per filename even if it contains spaces. Quote or escape patterns to pass them literally. A pattern with no matches stays unchanged. Wildcards do not cross `/` or match a leading dot unless the pattern starts that part with a dot. Redirection filenames remain literal with respect to pathname expansion, including at the prompt. Matching uses the C locale and paths are sorted bytewise; other locales’ character and collation rules are not applied. Filenames that are not valid UTF-8 cannot be returned as matches.

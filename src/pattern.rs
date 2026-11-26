@@ -45,6 +45,26 @@ impl TextPattern {
         ))
     }
 
+    pub(crate) fn trim<'a>(&self, value: &'a str, prefix: bool, longest: bool) -> &'a str {
+        let mut result = value;
+        // At character boundaries only, so a returned slice remains UTF-8.
+        for boundary in value
+            .char_indices()
+            .map(|(i, _)| i)
+            .chain(std::iter::once(value.len()))
+        {
+            let (left, right) = value.split_at(boundary);
+            let (candidate, retained) = if prefix { (left, right) } else { (right, left) };
+            if self.matches(candidate.as_bytes()) {
+                result = retained;
+                if prefix != longest {
+                    break;
+                }
+            }
+        }
+        result
+    }
+
     pub(crate) fn matches(&self, text: &[u8]) -> bool {
         let Ok(text) = CString::new(text) else {
             return false;
