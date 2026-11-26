@@ -7,6 +7,7 @@ mod chatgpt;
 mod completion;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod foreground;
+mod getopts;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod history;
 #[cfg(any(target_os = "macos", target_os = "linux"))]

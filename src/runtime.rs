@@ -117,6 +117,7 @@ fn split_field(field: Field, ifs: &str) -> Vec<Field> {
 pub(crate) struct Invocation<'a> {
     name: &'a str,
     args: Vec<String>,
+    getopts_offset: usize,
     variables: HashMap<String, String>,
     arrays: HashMap<String, BTreeMap<usize, String>>,
     aliases: HashMap<String, String>,
@@ -147,6 +148,7 @@ struct SavedVariable {
     array: Option<BTreeMap<usize, String>>,
     exported: bool,
     readonly: bool,
+    getopts_offset: Option<usize>,
     unset: bool,
 }
 
@@ -160,6 +162,7 @@ enum LoopControl {
 struct PipelineVariables {
     name: String,
     args: Vec<String>,
+    getopts_offset: usize,
     options: ShellOptions,
     ignore_errexit: bool,
     variables: HashMap<String, String>,
@@ -175,6 +178,7 @@ struct Substitution {
     ignore_errexit: bool,
     name: String,
     args: Vec<String>,
+    getopts_offset: usize,
     variables: HashMap<String, String>,
     arrays: HashMap<String, BTreeMap<usize, String>>,
     aliases: HashMap<String, String>,
@@ -201,7 +205,11 @@ impl<'a> Invocation<'a> {
         Self {
             name,
             args: args.to_vec(),
-            variables: HashMap::from([("IFS".into(), DEFAULT_IFS.into())]),
+            getopts_offset: 0,
+            variables: HashMap::from([
+                ("IFS".into(), DEFAULT_IFS.into()),
+                ("OPTIND".into(), "1".into()),
+            ]),
             arrays: HashMap::new(),
             aliases: HashMap::new(),
             functions: HashMap::new(),
@@ -664,6 +672,7 @@ impl<'a> Invocation<'a> {
         let state: PipelineVariables = serde_json::from_reader(BufReader::new(state))?;
         let mut shell = Invocation::new(&state.name, &state.args);
         shell.options = state.options;
+        shell.getopts_offset = state.getopts_offset;
         shell.ignore_errexit = state.ignore_errexit;
         shell.shell_worker = true;
         shell.variables = state.variables;
@@ -985,6 +994,15 @@ impl<'a> Invocation<'a> {
                     }
                 };
             }
+            "getopts" => {
+                self.status = match self.getopts(args, &descriptors[2]) {
+                    Ok(status) => status,
+                    Err(error) => {
+                        report(&descriptors[2], &format!("{}: getopts: {error}", self.name));
+                        2
+                    }
+                };
+            }
             "readonly" => {
                 self.status = match self.mark_readonly(args, &descriptors[1]) {
                     Ok(()) => 0,
@@ -1045,6 +1063,9 @@ impl<'a> Invocation<'a> {
                         report(&descriptors[2], &format!("unset: {error}"));
                         self.status = 2;
                         break;
+                    }
+                    if name == "OPTIND" {
+                        self.getopts_offset = 0;
                     }
                     self.arrays.remove(name);
                     self.variables.remove(name);
@@ -1181,6 +1202,9 @@ impl<'a> Invocation<'a> {
 
     fn restore_variables(&mut self, variables: HashMap<String, SavedVariable>) {
         for (name, saved) in variables {
+            if let Some(offset) = saved.getopts_offset {
+                self.getopts_offset = offset;
+            }
             if let Some(value) = saved.value {
                 self.variables.insert(name.clone(), value);
             } else {
@@ -1239,6 +1263,7 @@ impl<'a> Invocation<'a> {
             array: self.arrays.get(name).cloned(),
             exported: self.exported.contains(name),
             readonly: self.readonly.contains(name),
+            getopts_offset: (name == "OPTIND").then_some(self.getopts_offset),
             unset: self.unset.contains(name),
         }
     }
@@ -1260,7 +1285,8 @@ impl<'a> Invocation<'a> {
             }
             self.save_local(name).expect("local frame checked above");
             self.arrays.remove(name);
-            self.variables.insert(name.into(), value.into());
+            self.assign_value(name, value.into())
+                .expect("writable variable checked above");
             self.unset.remove(name);
         }
         0
@@ -1465,7 +1491,12 @@ impl<'a> Invocation<'a> {
     fn execution_environment(&self) -> (OsString, HashMap<OsString, OsString>) {
         let path = self.command_path();
         let mut env: HashMap<OsString, OsString> = std::env::vars_os()
-            .filter(|(name, _)| !name.to_str().is_some_and(|name| self.unset.contains(name)))
+            .filter(|(name, _)| {
+                !name.to_str().is_some_and(|name| {
+                    self.unset.contains(name)
+                        || (matches!(name, "OPTIND" | "OPTARG") && !self.exported.contains(name))
+                })
+            })
             .collect();
         for (name, value) in &self.variables {
             if self.exported.contains(name) || env.contains_key(OsStr::new(name)) {
@@ -1600,6 +1631,7 @@ impl<'a> Invocation<'a> {
                 let state = worker_payload(&PipelineVariables {
                     name: self.name.into(),
                     args: self.args.clone(),
+                    getopts_offset: self.getopts_offset,
                     options: self.options,
                     ignore_errexit: self.ignore_errexit,
                     variables: self.variables.clone(),
@@ -1750,11 +1782,48 @@ impl<'a> Invocation<'a> {
             .iter()
             .rposition(|&(_, separator)| !separator)
             .map_or(first, |index| index + 1);
-        self.variables.insert(
-            name.clone(),
+        self.assign_value(
+            name,
             characters[first..end].iter().map(|&(ch, _)| ch).collect(),
-        );
+        )?;
         Ok(complete)
+    }
+
+    fn getopts(&mut self, args: &[String], stderr: &Descriptor) -> Result<u8, String> {
+        let [spec, name, explicit @ ..] = args else {
+            return Err("expected getopts optstring name [arg ...]".into());
+        };
+        if !valid_name(name) {
+            return Err("expected a variable name".into());
+        }
+        for target in [name.as_str(), "OPTARG", "OPTIND"] {
+            self.ensure_writable(target)?;
+        }
+        let index = self
+            .variable("OPTIND")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|index| *index > 0)
+            .unwrap_or(1);
+        let parameters = if explicit.is_empty() {
+            &self.args
+        } else {
+            explicit
+        };
+        let step = crate::getopts::next(spec, parameters, index, self.getopts_offset);
+        self.assign_value("OPTIND", step.index.to_string())?;
+        self.getopts_offset = step.offset;
+        if let Some(argument) = step.argument {
+            self.assign_value("OPTARG", argument)?;
+        } else {
+            self.variables.remove("OPTARG");
+            self.exported.remove("OPTARG");
+            self.unset.insert("OPTARG".into());
+        }
+        self.assign_value(name, step.option.to_string())?;
+        if let Some(diagnostic) = step.diagnostic {
+            report(stderr, &format!("{}: getopts: {diagnostic}", self.name));
+        }
+        Ok(step.status)
     }
 
     fn mark_readonly(&mut self, args: &[String], output: &Descriptor) -> Result<(), String> {
@@ -1800,6 +1869,9 @@ impl<'a> Invocation<'a> {
 
     fn assign_value(&mut self, name: &str, value: String) -> Result<(), String> {
         self.ensure_writable(name)?;
+        if name == "OPTIND" {
+            self.getopts_offset = 0;
+        }
         self.variables.insert(name.into(), value);
         Ok(())
     }
@@ -1901,6 +1973,7 @@ impl<'a> Invocation<'a> {
             serde_json::from_reader(state).map_err(|_| "invalid shell worker state")?;
         let mut shell = Invocation::new(&saved.name, &saved.args);
         shell.options = saved.options;
+        shell.getopts_offset = saved.getopts_offset;
         shell.ignore_errexit = saved.ignore_errexit;
         shell.shell_worker = true;
         shell.variables = saved.variables;
@@ -1997,6 +2070,7 @@ impl<'a> Invocation<'a> {
             ignore_errexit: self.ignore_errexit,
             name: self.name.into(),
             args: self.args.clone(),
+            getopts_offset: self.getopts_offset,
             variables: self.variables.clone(),
             arrays: self.arrays.clone(),
             aliases: self.aliases.clone(),
@@ -2531,7 +2605,7 @@ fn here_document_error(error: io::Error) -> String {
 pub(crate) const BUILTINS: &[&str] = &[
     "exit", "cd", "pwd", "export", "readonly", "unset", "read", "printf", "fg", "alias", "unalias",
     "jobs", "bg", "wait", "command", ":", "true", "false", "eval", "break", "continue", ".",
-    "source", "local", "set", "shift", "return", "complete", "compgen",
+    "source", "local", "set", "shift", "getopts", "return", "complete", "compgen",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {

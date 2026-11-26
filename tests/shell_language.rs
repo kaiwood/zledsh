@@ -637,3 +637,70 @@ printf '%s\n' "$x"
         "{error}"
     );
 }
+
+#[test]
+fn getopts_tracks_clusters_arguments_boundaries_and_reset() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .env("OPTIND", "77")
+        .args([
+            "-c",
+            r#"
+printf 'initial=%s\n' "$OPTIND"
+while getopts ab: opt; do printf '%s:%s\n' "$opt" "${OPTARG-unset}"; done
+printf 'end=%s:%s\n' "$opt" "$OPTIND"
+shift "$((OPTIND - 1))"
+printf 'remaining=%s\n' "$1"
+OPTIND=1
+getopts ab: opt -abnext
+OPTIND=1
+getopts ab: opt -b 'two words'
+printf '%s:%s:%s\n' "$opt" "$OPTARG" "$OPTIND"
+/usr/bin/printenv OPTIND || printf 'not exported\n'
+"#,
+            "demo",
+            "-abvalue",
+            "--",
+            "operand",
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        0,
+        "initial=1\na:unset\nb:value\nend=?:3\nremaining=operand\nb:two words:3\nnot exported\n",
+        "",
+    );
+}
+
+#[test]
+fn getopts_reports_missing_and_unknown_options_in_both_modes() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+getopts ':b:' opt -xb
+printf '%s:%s:%s\n' "$?" "$opt" "$OPTARG"
+getopts ':b:' opt -xb
+printf '%s:%s:%s\n' "$?" "$opt" "$OPTARG"
+OPTIND=1
+getopts 'b:' opt -x -b
+printf '%s:%s:%s\n' "$?" "$opt" "${OPTARG-unset}"
+getopts 'b:' opt -x -b
+printf '%s:%s:%s\n' "$?" "$opt" "${OPTARG-unset}"
+readonly opt
+getopts b opt -b
+printf 'status=%s\n' "$?"
+"#,
+            "demo",
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        0,
+        "0:?:x\n0:::b\n0:?:unset\n0:?:unset\nstatus=2\n",
+        "zledsh: demo: getopts: unknown option: -x\nzledsh: demo: getopts: option -b requires an argument\nzledsh: demo: getopts: opt: read-only variable\n",
+    );
+}
