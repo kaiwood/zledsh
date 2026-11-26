@@ -416,3 +416,49 @@ printf 'error:%s value:%s\n' "$?" "$count"
         "zledsh: arithmetic command: invalid arithmetic division\n",
     );
 }
+
+#[test]
+fn errexit_uses_pipeline_status_and_respects_tested_lists() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-ec",
+            r#"
+f() { false; printf 'function\n'; }
+if false; printf 'condition\n'; then :; fi
+while false; do printf 'unexpected\n'; done
+until true; do printf 'unexpected\n'; done
+! true
+false && printf 'unexpected\n'
+{ false && :; }
+f && printf 'tested\n'
+( false; printf 'subshell\n' ) && :
+( false; printf 'unexpected\n' ) | /bin/cat
+printf '<%s>\n' "$(false; printf unexpected)"
+set -o pipefail
+exit 7 | true
+printf 'unexpected\n'
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(output, 7, "condition\nfunction\ntested\nsubshell\n<>\n", "");
+}
+
+#[test]
+fn errexit_checks_the_final_and_or_command_and_can_be_disabled() {
+    let home = tempfile::tempdir().unwrap();
+    for (source, status, stdout) in [
+        ("set -e; true && false; printf unexpected", 1, ""),
+        ("set -e; (false && :); printf unexpected", 1, ""),
+        ("set -e; value=$(exit 9); printf unexpected", 9, ""),
+        (
+            "set -e; set +o errexit; false; printf continued",
+            0,
+            "continued",
+        ),
+    ] {
+        let output = shell(home.path()).args(["-c", source]).output().unwrap();
+        assert_output(output, status, stdout, "");
+    }
+}

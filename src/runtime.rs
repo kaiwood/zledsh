@@ -138,6 +138,7 @@ pub(crate) struct Invocation<'a> {
     pub status: u8,
     pub exited: bool,
     pub options: ShellOptions,
+    ignore_errexit: bool,
 }
 
 struct SavedVariable {
@@ -158,6 +159,7 @@ struct PipelineVariables {
     name: String,
     args: Vec<String>,
     options: ShellOptions,
+    ignore_errexit: bool,
     variables: HashMap<String, String>,
     exported: HashSet<String>,
     unset: HashSet<String>,
@@ -167,6 +169,7 @@ struct PipelineVariables {
 struct Substitution {
     task: WorkerTask,
     options: ShellOptions,
+    ignore_errexit: bool,
     name: String,
     args: Vec<String>,
     variables: HashMap<String, String>,
@@ -215,6 +218,7 @@ impl<'a> Invocation<'a> {
             status: 0,
             exited: false,
             options: ShellOptions::default(),
+            ignore_errexit: false,
         }
     }
 
@@ -374,7 +378,8 @@ impl<'a> Invocation<'a> {
             }
             match statement {
                 Statement::Pipeline(pipeline) => {
-                    self.run_pipeline_with_descriptors(pipeline, input, descriptors)
+                    self.run_pipeline_with_descriptors(pipeline, input, descriptors);
+                    self.check_errexit();
                 }
                 Statement::Arithmetic(expression) => {
                     self.status = match self.evaluate_arithmetic(expression, &mut None) {
@@ -384,6 +389,7 @@ impl<'a> Invocation<'a> {
                             if self.exited { 2 } else { 1 }
                         }
                     };
+                    self.check_errexit();
                 }
                 Statement::Group(body) => self.run_with_descriptors(body, input, descriptors),
                 Statement::Redirected { command, redirects } => {
@@ -391,6 +397,7 @@ impl<'a> Invocation<'a> {
                     if let Err(error) = self.redirect(redirects, &mut local, &mut None) {
                         report(&local[2], &error);
                         self.status = if self.exited { 2 } else { 1 };
+                        self.check_errexit();
                     } else {
                         self.run_with_descriptors(
                             std::slice::from_ref(command.as_ref()),
@@ -410,13 +417,10 @@ impl<'a> Invocation<'a> {
                             2
                         }
                     };
+                    self.check_errexit();
                 }
                 Statement::Negated(inner) => {
-                    self.run_with_descriptors(
-                        std::slice::from_ref(inner.as_ref()),
-                        input,
-                        descriptors,
-                    );
+                    self.run_tested_list(std::slice::from_ref(inner.as_ref()), input, descriptors);
                     if !self.interrupted() {
                         self.status = u8::from(self.status == 0);
                     }
@@ -431,21 +435,18 @@ impl<'a> Invocation<'a> {
                     };
                 }
                 Statement::AndOr { first, rest } => {
-                    self.run_with_descriptors(
-                        std::slice::from_ref(first.as_ref()),
-                        input,
-                        descriptors,
-                    );
-                    for (on_success, statement) in rest {
+                    self.run_tested_list(std::slice::from_ref(first.as_ref()), input, descriptors);
+                    for (index, (on_success, statement)) in rest.iter().enumerate() {
                         if self.interrupted() {
                             break;
                         }
                         if (self.status == 0) == *on_success {
-                            self.run_with_descriptors(
-                                std::slice::from_ref(statement),
-                                input,
-                                descriptors,
-                            );
+                            let command = std::slice::from_ref(statement);
+                            if index + 1 == rest.len() {
+                                self.run_with_descriptors(command, input, descriptors);
+                            } else {
+                                self.run_tested_list(command, input, descriptors);
+                            }
                         }
                     }
                 }
@@ -457,6 +458,7 @@ impl<'a> Invocation<'a> {
                             2
                         }
                     };
+                    self.check_errexit();
                 }
                 Statement::Function { name, body } => {
                     self.functions.insert(name.clone(), body.clone());
@@ -469,6 +471,7 @@ impl<'a> Invocation<'a> {
                             Err(error) => {
                                 report(&descriptors[2], &error);
                                 self.status = 2;
+                                self.check_errexit();
                                 continue;
                             }
                         },
@@ -493,7 +496,7 @@ impl<'a> Invocation<'a> {
                     let mut last = 0;
                     self.loop_depth += 1;
                     loop {
-                        self.run_with_descriptors(condition, input, descriptors);
+                        self.run_tested_list(condition, input, descriptors);
                         if self.interrupted() {
                             last = self.status;
                             if self.next_iteration() {
@@ -527,6 +530,7 @@ impl<'a> Invocation<'a> {
                     Err(error) => {
                         report(&descriptors[2], &error);
                         self.status = 2;
+                        self.check_errexit();
                     }
                 },
                 Statement::If {
@@ -535,7 +539,7 @@ impl<'a> Invocation<'a> {
                 } => {
                     let mut selected = otherwise;
                     for (condition, body) in branches {
-                        self.run_with_descriptors(condition, input, descriptors);
+                        self.run_tested_list(condition, input, descriptors);
                         if self.interrupted() {
                             return;
                         }
@@ -551,6 +555,24 @@ impl<'a> Invocation<'a> {
                     }
                 }
             }
+        }
+    }
+
+    fn run_tested_list(
+        &mut self,
+        script: &[Statement],
+        input: &mut dyn BufRead,
+        descriptors: &Descriptors,
+    ) {
+        let previous = std::mem::replace(&mut self.ignore_errexit, true);
+        self.run_with_descriptors(script, input, descriptors);
+        self.ignore_errexit = previous;
+    }
+
+    fn check_errexit(&mut self) {
+        if self.options.errexit && !self.ignore_errexit && self.status != 0 && !self.agent_command()
+        {
+            self.exited = true;
         }
     }
 
@@ -627,6 +649,7 @@ impl<'a> Invocation<'a> {
         let state: PipelineVariables = serde_json::from_reader(BufReader::new(state))?;
         let mut shell = Invocation::new(&state.name, &state.args);
         shell.options = state.options;
+        shell.ignore_errexit = state.ignore_errexit;
         shell.shell_worker = true;
         shell.variables = state.variables;
         shell.exported = state.exported;
@@ -1431,6 +1454,7 @@ impl<'a> Invocation<'a> {
                     name: self.name.into(),
                     args: self.args.clone(),
                     options: self.options,
+                    ignore_errexit: self.ignore_errexit,
                     variables: self.variables.clone(),
                     exported: self.exported.clone(),
                     unset: self.unset.clone(),
@@ -1688,6 +1712,7 @@ impl<'a> Invocation<'a> {
             serde_json::from_reader(state).map_err(|_| "invalid shell worker state")?;
         let mut shell = Invocation::new(&saved.name, &saved.args);
         shell.options = saved.options;
+        shell.ignore_errexit = saved.ignore_errexit;
         shell.shell_worker = true;
         shell.variables = saved.variables;
         shell.arrays = saved.arrays;
@@ -1779,6 +1804,7 @@ impl<'a> Invocation<'a> {
         Substitution {
             task,
             options: self.options,
+            ignore_errexit: self.ignore_errexit,
             name: self.name.into(),
             args: self.args.clone(),
             variables: self.variables.clone(),
