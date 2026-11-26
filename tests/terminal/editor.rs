@@ -460,3 +460,29 @@ fn delete_and_control_history_navigation_preserve_the_draft() {
     tty.expect("[private] keys> ");
     tty.finish();
 }
+
+#[test]
+fn meta_word_cuts_and_yank_pop_are_local_to_public_edits() {
+    let mut tty = Terminal::start("cuts> ", &[], |_| {});
+    tty.expect("cuts> ");
+    tty.send("/bin/echo kept old\x1b\x7f\n");
+    tty.expect("\r\nkept\r\n");
+    tty.expect("cuts> ");
+    tty.send("/bin/echo kept new\x1bb\x1bd\n");
+    tty.expect("\r\nkept\r\n");
+    tty.expect("cuts> ");
+    tty.send("/bin/echo \x19\x1by\x1by\x1by\n");
+    tty.expect("\r\nold\r\n");
+    tty.expect("cuts> ");
+    tty.send("history pause\n");
+    tty.expect("[private] cuts> ");
+    tty.send("/bin/echo private secret\x1b\x7f\x19\x1by\n");
+    tty.expect("\r\nprivate\r\n");
+    tty.expect("[private] cuts> ");
+    tty.send("history resume\n");
+    tty.expect("\x1b[?2004hcuts> ");
+    tty.send("/bin/echo empty \x19\x1by\n");
+    tty.expect("\r\nempty\r\n");
+    tty.expect("cuts> ");
+    tty.finish();
+}

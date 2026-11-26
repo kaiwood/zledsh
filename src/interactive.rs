@@ -652,8 +652,8 @@ impl KillRing {
         self.entries.clear();
     }
 
-    fn latest(&self) -> Option<&[u8]> {
-        self.entries.front().map(Vec::as_slice)
+    fn entry(&self, index: usize) -> Option<&[u8]> {
+        self.entries.get(index).map(Vec::as_slice)
     }
 }
 
@@ -707,6 +707,7 @@ fn read_keys(
 ) -> io::Result<Line> {
     let primary = history.is_some();
     let mut consecutive_cut = false;
+    let mut yank = None;
     let mut history_index = None;
     let mut saved_draft = (Vec::new(), 0);
     let mut completion: Option<CompletionCycle> = None;
@@ -715,6 +716,7 @@ fn read_keys(
     let mut line = draft.into_bytes();
     let mut cursor = line.len();
     while let Some(mut key) = read_key(input, shell)? {
+        let previous_yank = yank.take();
         let previous_cut = std::mem::take(&mut consecutive_cut);
         if !matches!(key, Key::Byte(b'\t') | Key::BackTab) {
             if let Some(down) = completion.take().and_then(|cycle| cycle.menu_offset) {
@@ -796,12 +798,42 @@ fn read_keys(
                     true,
                 );
             }
-            Key::Byte(25) => {
-                let Some(text) = kills.as_deref().and_then(KillRing::latest) else {
+            Key::KillWord | Key::BackwardKillWord => {
+                let backward = key == Key::BackwardKillWord;
+                let range = if backward {
+                    let start = previous_word(&line, cursor);
+                    let range = start..cursor;
+                    cursor = start;
+                    range
+                } else {
+                    cursor..next_word(&line, cursor)
+                };
+                consecutive_cut = cut(
+                    &mut line,
+                    range,
+                    kills.as_deref_mut(),
+                    previous_cut,
+                    backward,
+                );
+            }
+            Key::Byte(25) | Key::YankPop => {
+                let Some(kills) = kills.as_deref() else {
                     continue;
                 };
-                line.splice(cursor..cursor, text.iter().copied());
-                cursor += text.len();
+                let (start, end, index) = if key == Key::YankPop {
+                    let Some((start, index)) = previous_yank else {
+                        continue;
+                    };
+                    (start, cursor, (index + 1) % kills.entries.len())
+                } else {
+                    (cursor, cursor, 0)
+                };
+                let Some(text) = kills.entry(index) else {
+                    continue;
+                };
+                line.splice(start..end, text.iter().copied());
+                cursor = start + text.len();
+                yank = Some((start, index));
             }
             Key::Byte(1) | Key::Home => cursor = 0,
             Key::Byte(5) | Key::End => cursor = line.len(),
@@ -938,6 +970,9 @@ enum Key {
     Paste,
     BackTab,
     Delete,
+    KillWord,
+    BackwardKillWord,
+    YankPop,
     Ignored,
 }
 
@@ -1033,6 +1068,9 @@ fn read_escape(input: &mut impl BufRead) -> io::Result<Key> {
         Some(b'[' | b'O') => {}
         Some(b'b' | b'B') => return Ok(Key::PreviousWord),
         Some(b'f' | b'F') => return Ok(Key::NextWord),
+        Some(b'd' | b'D') => return Ok(Key::KillWord),
+        Some(8 | 127) => return Ok(Key::BackwardKillWord),
+        Some(b'y' | b'Y') => return Ok(Key::YankPop),
         _ => return Ok(Key::Ignored),
     }
     let mut sequence = [0; 16];
