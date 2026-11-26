@@ -38,6 +38,8 @@ Use `set -- first "two words"` to replace the positional arguments without chang
 
 Use `set -o pipefail` (or start with `zledsh -o pipefail`) to report the rightmost failing stage in a pipeline, or zero if all stages succeed. `!` negates that result. `set +o pipefail` restores the default.
 
+`set -f` (also `set -o noglob` or `zledsh -f`) disables filename expansion without disabling field splitting or `case` patterns. Use `set +f` to enable filename expansion again.
+
 Use `zledsh -i` to force interactive input even on a pipe. It loads startup files, prints prompts, and keeps reading after a syntax error. Raw editing and terminal job control still require a terminal.
 
 Use the same syntax in your startup files, `zledsh -c`, redirected stdin, or at the prompt. `&&` and `||` short-circuit, and `!` reverses a pipeline’s exit status. `for`, `while`, and `until` support `break` and `continue`. `case` selects the first matching pattern, with `*`, `?`, bracket expressions, and `|` alternatives. Quote metacharacters to match them literally; unlike filename patterns, `case` patterns can match slashes and leading dots. End a branch with `;&` to run the following branch without testing its pattern. Use `{ list; }` to group commands without isolating changes to variables or the working directory. Use `( list )` to isolate those changes and `exit` in a subshell. Functions declared as `name() { ...; }` support positional arguments, `local`, `shift`, and `return` in standalone calls and pipeline stages. Functions and compound commands in a pipeline run in isolated shell environments.

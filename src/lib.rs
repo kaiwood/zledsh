@@ -128,6 +128,7 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
 fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Result<u8, String> {
     let mut options = options::ShellOptions::default();
     let mut read_stdin = false;
+    let mut command_string = false;
     let mut option = args.next();
     loop {
         match option.as_deref().and_then(|arg| arg.to_str()) {
@@ -140,11 +141,18 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
                     flag == "-o",
                 )?;
             }
-            Some("-i") => options.interactive = true,
-            Some("-s") => read_stdin = true,
-            Some("-is" | "-si") => {
-                options.interactive = true;
-                read_stdin = true;
+            Some(flag)
+                if flag.len() > 1 && flag.starts_with(['-', '+']) && !flag.starts_with("--") =>
+            {
+                let enabled = flag.starts_with('-');
+                for letter in flag[1..].chars() {
+                    match (letter, enabled) {
+                        ('i', true) => options.interactive = true,
+                        ('s', true) => read_stdin = true,
+                        ('c', true) => command_string = true,
+                        _ => options.set_short(letter, enabled)?,
+                    }
+                }
             }
             _ => break,
         }
@@ -156,14 +164,18 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
     if end_options {
         option = args.next();
     }
-    let flag = option
-        .as_deref()
-        .and_then(|arg| arg.to_str())
-        .filter(|_| !end_options);
+    let flag = if command_string {
+        Some("-c")
+    } else {
+        option
+            .as_deref()
+            .and_then(|arg| arg.to_str())
+            .filter(|_| !end_options)
+    };
     let chatgpt = !read_stdin && !options.interactive && flag == Some("--chatgpt");
     // The next bytes may belong to a child reading fd 0 directly.
     let mut input = BufReader::with_capacity(1, process::Stdin);
-    if option.is_none() || read_stdin || chatgpt {
+    if !command_string && (option.is_none() || read_stdin || chatgpt) {
         if chatgpt && args.next().is_some() {
             return Err("--chatgpt does not take arguments".into());
         }
@@ -200,7 +212,7 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
         }
         return run_input(&mut invocation, &mut input, None, false);
     }
-    let option = option.as_ref().unwrap();
+    let option = option.as_ref().ok_or("-c requires a command")?;
     match flag {
         Some("--help") => {
             println!("Usage: zledsh [-i] [-c command [name [args...]]]");
@@ -222,10 +234,8 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
             }
             Ok(0)
         }
-        Some("-c" | "-ic" | "-ci") => {
-            options.interactive |= flag != Some("-c");
-            let source = args.next().ok_or("-c requires a command")?;
-            let source = source.to_str().ok_or("-c command must be UTF-8")?;
+        Some("-c") => {
+            let source = option.to_str().ok_or("-c command must be UTF-8")?;
             let name = args.next().unwrap_or(name);
             let name = name.to_str().ok_or("command name must be UTF-8")?;
             let args = positional_args(args)?;

@@ -131,3 +131,39 @@ printf '<%s>\n' $match $missing $inactive 'r\'?.txt
         "<q*1.txt>\n<q\\*?.missing>\n<q\\*1.txt>\n<r\\1.txt>\n",
     );
 }
+
+#[test]
+fn noglob_preserves_field_splitting_and_does_not_disable_case_patterns() {
+    assert_paths(
+        &["a.txt", "b.txt"],
+        r#"
+set -f -- keep
+words='*.txt extra'
+printf '<%s>\n' "$-" "$1" $words
+for value in *.txt; do printf '<%s>\n' "$value"; done
+case a.txt in *.txt) printf 'matched\n';; esac
+( set +o noglob; printf '<%s>\n' *.txt )
+printf '<%s>\n' *.txt
+true | eval 'printf "<%s>\n" *.txt'
+set +f
+printf '<%s>\n' *.txt
+"#,
+        "<f>\n<keep>\n<*.txt>\n<extra>\n<*.txt>\nmatched\n<a.txt>\n<b.txt>\n<*.txt>\n<*.txt>\n<a.txt>\n<b.txt>\n",
+    );
+}
+
+#[test]
+fn noglob_can_be_enabled_at_invocation() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
+        .current_dir(dir.path())
+        .env_clear()
+        .env("HOME", dir.path())
+        .args(["-fc", "printf '<%s>\\n' \"$-\" *.txt"])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(output.stdout, b"<f>\n<*.txt>\n");
+}

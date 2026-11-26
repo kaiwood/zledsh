@@ -1288,7 +1288,10 @@ impl<'a> Invocation<'a> {
                     break;
                 }
                 value if value.len() > 1 && value.starts_with(['-', '+']) => {
-                    return Err(format!("unsupported option: {value}"));
+                    for letter in value[1..].chars() {
+                        options.set_short(letter, value.starts_with('-'))?;
+                    }
+                    remaining = rest;
                 }
                 _ => {
                     self.args = remaining.to_vec();
@@ -1648,6 +1651,10 @@ impl<'a> Invocation<'a> {
         let ifs = self.variable("IFS");
         for field in self.expand_parts(word, status, true, false)? {
             for field in split_field(field, ifs.as_deref().unwrap_or(DEFAULT_IFS)) {
+                if self.options.noglob && !self.agent_command() {
+                    output.push(field_text(field));
+                    continue;
+                }
                 let chars = field.iter().flat_map(|part| {
                     let quoted = part.origin == Origin::Quoted;
                     part.text.chars().map(move |ch| (ch, quoted))
