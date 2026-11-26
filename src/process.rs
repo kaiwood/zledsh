@@ -354,7 +354,6 @@ enum Member {
 
 pub(crate) enum Outcome {
     Stopped(u8),
-    TimedOut,
     Exited { code: u8, signaled: bool },
 }
 
@@ -410,16 +409,10 @@ impl Pipeline {
         }
     }
 
-    pub fn wait(&mut self, deadline: Option<std::time::Instant>) -> io::Result<Outcome> {
-        loop {
-            if let Some(outcome) = self.collect(deadline.is_some())? {
-                return Ok(outcome);
-            }
-            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-                return Ok(Outcome::TimedOut);
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+    pub fn wait(&mut self) -> io::Result<Outcome> {
+        Ok(self
+            .collect(false)?
+            .expect("blocking wait returns an outcome"))
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]

@@ -140,7 +140,7 @@ pub(crate) struct Invocation<'a> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub foreground: Option<crate::foreground::Foreground>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    agent_deadline: Option<std::time::Instant>,
+    running_agent_command: bool,
     pub status: u8,
     pub exited: bool,
     pub options: ShellOptions,
@@ -243,7 +243,7 @@ impl<'a> Invocation<'a> {
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             foreground: None,
             #[cfg(any(target_os = "macos", target_os = "linux"))]
-            agent_deadline: None,
+            running_agent_command: false,
             status: 0,
             exited: false,
             options: ShellOptions::default(),
@@ -297,15 +297,15 @@ impl<'a> Invocation<'a> {
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub fn run_agent_command(&mut self, pipeline: Vec<Command>) {
-        self.agent_deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+        self.running_agent_command = true;
         self.run_pipeline(&pipeline, &mut io::empty());
-        self.agent_deadline = None;
+        self.running_agent_command = false;
     }
 
     fn agent_command(&self) -> bool {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
-            self.agent_deadline.is_some()
+            self.running_agent_command
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
@@ -2075,6 +2075,7 @@ impl<'a> Invocation<'a> {
     fn start_stages(&mut self, stages: Vec<process::Stage>, background: bool) -> io::Result<u8> {
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
+            let agent_command = self.agent_command();
             if background {
                 return self
                     .foreground
@@ -2082,14 +2083,13 @@ impl<'a> Invocation<'a> {
                     .run_background(stages, self.options.pipefail);
             }
             if let Some(tty) = self.foreground.as_mut().filter(|tty| tty.has_terminal()) {
-                return tty.run_pipeline(stages, self.options.pipefail, self.agent_deadline);
+                return tty.run_pipeline(stages, self.options.pipefail, agent_command);
             }
         }
         let (mut job, gate) = process::Pipeline::start(stages, false, self.options.pipefail)?;
         drop(gate);
-        match job.wait(None)? {
+        match job.wait()? {
             process::Outcome::Exited { code, .. } | process::Outcome::Stopped(code) => Ok(code),
-            process::Outcome::TimedOut => Ok(124),
         }
     }
 
@@ -3376,11 +3376,12 @@ fn printf(args: &[String]) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    const CHILD: &str = "ZLEDSH_TEST_AGENT_FOREGROUND_CHILD";
+    const TEST: &str =
+        "runtime::tests::agent_external_command_keeps_terminal_handoff_with_null_stdin";
+
     #[test]
     fn agent_external_command_keeps_terminal_handoff_with_null_stdin() {
-        const CHILD: &str = "ZLEDSH_TEST_AGENT_FOREGROUND_CHILD";
-        const TEST: &str =
-            "runtime::tests::agent_external_command_keeps_terminal_handoff_with_null_stdin";
         if std::env::var_os(CHILD).is_some() {
             let mut invocation = Invocation::new("zledsh", &[]);
             invocation.foreground = Some(crate::foreground::Foreground::new().unwrap());
@@ -3392,16 +3393,29 @@ mod tests {
                 invocation.run_agent_command(pipeline);
                 assert_eq!(invocation.status, 0, "{source}");
             };
+            if std::env::var_os(CHILD).as_deref() == Some(std::ffi::OsStr::new("long")) {
+                run("/bin/sleep 31");
+            }
             run("/usr/bin/touch foo.txt");
             run("/bin/test ! -t 0 > output 2>&1");
             assert!(crate::foreground::Foreground::new().is_ok());
             return;
         }
 
-        // Re-exec this test on a controlling PTY, not Cargo's stdin.
+        check_agent_foreground("short");
+    }
+
+    #[test]
+    #[ignore = "waits 31 seconds to cross the former command timeout"]
+    fn agent_external_command_runs_past_former_timeout() {
+        check_agent_foreground("long");
+    }
+
+    fn check_agent_foreground(mode: &str) {
+        // Re-exec the child test on a controlling PTY, not Cargo's stdin.
         let work = tempfile::tempdir().unwrap();
         let output = crate::test_terminal::test_command(TEST, false)
-            .env(CHILD, "1")
+            .env(CHILD, mode)
             .current_dir(work.path())
             .stdin(Stdio::null())
             .output()

@@ -1,5 +1,4 @@
 use std::io;
-use std::time::Instant;
 
 use crate::process::{Outcome, Pipeline, Stage};
 
@@ -56,7 +55,6 @@ impl Foreground {
                     }
                     Some(Outcome::Stopped(_)) => job.stopped = true,
                     None => job.stopped = false,
-                    Some(Outcome::TimedOut) => unreachable!(),
                 }
             }
         }
@@ -301,7 +299,7 @@ impl Foreground {
                 }
                 result.map(|_| bytes)
             });
-            let result = job.wait(None);
+            let result = job.wait();
             let code = match result {
                 Ok(Outcome::Exited { code, signaled }) => {
                     if signaled {
@@ -310,7 +308,6 @@ impl Foreground {
                     code
                 }
                 Ok(Outcome::Stopped(code)) => code,
-                Ok(Outcome::TimedOut) => unreachable!(),
                 Err(_) => 2,
             };
             drop(job);
@@ -330,7 +327,7 @@ impl Foreground {
         &mut self,
         stages: Vec<Stage>,
         pipefail: bool,
-        deadline: Option<Instant>,
+        cancel_on_stop: bool,
     ) -> io::Result<u8> {
         let terminal = self.terminal()?;
         let (job, gate) = Pipeline::start(stages, true, pipefail)?;
@@ -339,7 +336,7 @@ impl Foreground {
             return Err(error);
         }
         drop(gate);
-        self.wait(job, terminal, deadline)
+        self.wait(job, terminal, cancel_on_stop)
     }
 
     pub fn resume(&mut self, selector: Option<&str>) -> io::Result<u8> {
@@ -354,23 +351,17 @@ impl Foreground {
         if job.stopped {
             job.resume()?;
         }
-        self.wait(job.pipeline, terminal, None)
+        self.wait(job.pipeline, terminal, false)
     }
 
     fn wait(
         &mut self,
         mut job: Pipeline,
         terminal: ShellTerminal,
-        deadline: Option<Instant>,
+        cancel_on_stop: bool,
     ) -> io::Result<u8> {
-        match job.wait(deadline)? {
-            Outcome::TimedOut => {
-                drop(job);
-                terminal.restore()?;
-                eprintln!("zledsh: shell agent command timed out");
-                Ok(124)
-            }
-            Outcome::Stopped(code) if deadline.is_some() => {
+        match job.wait()? {
+            Outcome::Stopped(code) if cancel_on_stop => {
                 drop(job);
                 terminal.restore()?;
                 eprintln!("zledsh: shell agent command stopped and was cancelled");

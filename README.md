@@ -145,7 +145,7 @@ Use a model slug listed for your account. Omit either setting to keep its defaul
 
 Try `? which directory are we in?` or `? how many directories are here?`. ChatGPT gets the current working directory and a count from filesystem metadata; it doesn't have to guess from `ls`. The count excludes hidden directories and symlinks.
 
-Ask `? create an empty file called foo.txt` to let the agent act in the live shell. `zledsh` prints the prompt and `touch foo.txt` **before** executing it, then sends the result back to ChatGPT. Agent commands run with your shell's permissions and without a separate confirmation; they are not sandboxed. Each call can run one supported `zledsh` command or pipeline, with stdin closed to keyboard input. Ask it to *prepare* a command instead to get an editable draft that runs only when you press Enter.
+Ask `? create an empty file called foo.txt` to let the agent act in the live shell. `zledsh` prints the prompt and `touch foo.txt` **before** executing it, then sends the result back to ChatGPT. Agent commands run with your shell's permissions and without a separate confirmation; they are not sandboxed. Each call can run one supported `zledsh` command or pipeline, with stdin closed to keyboard input. Commands have no time limit; press Ctrl+C to interrupt the foreground command. Ask it to *prepare* a command instead to get an editable draft that runs only when you press Enter.
 
 For requests such as `? cat the file`, the agent can show the command's terminal output and end the turn without restating it. Requests to change something or explain the output can still get a reply.
 
