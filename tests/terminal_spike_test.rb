@@ -256,6 +256,30 @@ class TerminalSpikeTest < Minitest::Test
     end
   end
 
+  def test_tab_completes_paths_under_the_current_home_without_replacing_the_tilde
+    prompt = "home-complete> "
+    with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt, setup: ->(home) {
+      other_home = File.join(home, "other home")
+      notes = File.join(other_home, "notes")
+      Dir.mkdir(other_home)
+      Dir.mkdir(notes)
+      File.write(File.join(notes, "report draft"), "home-completed-content\n")
+    }) do |reader, writer, pid|
+      writer.write("HOME=\"$HOME/other home\"\n")
+      read_until(reader, prompt)
+      writer.write("/bin/cat ~\t")
+      read_until(reader, "/bin/cat ~/")
+      writer.write("no\t")
+      read_until(reader, "notes/")
+      writer.write("re\t")
+      read_until(reader, "report\\ draft ")
+      writer.write("\n")
+      read_until(reader, "\r\nhome-completed-content\r\n")
+      read_until(reader, prompt)
+      exit_spike(reader, writer, pid)
+    end
+  end
+
   def test_ctrl_k_deletes_to_end_of_current_line_without_moving_cursor
     prompt = "kill-line> "
     with_terminal(KWSH, env: { "PROMPT" => prompt, "TERM" => "xterm" }, prompt: prompt) do |reader, writer, pid|

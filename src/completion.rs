@@ -28,6 +28,12 @@ pub fn suffix(line: &str, shell: &Invocation<'_>) -> Option<String> {
             && candidate.starts_with(token)
             && !candidate.chars().any(char::is_control)
     });
+    if token == "~" && matches.is_empty() {
+        return shell
+            .variable("HOME")
+            .filter(|home| Path::new(home).is_dir())
+            .map(|_| "/".into());
+    }
     if command && !token.contains('/') {
         if token.is_empty() {
             return None;
@@ -67,8 +73,12 @@ pub fn suffix(line: &str, shell: &Invocation<'_>) -> Option<String> {
         } else {
             parent
         };
+        // Expand only the lookup path; candidates must keep the typed `~/`.
+        let home_directory = original
+            .strip_prefix("~/")
+            .and_then(|rest| shell.variable("HOME").map(|home| format!("{home}/{rest}")));
         collect(
-            Path::new(directory),
+            Path::new(home_directory.as_deref().unwrap_or(directory)),
             original,
             prefix,
             command,
