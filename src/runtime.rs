@@ -1066,12 +1066,8 @@ impl<'a> Invocation<'a> {
             "cd" | "pwd" => {
                 let result = if name == "cd" {
                     self.change_directory(args, &descriptors[1])
-                } else if args.is_empty() {
-                    std::env::current_dir()
-                        .and_then(|path| descriptors[1].write(&format!("{}\n", path.display())))
-                        .map_err(|error| error.to_string())
                 } else {
-                    Err("arguments are not supported".into())
+                    self.print_directory(args, &descriptors[1])
                 };
                 self.status = match result {
                     Ok(()) => 0,
@@ -1474,25 +1470,75 @@ impl<'a> Invocation<'a> {
         Ok(())
     }
 
+    fn print_directory(&self, args: &[String], output: &Descriptor) -> Result<(), String> {
+        let (physical, _, operands) = directory_options(args, false)?;
+        if !operands.is_empty() {
+            return Err("expected pwd [-L|-P]".into());
+        }
+        self.working_directory(physical)
+            .and_then(|path| output.write(&format!("{}\n", path.display())))
+            .map_err(|error| error.to_string())
+    }
+
+    fn working_directory(&self, physical: bool) -> io::Result<std::path::PathBuf> {
+        if physical {
+            std::env::current_dir()
+        } else {
+            crate::directory::logical(self.variable_os("PWD").as_deref().map(std::path::Path::new))
+        }
+    }
+
     fn change_directory(&mut self, args: &[String], output: &Descriptor) -> Result<(), String> {
-        let destination = match args {
-            [] => self.variable("HOME").ok_or("HOME is not set")?,
-            [path] if path == "-" => self.variable("OLDPWD").ok_or("OLDPWD is not set")?,
-            [path] => path.clone(),
+        use std::path::{Path, PathBuf};
+
+        let (physical, require_pwd, operands) = directory_options(args, true)?;
+        let print_previous = operands == ["-"];
+        let destination = match operands {
+            [] => self.variable_os("HOME").ok_or("HOME is not set")?,
+            [_] if print_previous => self.variable_os("OLDPWD").ok_or("OLDPWD is not set")?,
+            [path] => path.into(),
             _ => return Err("expected at most one directory".into()),
         };
+        if destination.is_empty() {
+            return Err("empty directory name".into());
+        }
         self.ensure_writable("PWD")?;
         self.ensure_writable("OLDPWD")?;
-        let previous = std::env::current_dir().map_err(|error| error.to_string())?;
-        std::env::set_current_dir(&destination)
-            .map_err(|error| format!("{destination}: {error}"))?;
-        let current = std::env::current_dir().map_err(|error| error.to_string())?;
-        for (name, path) in [("OLDPWD", previous), ("PWD", current.clone())] {
-            self.variables
-                .insert(name.into(), path.to_string_lossy().into_owned());
-            self.exported.insert(name.into());
+        let previous = self
+            .working_directory(false)
+            .map_err(|error| error.to_string())?;
+        let operand = Path::new(&destination);
+        let mut path = PathBuf::from(operand);
+        let mut print = print_previous;
+        if !operand.is_absolute() && !operand.starts_with(".") && !operand.starts_with("..") {
+            if let Some(cdpath) = self.variable("CDPATH") {
+                for entry in cdpath.split(':') {
+                    let candidate = Path::new(entry).join(operand);
+                    if candidate.is_dir() {
+                        path = candidate;
+                        print |= !entry.is_empty();
+                        break;
+                    }
+                }
+            }
         }
-        if args.first().is_some_and(|arg| arg == "-") {
+        let chdir_error = |error| format!("{}: {error}", path.display());
+        let logical = if physical {
+            None
+        } else {
+            Some(crate::directory::normalize(&previous.join(&path)).map_err(chdir_error)?)
+        };
+        std::env::set_current_dir(logical.as_deref().unwrap_or(&path)).map_err(chdir_error)?;
+        self.assign_value("OLDPWD", previous.to_string_lossy().into_owned())?;
+        self.exported.insert("OLDPWD".into());
+        let current = match logical.map_or_else(std::env::current_dir, Ok) {
+            Ok(path) => path,
+            Err(error) if require_pwd && physical => return Err(error.to_string()),
+            Err(_) => return Ok(()),
+        };
+        self.assign_value("PWD", current.to_string_lossy().into_owned())?;
+        self.exported.insert("PWD".into());
+        if print {
             output
                 .write(&format!("{}\n", current.display()))
                 .map_err(|error| error.to_string())?;
@@ -2743,6 +2789,29 @@ fn worker_payload(state: &impl serde::Serialize) -> io::Result<File> {
     serde_json::to_writer(&mut payload, state)?;
     payload.rewind()?;
     Ok(payload)
+}
+
+fn directory_options(mut args: &[String], cd: bool) -> Result<(bool, bool, &[String]), String> {
+    let mut physical = false;
+    let mut require_pwd = false;
+    while let [first, tail @ ..] = args {
+        if first == "--" {
+            return Ok((physical, require_pwd, tail));
+        }
+        if first == "-" || !first.starts_with('-') {
+            break;
+        }
+        for flag in first[1..].chars() {
+            match flag {
+                'L' => physical = false,
+                'P' => physical = true,
+                'e' if cd => require_pwd = true,
+                _ => return Err(format!("unsupported option: -{flag}")),
+            }
+        }
+        args = tail;
+    }
+    Ok((physical, require_pwd, args))
 }
 
 fn umask(args: &[String], output: &Descriptor) -> Result<(), String> {

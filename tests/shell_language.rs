@@ -810,3 +810,86 @@ fn exec_failure_terminates_only_its_noninteractive_environment() {
         "zledsh: exec: ./missing: command not found\n",
     );
 }
+
+#[test]
+fn cd_and_pwd_distinguish_logical_and_physical_directories() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().canonicalize().unwrap();
+    fs::create_dir_all(root.join("real/child")).unwrap();
+    std::os::unix::fs::symlink("real/child", root.join("link")).unwrap();
+    let output = shell(&root)
+        .args([
+            "-c",
+            r#"
+cd link
+pwd
+pwd -P
+cd ..
+pwd
+cd -
+cd -P ..
+pwd -L
+printf '%s\n' "$OLDPWD"
+"#,
+        ])
+        .output()
+        .unwrap();
+    let expected = ["link", "real/child", "", "link", "real", "link"]
+        .into_iter()
+        .map(|path| {
+            format!(
+                "{}\n",
+                if path.is_empty() {
+                    root.clone()
+                } else {
+                    root.join(path)
+                }
+                .display()
+            )
+        })
+        .collect::<String>();
+    assert_output(output, 0, &expected, "");
+}
+
+#[test]
+fn cdpath_searches_in_order_and_failed_changes_leave_the_directory_intact() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().canonicalize().unwrap();
+    fs::create_dir_all(root.join("search/target")).unwrap();
+    fs::create_dir(root.join("target")).unwrap();
+    fs::write(root.join("not-dir"), "").unwrap();
+    let output = shell(&root)
+        .args([
+            "-c",
+            r#"
+CDPATH=missing:search:
+cd target
+cd "$HOME"
+cd ./target
+pwd
+cd "$HOME"
+cd not-dir/.. || printf 'blocked\n'
+cd '' || printf 'empty\n'
+pwd
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "{}\n{}\nblocked\nempty\n{}\n",
+            root.join("search/target").display(),
+            root.join("target").display(),
+            root.display()
+        )
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(stderr.lines().count(), 2, "{stderr}");
+    assert!(stderr.starts_with("zledsh: cd: not-dir/..:"), "{stderr}");
+    assert!(
+        stderr.ends_with("zledsh: cd: empty directory name\n"),
+        "{stderr}"
+    );
+}
