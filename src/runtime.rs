@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ffi::{OsStr, OsString};
+use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
@@ -28,6 +28,41 @@ struct Fragment {
 }
 
 type Field = Vec<Fragment>;
+
+fn login_home(login: &str) -> Option<String> {
+    let login = CString::new(login).ok()?;
+    let mut buffer = vec![0u8; 1024];
+    loop {
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut found = std::ptr::null_mut();
+        // SAFETY: all pointers reference writable storage or the live C string.
+        let status = unsafe {
+            libc::getpwnam_r(
+                login.as_ptr(),
+                entry.as_mut_ptr(),
+                buffer.as_mut_ptr().cast(),
+                buffer.len(),
+                &mut found,
+            )
+        };
+        if status == libc::ERANGE && buffer.len() < 1024 * 1024 {
+            buffer.resize(buffer.len() * 2, 0);
+        } else if status != 0 || found.is_null() {
+            return None;
+        } else {
+            // SAFETY: getpwnam_r succeeded and found points to the initialized entry.
+            let home = unsafe { (*found).pw_dir };
+            if home.is_null() {
+                return None;
+            }
+            // SAFETY: pw_dir points into the live result buffer.
+            return unsafe { CStr::from_ptr(home) }
+                .to_str()
+                .ok()
+                .map(str::to_owned);
+        }
+    }
+}
 
 fn field_text(field: Field) -> String {
     field.into_iter().map(|part| part.text).collect()
@@ -567,7 +602,7 @@ impl<'a> Invocation<'a> {
         }
         if assignment_only {
             for word in &command.words {
-                match self.expand(word, &mut substitution_status) {
+                match self.expand_assignment(word, &mut substitution_status) {
                     Ok(fields) if fields.len() == 1 => self.assign(&fields[0]),
                     result => {
                         report(
@@ -1392,7 +1427,7 @@ impl<'a> Invocation<'a> {
             if word.assignment
                 && (assignment_only || matches!(direct_name(&fields), Some("export" | "local")))
             {
-                fields.extend(self.expand(word, status)?);
+                fields.extend(self.expand_assignment(word, status)?);
             } else {
                 self.expand_argument(word, status, &mut fields)?;
             }
@@ -1407,7 +1442,7 @@ impl<'a> Invocation<'a> {
         output: &mut Vec<String>,
     ) -> Result<(), String> {
         let ifs = self.variable("IFS");
-        for field in self.expand_parts(word, status, true)? {
+        for field in self.expand_parts(word, status, true, false)? {
             for field in split_field(field, ifs.as_deref().unwrap_or(DEFAULT_IFS)) {
                 let chars = field.iter().flat_map(|part| {
                     let quoted = part.origin == Origin::Quoted;
@@ -1573,7 +1608,19 @@ impl<'a> Invocation<'a> {
 
     fn expand(&self, word: &Word, status: &mut Option<u8>) -> Result<Vec<String>, String> {
         Ok(self
-            .expand_parts(word, status, false)?
+            .expand_parts(word, status, false, false)?
+            .into_iter()
+            .map(field_text)
+            .collect())
+    }
+
+    fn expand_assignment(
+        &self,
+        word: &Word,
+        status: &mut Option<u8>,
+    ) -> Result<Vec<String>, String> {
+        Ok(self
+            .expand_parts(word, status, false, true)?
             .into_iter()
             .map(field_text)
             .collect())
@@ -1584,6 +1631,7 @@ impl<'a> Invocation<'a> {
         word: &Word,
         status: &mut Option<u8>,
         field_splitting: bool,
+        assignment: bool,
     ) -> Result<Vec<Field>, String> {
         let mut fields = Vec::new();
         let mut field = Field::new();
@@ -1607,8 +1655,29 @@ impl<'a> Invocation<'a> {
                         Origin::Literal
                     },
                 }),
-                Part::Home => {
-                    field.push(protected(self.variable("HOME").as_deref().unwrap_or("~")))
+                Part::Tilde {
+                    login,
+                    assignment_only,
+                    followed_by_slash,
+                } => {
+                    let home = if *assignment_only && !assignment {
+                        None
+                    } else if login.is_empty() {
+                        self.variable("HOME")
+                    } else {
+                        login_home(login)
+                    };
+                    if let Some(mut home) = home {
+                        if *followed_by_slash && home.ends_with('/') {
+                            home.pop();
+                        }
+                        field.push(protected(&home));
+                    } else {
+                        field.push(Fragment {
+                            text: format!("~{login}"),
+                            origin: Origin::Literal,
+                        });
+                    }
                 }
                 Part::Name => field.push(fragment(self.name.into())),
                 Part::Status => field.push(fragment(self.status.to_string())),
@@ -1707,7 +1776,8 @@ impl<'a> Invocation<'a> {
                         if let Some(default) =
                             default.as_ref().filter(|word| !word.parts.is_empty())
                         {
-                            let expanded = self.expand_parts(default, status, field_splitting)?;
+                            let expanded =
+                                self.expand_parts(default, status, field_splitting, false)?;
                             if !field_splitting && expanded.len() > 1 {
                                 let text = expanded
                                     .into_iter()

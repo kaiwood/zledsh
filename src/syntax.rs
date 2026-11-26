@@ -72,7 +72,11 @@ impl Word {
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Part {
     Literal(String),
-    Home,
+    Tilde {
+        login: String,
+        assignment_only: bool,
+        followed_by_slash: bool,
+    },
     Name,
     Status,
     LastBackground,
@@ -807,17 +811,27 @@ fn parse_word(input: &mut Source<'_>, allow_glob: bool) -> ParseResult<Word> {
         ..Word::default()
     };
     let mut started = false;
+    let mut assignment_prefix = false;
     while let Some(&ch) = input.peek() {
         if boundary(ch) {
             break;
         }
         input.next();
+        let after_assignment_separator = assignment
+            && (input.offset == ahead.offset || (input.offset > ahead.offset && ch == ':'));
+        let tilde_position = !started || assignment_prefix;
+        let assignment_only = started;
+        if ch == '\\' && input.peek() == Some(&'\n') {
+            input.next();
+            word.bare = false;
+            continue;
+        }
+        assignment_prefix = after_assignment_separator;
         word.bare &= !matches!(ch, '\'' | '"' | '\\');
         match ch {
             '\'' => word.push(Part::Literal(single_quoted(input)?), true),
             '"' => double_quoted(input, &mut word)?,
             '\\' => match input.next() {
-                Some('\n') => continue,
                 Some(ch) => literal(&mut word, ch, true),
                 None => return Err("trailing backslash".into()),
             },
@@ -825,12 +839,14 @@ fn parse_word(input: &mut Source<'_>, allow_glob: bool) -> ParseResult<Word> {
             '[' if !started && input.peek().is_none_or(|&ch| boundary(ch)) => {
                 literal(&mut word, ch, false)
             }
-            '~' if !started && input.peek().is_none_or(|&ch| ch == '/' || boundary(ch)) => {
-                word.push(Part::Home, true);
+            '~' if tilde_position => {
+                if !tilde(input, &mut word, assignment_only, boundary) {
+                    literal(&mut word, ch, false);
+                }
             }
             '(' if word.assignment => return Err("array literals are not supported".into()),
             '*' | '?' | '[' if allow_glob => literal(&mut word, ch, false),
-            '<' | '(' | '{' | '}' | '`' | '*' | '?' | '[' | '~' => {
+            '<' | '(' | '{' | '}' | '`' | '*' | '?' | '[' => {
                 return Err(ParseError::Invalid(format!(
                     "unsupported unquoted syntax: {ch}"
                 )));
@@ -843,6 +859,36 @@ fn parse_word(input: &mut Source<'_>, allow_glob: bool) -> ParseResult<Word> {
         return Err("expected a word".into());
     }
     Ok(word)
+}
+
+fn tilde(
+    input: &mut Source<'_>,
+    word: &mut Word,
+    assignment_only: bool,
+    end: impl Fn(char) -> bool,
+) -> bool {
+    let mut tail = input.clone();
+    let mut login = String::new();
+    while let Some(&ch) = tail.peek() {
+        if end(ch) || ch == '/' || (assignment_only && ch == ':') {
+            break;
+        }
+        if !ch.is_ascii_alphanumeric() && !matches!(ch, '-' | '_' | '.') {
+            return false;
+        }
+        login.push(tail.next().unwrap());
+    }
+    let followed_by_slash = tail.peek() == Some(&'/');
+    word.push(
+        Part::Tilde {
+            login,
+            assignment_only,
+            followed_by_slash,
+        },
+        true,
+    );
+    *input = tail;
+    true
 }
 
 fn single_quoted(input: &mut Source<'_>) -> ParseResult<String> {

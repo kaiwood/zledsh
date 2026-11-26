@@ -150,3 +150,40 @@ IFS=; show "$@" $@ "$*" $*
         "argc=0\nargc=5\n<>\n<prepost>\n<prepost>\n<prepost>\n<prepost>\nargc=2\n<>\n<>\nargc=1\n<>\nargc=1\n<>\n",
     );
 }
+
+// POSIX.1-2024 2.6.1: assignment tildes are recognized after '=' and ':'.
+#[test]
+fn tilde_expands_only_in_eligible_unquoted_positions() {
+    assert_expansion(
+        r#"HOME='/with space/'
+x=~:~/bin:pre~:~no_such_zledsh_test_login/path:'~':\~
+export y=~/lib:~
+show "$x" "$y" ~/bin '~no_such_zledsh_test_login' ~no_such_zledsh_test_login ordinary=~/bin "~" \~/bin
+"#,
+        &[],
+        "argc=8\n</with space/:/with space/bin:pre~:~no_such_zledsh_test_login/path:~:~>\n</with space/lib:/with space/>\n</with space/bin>\n<~no_such_zledsh_test_login>\n<~no_such_zledsh_test_login>\n<ordinary=~/bin>\n<~>\n<~/bin>\n",
+    );
+}
+
+#[test]
+fn named_tilde_looks_up_home_independently_of_shell_home() {
+    // SAFETY: root is a terminated login string; this integration test is the
+    // only caller of getpwnam in this process and copies the result immediately.
+    let home = unsafe {
+        let entry = libc::getpwnam(c"root".as_ptr());
+        assert!(!entry.is_null(), "test platform has no root account");
+        std::ffi::CStr::from_ptr((*entry).pw_dir)
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+    let prefix = home.strip_suffix('/').unwrap_or(&home);
+    assert_expansion(
+        r#"HOME=/not-root
+value=~root/lib:~root
+show ~root ~root/bin "$value" "~root/bin"
+"#,
+        &[],
+        &format!("argc=4\n<{home}>\n<{prefix}/bin>\n<{prefix}/lib:{home}>\n<~root/bin>\n"),
+    );
+}

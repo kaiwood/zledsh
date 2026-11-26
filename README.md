@@ -53,6 +53,8 @@ EOF
 
 Use `<<'EOF'` to keep the body literal, or `<<-EOF` to strip leading tabs, not spaces. Unquoted bodies support the shell's parameter and `$(…)` expansions. At the prompt, Ctrl+C cancels an unfinished here-document without running its command.
 
+Unquoted `~` uses `HOME`; `~login` looks up the account’s initial directory. In assignments, both forms work just after `=` or an unquoted `:`, as in `PATH=~/bin:~root/bin`. Unknown logins and quoted tildes stay literal.
+
 Unquoted parameter expansions and `$(...)` results in command arguments are split using `IFS` (space, tab, and newline by default). Quote expansions like `"$value"` to keep whitespace and empty values in one argument. Assignments, redirection filenames, and here-document bodies are not field-split.
 
 After field splitting, unquoted `*`, `?`, and bracket patterns such as `[a-z]` expand to matching filenames. For example, `printf '%s\n' *.txt` lists matching paths, one argument per filename even if it contains spaces. Quote or escape patterns to pass them literally. A pattern with no matches stays unchanged. Wildcards do not cross `/` or match a leading dot unless the pattern starts that part with a dot. Redirection filenames remain literal with respect to pathname expansion, including at the prompt. Matching uses the C locale and paths are sorted bytewise; other locales’ character and collation rules are not applied. Filenames that are not valid UTF-8 cannot be returned as matches.
