@@ -32,7 +32,7 @@ For `rbenv shell` and Tab completion, use `eval "$(rbenv init - bash)"` instead 
 
 ### Script with `zledsh`
 
-Run a script with `zledsh ./setup.zledsh arg1 arg2`. The script path becomes `$0`; its arguments become `$1`, `$2`, and so on. The script need not be executable, and its commands can still read from stdin. Use `zledsh -- script-name` if the name starts with `-`. To read the script itself from stdin and pass it arguments, use `zledsh -s arg1 arg2 < setup.zledsh`.
+Run a script with `zledsh ./setup.zledsh arg1 arg2`. The script path becomes `$0`; its arguments become `$1`, `$2`, and so on. The script need not be executable, and its commands can still read from stdin. If the script file is missing, `zledsh` reports the error and exits with status 127 without reading stdin. Use `zledsh -- script-name` if the name starts with `-`. To read the script itself from stdin and pass it arguments, use `zledsh -s arg1 arg2 < setup.zledsh`.
 
 Use `zledsh -i` to force interactive input even on a pipe. It loads startup files, prints prompts, and keeps reading after a syntax error. Raw editing and terminal job control still require a terminal.
 

@@ -205,7 +205,14 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
         _ if end_options || !option.as_encoded_bytes().starts_with(b"-") => {
             let path = option.to_str().ok_or("script name must be UTF-8")?;
             let args = positional_args(args)?;
-            let script = File::open(path).map_err(|error| format!("{path}: {error}"))?;
+            let script = match File::open(path) {
+                Ok(script) => script,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    eprintln!("zledsh: {path}: {error}");
+                    return Ok(127);
+                }
+                Err(error) => return Err(format!("{path}: {error}")),
+            };
             let mut invocation = runtime::Invocation::new(path, &args);
             load_forced_startup(force_interactive, &mut invocation, &mut input);
             run_input(

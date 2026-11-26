@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{Seek, Write};
 use std::process::{Command, Output, Stdio};
 
 fn from_pipe(args: &[&str], input: &[u8]) -> Output {
@@ -140,13 +140,16 @@ fn missing_named_script_fails_without_reading_stdin_as_commands() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("stdin");
     std::fs::write(&input, "printf wrong\n").unwrap();
+    let mut input = std::fs::File::open(input).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
         .current_dir(dir.path())
+        .env("HOME", dir.path())
         .arg("missing.zledsh")
-        .stdin(std::fs::File::open(input).unwrap())
+        .stdin(input.try_clone().unwrap())
         .output()
         .unwrap();
-    assert!(!output.status.success());
+    assert_eq!(output.status.code(), Some(127));
+    assert_eq!(input.stream_position().unwrap(), 0);
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("missing.zledsh"));
 }
