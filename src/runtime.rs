@@ -289,11 +289,16 @@ impl<'a> Invocation<'a> {
 
     fn expand_alias(&self, command: &mut Command) -> Result<(), ParseError> {
         let mut seen = HashSet::new();
+        let index = command
+            .words
+            .iter()
+            .take_while(|word| word.assignment)
+            .count();
         while let Some(Word {
             parts,
             bare: true,
             assignment: false,
-        }) = command.words.first()
+        }) = command.words.get(index)
         {
             let [
                 WordPart {
@@ -310,7 +315,7 @@ impl<'a> Invocation<'a> {
             if !seen.insert(name) {
                 break;
             }
-            command.words.splice(..1, alias_words(value)?);
+            command.words.splice(index..index + 1, alias_words(value)?);
         }
         Ok(())
     }
@@ -694,18 +699,26 @@ impl<'a> Invocation<'a> {
         }
         let command = &pipeline[0];
         let mut substitution_status = None;
-        let assignment_only =
-            !command.words.is_empty() && command.words.iter().all(|word| word.assignment);
-        let argv = if assignment_only {
-            Vec::new()
-        } else {
-            match self.expand_command_words(&command.words, &mut substitution_status) {
-                Ok(argv) => argv,
-                Err(error) => {
-                    report(&original[2], &error);
-                    self.status = 2;
-                    return;
-                }
+        let prefix_len = command
+            .words
+            .iter()
+            .take_while(|word| word.assignment)
+            .count();
+        let (prefix, words) = command.words.split_at(prefix_len);
+        if !prefix.is_empty() && !words.is_empty() && self.agent_command() {
+            report(
+                &original[2],
+                "command assignment prefixes must be submitted by the user",
+            );
+            self.status = 2;
+            return;
+        }
+        let argv = match self.expand_command_words(words, &mut substitution_status) {
+            Ok(argv) => argv,
+            Err(error) => {
+                report(&original[2], &error);
+                self.status = 2;
+                return;
             }
         };
         let mut descriptors = original.clone();
@@ -718,33 +731,43 @@ impl<'a> Invocation<'a> {
             self.status = if self.exited { 2 } else { 1 };
             return;
         }
-        if assignment_only {
-            for word in &command.words {
-                match self.expand_assignment(word, &mut substitution_status) {
-                    Ok(fields) if fields.len() == 1 => {
-                        if let Err(error) = self.assign(&fields[0]) {
-                            let error = self.parameter_error(error);
-                            report(&descriptors[2], &error);
-                            self.status = 2;
-                            return;
-                        }
-                    }
-                    result => {
-                        report(
-                            &descriptors[2],
-                            &result
-                                .err()
-                                .unwrap_or_else(|| "assignment must expand to one value".into()),
-                        );
-                        self.status = 2;
-                        return;
-                    }
+        let temporary = argv.first().is_some_and(|name| !is_special_builtin(name));
+        let mut saved = HashMap::new();
+        let result = (|| -> Result<(), String> {
+            for word in prefix {
+                let fields = self.expand_assignment(word, &mut substitution_status)?;
+                let [field] = fields.as_slice() else {
+                    return Err("assignment must expand to one value".into());
+                };
+                let (name, _) = field.split_once('=').ok_or("expected an assignment")?;
+                self.ensure_writable(name)?;
+                if temporary {
+                    saved
+                        .entry(name.to_owned())
+                        .or_insert_with(|| self.save_variable(name));
+                    self.exported.insert(name.into());
                 }
+                self.assign(field)?;
             }
-            self.status = substitution_status.unwrap_or(0);
-            return;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            let error = self.parameter_error(error);
+            report(&descriptors[2], &error);
+            self.status = 2;
+        } else {
+            self.execute_argv(&argv, input, descriptors, substitution_status);
         }
-        let mut argv = argv.as_slice();
+        self.restore_variables(saved);
+    }
+
+    fn execute_argv(
+        &mut self,
+        mut argv: &[String],
+        input: &mut dyn BufRead,
+        descriptors: Descriptors,
+        substitution_status: Option<u8>,
+    ) {
         let mut bypass_functions = false;
         while let [prefix, rest @ ..] = argv {
             if prefix != "command" {
@@ -791,7 +814,7 @@ impl<'a> Invocation<'a> {
             self.status = 2;
             return;
         }
-        if !bypass_functions && self.functions.contains_key(name) {
+        if !bypass_functions && !is_special_builtin(name) && self.functions.contains_key(name) {
             if self.agent_command() {
                 report(
                     &descriptors[2],
@@ -1124,7 +1147,14 @@ impl<'a> Invocation<'a> {
         self.script_depth += 1;
         self.run_with_descriptors(&body, input, descriptors);
         self.script_depth -= 1;
-        for (name, saved) in self.locals.pop().unwrap() {
+        let locals = self.locals.pop().unwrap();
+        self.restore_variables(locals);
+        self.returned = false;
+        self.args = previous;
+    }
+
+    fn restore_variables(&mut self, variables: HashMap<String, SavedVariable>) {
+        for (name, saved) in variables {
             if let Some(value) = saved.value {
                 self.variables.insert(name.clone(), value);
             } else {
@@ -1151,8 +1181,6 @@ impl<'a> Invocation<'a> {
                 self.exported.remove(&name);
             }
         }
-        self.returned = false;
-        self.args = previous;
     }
 
     fn assign_array(&mut self, name: &str, words: &[Word], local: bool) -> Result<u8, String> {
@@ -1170,18 +1198,23 @@ impl<'a> Invocation<'a> {
     }
 
     fn save_local(&mut self, name: &str) -> Result<(), String> {
+        let saved = self.save_variable(name);
         let frame = self
             .locals
             .last_mut()
             .ok_or("local: only available in a function")?;
-        frame.entry(name.into()).or_insert_with(|| SavedVariable {
+        frame.entry(name.into()).or_insert(saved);
+        Ok(())
+    }
+
+    fn save_variable(&self, name: &str) -> SavedVariable {
+        SavedVariable {
             value: self.variables.get(name).cloned(),
             array: self.arrays.get(name).cloned(),
             exported: self.exported.contains(name),
             readonly: self.readonly.contains(name),
             unset: self.unset.contains(name),
-        });
-        Ok(())
+        }
     }
 
     fn set_locals(&mut self, args: &[String], output: &Descriptor) -> u8 {
@@ -1461,6 +1494,21 @@ impl<'a> Invocation<'a> {
                 });
                 continue;
             }
+            if command.words.first().is_some_and(|word| word.assignment) {
+                if self.agent_command() {
+                    return Err(io::Error::other(
+                        "command assignment prefixes must be submitted by the user",
+                    ));
+                }
+                let mut command = command.clone();
+                command.background = false;
+                let body = [Statement::Pipeline(vec![command])];
+                stages.push(self.subshell_stage(&body, &descriptors)?);
+                stdin = next_input.map_or(Descriptor::Closed, |read| {
+                    Descriptor::File(Rc::new(File::from(read)))
+                });
+                continue;
+            }
             let mut status = None;
             let argv = match self.expand_command_words(&command.words, &mut status) {
                 Err(error) => {
@@ -1473,7 +1521,7 @@ impl<'a> Invocation<'a> {
                     {
                         report(&descriptors[2], &error);
                         vec!["exit".into(), "1".into()]
-                    } else if argv.is_empty() || command.words.iter().all(|word| word.assignment) {
+                    } else if argv.is_empty() {
                         vec!["exit".into(), status.unwrap_or(0).to_string()]
                     } else {
                         argv
@@ -1494,7 +1542,8 @@ impl<'a> Invocation<'a> {
                 ));
             }
             let name = argv[0].clone();
-            if self.functions.contains_key(&name) && name != "command" {
+            if !is_special_builtin(&name) && self.functions.contains_key(&name) && name != "command"
+            {
                 if self.agent_command() {
                     return Err(io::Error::other(
                         "shell functions must be submitted by the user",
@@ -1759,11 +1808,9 @@ impl<'a> Invocation<'a> {
         status: &mut Option<u8>,
     ) -> Result<Vec<String>, String> {
         let mut fields = Vec::new();
-        let assignment_only = words.iter().all(|word| word.assignment);
         for word in words {
             if word.assignment
-                && (assignment_only
-                    || matches!(direct_name(&fields), Some("export" | "local" | "readonly")))
+                && matches!(direct_name(&fields), Some("export" | "local" | "readonly"))
             {
                 fields.extend(self.expand_assignment(word, status)?);
             } else {
@@ -2454,6 +2501,23 @@ pub(crate) const BUILTINS: &[&str] = &[
 
 pub(crate) fn is_builtin(name: &str) -> bool {
     BUILTINS.contains(&name)
+}
+
+fn is_special_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        ":" | "."
+            | "break"
+            | "continue"
+            | "eval"
+            | "exit"
+            | "export"
+            | "readonly"
+            | "return"
+            | "set"
+            | "shift"
+            | "unset"
+    )
 }
 
 fn direct_name(mut argv: &[String]) -> Option<&str> {

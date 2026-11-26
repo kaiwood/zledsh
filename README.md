@@ -46,6 +46,8 @@ Use `set -o pipefail` (or start with `zledsh -o pipefail`) to report the rightmo
 
 Use `readonly name=value` to protect a shell variable from reassignment or `unset`. `export name` can still export the existing value. `readonly -p` lists the protected variables.
 
+Prefix a command with an assignment to override a variable for that command, for example `LC_ALL=C sort names.txt`. The value is temporary for ordinary commands and functions. A direct special builtin such as `:` or `export` keeps the assignment in the current shell.
+
 Use `zledsh -i` to force interactive input even on a pipe. It loads startup files, prints prompts, and keeps reading after a syntax error. Raw editing and terminal job control still require a terminal.
 
 Use the same syntax in your startup files, `zledsh -c`, redirected stdin, or at the prompt. `&&` and `||` short-circuit, and `!` reverses a pipeline’s exit status. `for`, `while`, and `until` support `break` and `continue`. `case` selects the first matching pattern, with `*`, `?`, bracket expressions, and `|` alternatives. Quote metacharacters to match them literally; unlike filename patterns, `case` patterns can match slashes and leading dots. End a branch with `;&` to run the following branch without testing its pattern. Use `{ list; }` to group commands without isolating changes to variables or the working directory. Use `( list )` to isolate those changes and `exit` in a subshell. Functions declared as `name() { ...; }` support positional arguments, `local`, `shift`, and `return` in standalone calls and pipeline stages. Functions and compound commands in a pipeline run in isolated shell environments.

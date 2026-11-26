@@ -520,3 +520,64 @@ printf '%s:%s\n' "$x" "${changed-unset}"
         "zledsh: arithmetic command: assignment to a read-only variable\nzledsh: y: read-only variable\nzledsh: read: x: read-only variable\n",
     );
 }
+
+#[test]
+fn assignment_prefixes_have_command_local_scope_except_for_special_builtins() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+x=outer
+prefix='two words *'
+x=$prefix y=$x /usr/bin/printenv y
+x=$prefix /usr/bin/printenv x
+printf '%s\n' "$x"
+HOME=missing-prefix-directory cd || printf 'cd failed\n'
+f() { printf 'function=%s\n' "$x"; x=changed; y=retained; }
+x=inner f
+printf 'after=%s:%s\n' "$x" "$y"
+x=pipe /usr/bin/printenv x | /bin/cat
+x=persistent :
+x=temporary command :
+printf 'final=%s\n' "$x"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(output.stdout, b"two words *\ntwo words *\nouter\ncd failed\nfunction=inner\nafter=outer:retained\npipe\nfinal=persistent\n");
+    let error = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        error.starts_with("zledsh: cd: missing-prefix-directory:"),
+        "{error}"
+    );
+    assert_eq!(error.lines().count(), 1);
+}
+
+#[test]
+fn assignment_prefixes_apply_after_arguments_and_redirections() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+name=before
+name=after printf '%s\n' "$name" > "$name"
+/bin/cat before
+name=retained $missing
+printf '%s\n' "$name"
+readonly fixed=old
+( fixed=new /usr/bin/printenv fixed; printf unexpected ) || printf 'blocked\n'
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        0,
+        "before\nretained\nblocked\n",
+        "zledsh: fixed: read-only variable\n",
+    );
+    assert!(!home.path().join("after").exists());
+}
