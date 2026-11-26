@@ -67,7 +67,7 @@ After field splitting, unquoted `*`, `?`, and bracket patterns such as `[a-z]` e
 
 Use `"$@"` to forward each positional argument unchanged, including empty arguments. `"$*"` instead joins them into one argument using the first character of `IFS` (a space if unset, no separator if empty). Unquoted `$@` and `$*` split each positional argument separately.
 
-`$(...)` captures stdout in an isolated `zledsh` process. Quote it to keep the result as one argument. `eval`, `.` and `source` execute native `zledsh` syntax in the current shell. For example, `. ./setup.zledsh` loads a script into an existing session. This is a scripting subset, not a Bash interpreter: backticks, arithmetic expansion, and associative arrays are unsupported.
+`$(...)` captures stdout in an isolated `zledsh` process. Quote it to keep the result as one argument. `eval`, `.` and `source` execute native `zledsh` syntax in the current shell. For example, `. ./setup.zledsh` loads a script into an existing session. This is a scripting subset, not a Bash interpreter: arithmetic expansion and associative arrays are unsupported. Backquoted command substitution also runs natively; prefer `$(...)` when nesting substitutions.
 
 The completion subset supports indexed array literals, `"${name[@]}"`, `"${name[index]}"`, and `unset 'name[0]'`. Register a trusted callback with `complete -F function command`. On simple unquoted drafts, it receives `COMP_WORDS` and `COMP_CWORD` as data and returns candidates in `COMPREPLY`. `compgen -W wordlist -- prefix` matches a whitespace-separated list. A callback can run local commands, but runs in a separate, time-limited shell so its changes to shell variables and cwd do not carry back to the prompt.
 

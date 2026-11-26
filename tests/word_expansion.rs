@@ -258,3 +258,24 @@ END
         "argc=2\n<a\tb>\n<$'literal'>\n$value\n",
     );
 }
+
+// POSIX.1-2024 2.6.3: both substitution forms execute native shell code.
+#[test]
+fn backquoted_substitution_preserves_status_quoting_and_nested_documents() {
+    assert_expansion(
+        r#"result=`printf 'a b\n\n'; exit 7`
+show "$?" "$result" `printf 'a b'` "`printf 'a b'`"
+show `printf '<%s>' \`printf nested\``
+/bin/cat <<END
+`printf 'document value'`
+\`literal\`
+END
+show "`/bin/cat <<'BODY'
+quoted $value
+BODY
+`"
+"#,
+        &[],
+        "argc=5\n<7>\n<a b>\n<a>\n<b>\n<a b>\nargc=1\n<<nested>>\ndocument value\n`literal`\nargc=1\n<quoted $value>\n",
+    );
+}

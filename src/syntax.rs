@@ -854,7 +854,8 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
                 }
             }
             '(' if word.assignment => return Err("array literals are not supported".into()),
-            '<' | '(' | '{' | '}' | '`' => {
+            '`' => backquoted(input, &mut word, false)?,
+            '<' | '(' | '{' | '}' => {
                 return Err(ParseError::Invalid(format!(
                     "unsupported unquoted syntax: {ch}"
                 )));
@@ -1000,7 +1001,7 @@ fn double_quoted(input: &mut Source<'_>, word: &mut Word, depth: usize) -> Parse
         match ch {
             '"' => return Ok(()),
             '$' => parameter_at(input, word, true, depth)?,
-            '`' => return Err("command substitution is not supported".into()),
+            '`' => backquoted(input, word, true)?,
             '\\' => match input.next_if(|ch| matches!(ch, '$' | '`' | '"' | '\\' | '\n')) {
                 Some('\n') => {}
                 Some(escaped) => literal(word, escaped, true),
@@ -1028,7 +1029,8 @@ fn expansion_text(value: &str, substitutions: Option<usize>) -> Result<Word, Str
         match ch {
             '$' => parameter_at(&mut input, &mut word, false, 0)
                 .map_err(|error| error.message().to_owned())?,
-            '`' => return Err("command substitution is not supported".into()),
+            '`' => backquoted(&mut input, &mut word, false)
+                .map_err(|error| error.message().to_owned())?,
             '\\' if input
                 .peek()
                 .is_some_and(|ch| matches!(ch, '$' | '`' | '\\' | '\n')) =>
@@ -1226,12 +1228,44 @@ fn parameter_word(input: &mut Source<'_>, quoted: bool, depth: usize) -> ParseRe
                     literal(&mut word, ch, false);
                 }
             }
-            '`' => return Err("command substitution is not supported".into()),
+            '`' => backquoted(input, &mut word, quoted)?,
             _ => literal(&mut word, ch, quoted),
         }
         first = false;
     }
     Ok(word)
+}
+
+fn backquoted(input: &mut Source<'_>, word: &mut Word, quoted: bool) -> ParseResult<()> {
+    let depth = input
+        .substitutions
+        .ok_or("command substitution is not supported here")?;
+    if depth >= 16 {
+        return Err("command substitutions nested too deeply".into());
+    }
+    let mut source = String::new();
+    while let Some(ch) = input.next() {
+        match ch {
+            '`' => {
+                let mut nested = Source::new(&source, Some(depth + 1));
+                list(&mut nested, &[], 0)?;
+                nested.require_here_documents()?;
+                word.push(Part::Substitution(source), quoted);
+                return Ok(());
+            }
+            '\\' => match input
+                .next_if(|ch| matches!(ch, '$' | '`' | '\\' | '\n') || (quoted && *ch == '"'))
+            {
+                Some('\n') => {}
+                Some(ch) => source.push(ch),
+                None => source.push('\\'),
+            },
+            ch => source.push(ch),
+        }
+    }
+    Err(ParseError::Incomplete(
+        "unclosed backquoted command substitution",
+    ))
 }
 
 fn substitution(input: &mut Source<'_>, word: &mut Word, quoted: bool) -> ParseResult<()> {
