@@ -46,9 +46,27 @@ pub(crate) enum RedirectKind {
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Word {
-    pub parts: Vec<Part>,
+    pub parts: Vec<WordPart>,
     pub assignment: bool,
     pub bare: bool,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct WordPart {
+    pub kind: Part,
+    pub quoted: bool,
+}
+
+impl Word {
+    pub(crate) fn literal(text: String) -> Self {
+        let mut word = Self::default();
+        word.push(Part::Literal(text), true);
+        word
+    }
+
+    fn push(&mut self, kind: Part, quoted: bool) {
+        self.parts.push(WordPart { kind, quoted });
+    }
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -714,7 +732,7 @@ fn redirect(input: &mut Source<'_>) -> ParseResult<Option<Redirect>> {
     }
     let mut target = word(&mut ahead)?;
     for part in &mut target.parts {
-        if let Part::Substitution { split, .. } = part {
+        if let Part::Substitution { split, .. } = &mut part.kind {
             *split = false;
         }
     }
@@ -798,22 +816,22 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
         input.next();
         word.bare &= !matches!(ch, '\'' | '"' | '\\');
         match ch {
-            '\'' => word.parts.push(Part::Literal(single_quoted(input)?)),
+            '\'' => word.push(Part::Literal(single_quoted(input)?), true),
             '"' => double_quoted(input, &mut word)?,
             '\\' => match input.next() {
                 Some('\n') => continue,
-                Some(ch) => literal(&mut word, ch),
+                Some(ch) => literal(&mut word, ch, true),
                 None => return Err("trailing backslash".into()),
             },
             '$' if input.peek() == Some(&'(') => {
                 let split = !word.assignment;
-                substitution(input, &mut word, split)?;
+                substitution(input, &mut word, false, split)?;
             }
             '[' if !started && input.peek().is_none_or(|&ch| boundary(ch)) => {
-                literal(&mut word, ch)
+                literal(&mut word, ch, false)
             }
             '~' if !started && input.peek().is_none_or(|&ch| ch == '/' || boundary(ch)) => {
-                word.parts.push(Part::Home);
+                word.push(Part::Home, true);
             }
             '(' if word.assignment => return Err("array literals are not supported".into()),
             '<' | '(' | '{' | '}' | '`' | '$' | '*' | '?' | '[' | '~' => {
@@ -821,7 +839,7 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
                     "unsupported unquoted syntax: {ch}"
                 )));
             }
-            _ => literal(&mut word, ch),
+            _ => literal(&mut word, ch, false),
         }
         started = true;
     }
@@ -845,20 +863,20 @@ fn single_quoted(input: &mut Source<'_>) -> ParseResult<String> {
 fn double_quoted(input: &mut Source<'_>, word: &mut Word) -> ParseResult<()> {
     // Keep even an empty quoted word, but not an empty "$@".
     if input.next_if_eq(&'"').is_some() {
-        word.parts.push(Part::Literal(String::new()));
+        word.push(Part::Literal(String::new()), true);
         return Ok(());
     }
     while let Some(ch) = input.next() {
         match ch {
             '"' => return Ok(()),
-            '$' => parameter(input, word)?,
+            '$' => parameter_at(input, word, true, 0)?,
             '`' => return Err("command substitution is not supported".into()),
             '\\' => match input.next_if(|ch| matches!(ch, '$' | '`' | '"' | '\\' | '\n')) {
                 Some('\n') => {}
-                Some(escaped) => literal(word, escaped),
-                None => literal(word, '\\'),
+                Some(escaped) => literal(word, escaped, true),
+                None => literal(word, '\\', true),
             },
-            _ => literal(word, ch),
+            _ => literal(word, ch, true),
         }
     }
     Err(ParseError::Incomplete("unclosed double quote"))
@@ -878,32 +896,34 @@ fn expansion_text(value: &str, substitutions: Option<usize>) -> Result<Word, Str
     let mut input = Source::new(value, substitutions);
     while let Some(ch) = input.next() {
         match ch {
-            '$' => parameter(&mut input, &mut word).map_err(|error| error.message().to_owned())?,
+            '$' => parameter_at(&mut input, &mut word, false, 0)
+                .map_err(|error| error.message().to_owned())?,
             '`' => return Err("command substitution is not supported".into()),
             '\\' if input
                 .peek()
                 .is_some_and(|ch| matches!(ch, '$' | '`' | '\\' | '\n')) =>
             {
                 if let Some(next) = input.next().filter(|ch| *ch != '\n') {
-                    literal(&mut word, next);
+                    literal(&mut word, next, true);
                 }
             }
-            _ => literal(&mut word, ch),
+            _ => literal(&mut word, ch, false),
         }
     }
     Ok(word)
 }
 
-fn parameter(input: &mut Source<'_>, word: &mut Word) -> ParseResult<()> {
-    parameter_at(input, word, 0)
-}
-
-fn parameter_at(input: &mut Source<'_>, word: &mut Word, depth: usize) -> ParseResult<()> {
+fn parameter_at(
+    input: &mut Source<'_>,
+    word: &mut Word,
+    quoted: bool,
+    depth: usize,
+) -> ParseResult<()> {
     if depth >= 32 {
         return Err("parameter expansion nested too deeply".into());
     }
     let part = match input.peek() {
-        Some('(') => return substitution(input, word, false),
+        Some('(') => return substitution(input, word, quoted, false),
         Some('!') => {
             input.next();
             Part::LastBackground
@@ -953,7 +973,7 @@ fn parameter_at(input: &mut Source<'_>, word: &mut Word, depth: usize) -> ParseR
                 input
                     .next_if_eq(&'}')
                     .ok_or("expected } after array index")?;
-                word.parts.push(Part::Array { name, index });
+                word.push(Part::Array { name, index }, quoted);
                 return Ok(());
             }
             let if_empty = input.next_if_eq(&':').is_some();
@@ -962,11 +982,11 @@ fn parameter_at(input: &mut Source<'_>, word: &mut Word, depth: usize) -> ParseR
                 let mut value = Word::default();
                 while let Some(ch) = input.next_if(|ch| *ch != '}') {
                     match ch {
-                        '$' => parameter_at(input, &mut value, depth + 1)?,
+                        '$' => parameter_at(input, &mut value, quoted, depth + 1)?,
                         '`' | '\\' | '\'' | '"' | '{' => {
                             return Err("unsupported syntax in parameter default".into());
                         }
-                        _ => literal(&mut value, ch),
+                        _ => literal(&mut value, ch, quoted),
                     }
                 }
                 Some(value)
@@ -995,15 +1015,20 @@ fn parameter_at(input: &mut Source<'_>, word: &mut Word, depth: usize) -> ParseR
             }
         }
         _ => {
-            literal(word, '$');
+            literal(word, '$', quoted);
             return Ok(());
         }
     };
-    word.parts.push(part);
+    word.push(part, quoted);
     Ok(())
 }
 
-fn substitution(input: &mut Source<'_>, word: &mut Word, split: bool) -> ParseResult<()> {
+fn substitution(
+    input: &mut Source<'_>,
+    word: &mut Word,
+    quoted: bool,
+    split: bool,
+) -> ParseResult<()> {
     let Some(depth) = input.substitutions else {
         return Err("command substitution is not supported here".into());
     };
@@ -1025,10 +1050,13 @@ fn substitution(input: &mut Source<'_>, word: &mut Word, split: bool) -> ParseRe
     if input.next_if_eq(&')').is_none() {
         return Err(ParseError::Incomplete("unclosed command substitution"));
     }
-    word.parts.push(Part::Substitution {
-        source: input.source[start..end].into(),
-        split,
-    });
+    word.push(
+        Part::Substitution {
+            source: input.source[start..end].into(),
+            split,
+        },
+        quoted,
+    );
     Ok(())
 }
 
@@ -1041,10 +1069,15 @@ fn variable_name(input: &mut Source<'_>) -> Option<String> {
     Some(name)
 }
 
-fn literal(word: &mut Word, ch: char) {
-    if let Some(Part::Literal(text)) = word.parts.last_mut() {
+fn literal(word: &mut Word, ch: char, quoted: bool) {
+    if let Some(WordPart {
+        kind: Part::Literal(text),
+        quoted: previous,
+    }) = word.parts.last_mut()
+        && *previous == quoted
+    {
         text.push(ch);
     } else {
-        word.parts.push(Part::Literal(String::from(ch)));
+        word.push(Part::Literal(String::from(ch)), quoted);
     }
 }

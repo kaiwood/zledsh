@@ -80,11 +80,7 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
         words: args
             .into_iter()
             .skip(1)
-            .map(|arg| syntax::Word {
-                parts: vec![syntax::Part::Literal(arg)],
-                assignment: false,
-                bare: false,
-            })
+            .map(syntax::Word::literal)
             .collect(),
         redirects: Vec::new(),
         background: false,

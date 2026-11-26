@@ -390,11 +390,7 @@ fn ask(
                 let command = syntax::Command {
                     words: ["cd", &directory]
                         .into_iter()
-                        .map(|text| syntax::Word {
-                            parts: vec![syntax::Part::Literal(text.into())],
-                            assignment: false,
-                            bare: false,
-                        })
+                        .map(|text| syntax::Word::literal(text.into()))
                         .collect(),
                     redirects: Vec::new(),
                     background: false,

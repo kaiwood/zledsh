@@ -10,7 +10,7 @@ use crate::process;
 
 use crate::syntax::{
     self, ArrayIndex, CasePattern, Command, ParseError, Part, Redirect, RedirectKind, Script,
-    Statement, Word,
+    Statement, Word, WordPart,
 };
 
 pub(crate) struct Invocation<'a> {
@@ -162,7 +162,13 @@ impl<'a> Invocation<'a> {
             assignment: false,
         }) = command.words.first()
         {
-            let [Part::Literal(name)] = parts.as_slice() else {
+            let [
+                WordPart {
+                    kind: Part::Literal(name),
+                    ..
+                },
+            ] = parts.as_slice()
+            else {
                 break;
             };
             let Some((name, value)) = self.aliases.get_key_value(name) else {
@@ -1432,7 +1438,7 @@ impl<'a> Invocation<'a> {
         let mut field = String::new();
         let mut present = false;
         for part in &word.parts {
-            match part {
+            match &part.kind {
                 Part::Literal(text) => field.push_str(text),
                 Part::Home => field.push_str(self.variable("HOME").as_deref().unwrap_or("~")),
                 Part::Name => field.push_str(self.name),
