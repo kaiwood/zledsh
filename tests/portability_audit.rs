@@ -284,3 +284,39 @@ fn scalar_assignments_and_exports_preserve_native_values() {
     assert_eq!(output.stdout, b"a\xff b\n<a\xff b>");
     assert!(output.stderr.is_empty(), "{output:?}");
 }
+
+#[test]
+fn redirects_use_native_path_bytes() {
+    use std::os::unix::ffi::OsStrExt;
+    let home = tempfile::tempdir().unwrap();
+    let path = std::ffi::OsStr::from_bytes(b"file\xff");
+    if let Err(error) = fs::write(home.path().join(path), "seed") {
+        #[cfg(target_os = "macos")]
+        if error.raw_os_error() == Some(libc::EILSEQ) {
+            eprintln!("filesystem rejected non-UTF-8 filename: {error}");
+            return;
+        }
+        panic!("{error}");
+    }
+    fs::write(home.path().join("names"), b"file\xff\n").unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+read -r path < names
+/bin/cat < "$path"
+printf append >> "$path"
+/bin/cat <> "$path"
+printf replace > "$path"
+set -C
+printf force >| "$path"
+/bin/cat < "$path"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"seedseedappendforce");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(fs::read(home.path().join(path)).unwrap(), b"force");
+}

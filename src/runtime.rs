@@ -3,7 +3,7 @@ use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::process::Stdio;
 use std::rc::Rc;
 
@@ -2961,6 +2961,18 @@ impl<'a> Invocation<'a> {
             .collect()
     }
 
+    fn expand_bytes(
+        &mut self,
+        word: &Word,
+        status: &mut Option<u8>,
+    ) -> Result<Vec<Vec<u8>>, String> {
+        Ok(self
+            .expand_parts(word, status, false, false)?
+            .into_iter()
+            .map(field_bytes)
+            .collect())
+    }
+
     fn expand_assignment(
         &mut self,
         word: &Word,
@@ -3341,13 +3353,15 @@ impl<'a> Invocation<'a> {
                     "this file descriptor redirection must be submitted by the user".into(),
                 );
             }
-            let targets = self.expand(target, status)?;
+            let targets = self.expand_bytes(target, status)?;
             let [target] = targets.as_slice() else {
                 return Err("ambiguous redirection".into());
             };
+            let target = OsStr::from_bytes(target);
+            let label = target.to_string_lossy();
             descriptors[fd] = match kind {
                 RedirectKind::DuplicateInput | RedirectKind::DuplicateOutput => {
-                    if self.agent_command() && !matches!(target.as_str(), "1" | "2") {
+                    if self.agent_command() && !matches!(target.as_bytes(), b"1" | b"2") {
                         return Err(
                             "this file descriptor redirection must be submitted by the user".into(),
                         );
@@ -3355,9 +3369,12 @@ impl<'a> Invocation<'a> {
                     if target == "-" {
                         Descriptor::Closed
                     } else {
-                        let from = syntax::descriptor_number(target).ok_or_else(|| {
-                            format!("{target}: expected descriptor 0 through 9 or -")
-                        })?;
+                        let from = target
+                            .to_str()
+                            .and_then(syntax::descriptor_number)
+                            .ok_or_else(|| {
+                                format!("{label}: expected descriptor 0 through 9 or -")
+                            })?;
                         let source = &descriptors[from];
                         if !source.is_open() {
                             return Err(format!("{from}: bad file descriptor"));
@@ -3380,7 +3397,7 @@ impl<'a> Invocation<'a> {
                         RedirectKind::Write if self.options.noclobber => open_noclobber(target),
                         _ => File::create(target),
                     }
-                    .map_err(|error| format!("{target}: {error}"))?;
+                    .map_err(|error| format!("{label}: {error}"))?;
                     Descriptor::File(Rc::new(file))
                 }
             };
@@ -3447,7 +3464,7 @@ fn umask(args: &[String], output: &Descriptor) -> Result<(), String> {
     }
 }
 
-fn open_noclobber(target: &str) -> io::Result<File> {
+fn open_noclobber(target: &OsStr) -> io::Result<File> {
     let exists = match OpenOptions::new().write(true).create_new(true).open(target) {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => error,
         result => return result,
