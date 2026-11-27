@@ -2,7 +2,7 @@ use std::io::{self, Write};
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::display;
+use super::{display, display_draft};
 use crate::{completion::Matches, transcript::window_size};
 
 pub(super) struct Screen<'a> {
@@ -13,7 +13,7 @@ pub(super) struct Screen<'a> {
 }
 
 impl<'a> Screen<'a> {
-    pub(super) fn new(prompt: &'a str, before: &[u8]) -> Self {
+    pub(super) fn new(prompt: &'a str, before: &str) -> Self {
         let size = window_size().ok();
         let mut screen = Self {
             // The header of a multiline prompt is already on screen.
@@ -28,8 +28,13 @@ impl<'a> Screen<'a> {
                 .unwrap_or(24),
             old_row: 0,
         };
-        screen.old_row = screen.position(&display(before), "").row;
+        screen.old_row = screen.position(before, "").row;
         screen
+    }
+
+    pub(super) fn at_start(mut self) -> Self {
+        self.old_row = 0;
+        self
     }
 
     pub(super) fn clear(&self, echo: &mut impl Write) -> io::Result<()> {
@@ -40,28 +45,27 @@ impl<'a> Screen<'a> {
     }
 
     pub(super) fn draw(
-        self,
+        &self,
         echo: &mut impl Write,
         line: &[u8],
         cursor: usize,
-        matches: &Matches,
-        selected: Option<usize>,
+        menu: Option<(&Matches, Option<usize>)>,
     ) -> io::Result<Option<usize>> {
-        let before = display(&line[..cursor]);
-        let after = display(&line[cursor..]);
+        let before = display_draft(&line[..cursor]);
+        let after = display_draft(&line[cursor..]);
         let caret = self.position(&before, "");
         let end = self.position(&before, &after);
         self.clear(echo)?;
         write!(echo, "{}{before}{after}", self.prompt)?;
         let height = self.rows.saturating_sub(end.row + 1).min(12);
-        let drawn = if height == 0 {
-            0
-        } else {
+        let drawn = if let Some((matches, selected)) = menu.filter(|_| height > 0) {
             let labels: Vec<_> = matches
                 .labels()
                 .map(|label| fit(&display(label.as_bytes()), self.columns))
                 .collect();
             draw_grid(echo, &labels, self.columns, height, selected)?
+        } else {
+            0
         };
         // Relative movement also works if displaying the grid scrolled the tty.
         let up = (end.row - caret.row + drawn).min(self.rows - 1);
@@ -109,6 +113,11 @@ struct Position {
 impl Position {
     fn advance(&mut self, text: &str, columns: usize) {
         for ch in text.chars() {
+            if ch == '\n' {
+                self.row += 1;
+                self.column = 0;
+                continue;
+            }
             let width = ch.width().unwrap_or(0).min(columns);
             if width > 0 && self.column + width > columns {
                 self.row += 1;

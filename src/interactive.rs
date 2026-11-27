@@ -735,7 +735,7 @@ fn read_keys(
     let mut history_index = None;
     let mut saved_draft = (Vec::new(), 0);
     let mut completion: Option<CompletionCycle> = None;
-    echo.write_all(draft.as_bytes())?;
+    echo.write_all(display_draft(draft.as_bytes()).as_bytes())?;
     echo.flush()?;
     let mut line = draft.into_bytes();
     let mut cursor = line.len();
@@ -765,7 +765,8 @@ fn read_keys(
                 continue;
             };
             history.refresh();
-            completion_menu::Screen::new(input_prompt, &line[..cursor]).clear(echo)?;
+            completion_menu::Screen::new(input_prompt, &display_draft(&line[..cursor]))
+                .clear(echo)?;
             let Some(result) = search_history(
                 input,
                 echo,
@@ -783,18 +784,39 @@ fn read_keys(
                 cursor = position;
                 history_index = None;
             }
-            redraw(echo, input_prompt, &line, cursor)?;
+            completion_menu::Screen::new(input_prompt, "")
+                .at_start()
+                .draw(echo, &line, cursor, None)?;
             echo.flush()?;
             key = result.next;
         }
+        if let Key::Byte(byte @ (b' '..=b'~' | 128..=255)) = key {
+            if cursor == line.len() {
+                line.push(byte);
+                cursor += 1;
+                echo.write_all(&[byte])?;
+                echo.flush()?;
+                continue;
+            }
+        }
+        let mut screen =
+            completion_menu::Screen::new(input_prompt, &display_draft(&line[..cursor]));
         match key {
             Key::Byte(b'\n' | b'\r') => {
+                if cursor != line.len() {
+                    screen.draw(echo, &line, line.len(), None)?;
+                }
                 line.push(b'\n');
                 return String::from_utf8(line)
                     .map(Line::Submitted)
                     .map_err(io::Error::other);
             }
-            Key::Byte(3) => return Ok(Line::Cancelled),
+            Key::Byte(3) => {
+                if cursor != line.len() {
+                    screen.draw(echo, &line, line.len(), None)?;
+                }
+                return Ok(Line::Cancelled);
+            }
             Key::Byte(4) if line.is_empty() => return Ok(Line::End),
             Key::Byte(4) | Key::Delete if cursor < line.len() => {
                 line.drain(cursor..next_char(&line, cursor));
@@ -828,6 +850,7 @@ fn read_keys(
             Key::Byte(12) => {
                 echo.write_all(b"\x1b[H\x1b[2J")?;
                 echo.write_all(header.as_bytes())?;
+                screen = screen.at_start();
             }
             Key::Byte(21) => {
                 consecutive_cut = cut(
@@ -911,10 +934,9 @@ fn read_keys(
                 if primary && (cursor == line.len() || line[cursor].is_ascii_whitespace()) =>
             {
                 if let Some(cycle) = &mut completion {
-                    let screen = completion_menu::Screen::new(prompt, &line[..cursor]);
                     cursor = cycle.advance(&mut line, cursor, key == Key::BackTab);
                     cycle.menu_offset =
-                        screen.draw(echo, &line, cursor, &cycle.matches, cycle.selected)?;
+                        screen.draw(echo, &line, cursor, Some((&cycle.matches, cycle.selected)))?;
                     echo.flush()?;
                     continue;
                 } else {
@@ -931,14 +953,12 @@ fn read_keys(
                     if cursor < line.len() && suffix.ends_with(' ') {
                         suffix.pop();
                     }
-                    let screen = (matches.len() > 1)
-                        .then(|| completion_menu::Screen::new(prompt, &line[..cursor]));
                     let anchor = cursor;
-                    let at_end = cursor == line.len();
                     line.splice(cursor..cursor, suffix.bytes());
                     cursor += suffix.len();
-                    if let Some(screen) = screen {
-                        let menu_offset = screen.draw(echo, &line, cursor, &matches, None)?;
+                    if matches.len() > 1 {
+                        let menu_offset =
+                            screen.draw(echo, &line, cursor, Some((&matches, None)))?;
                         completion = Some(CompletionCycle {
                             matches,
                             anchor,
@@ -947,16 +967,15 @@ fn read_keys(
                         });
                         echo.flush()?;
                         continue;
-                    } else if at_end {
-                        echo.write_all(suffix.as_bytes())?;
-                        echo.flush()?;
-                        continue;
                     }
                 }
             }
             Key::ExternalEdit => {
                 if history.as_deref().is_none_or(|history| history.paused) {
                     continue;
+                }
+                if cursor != line.len() {
+                    screen.draw(echo, &line, line.len(), None)?;
                 }
                 echo.write_all(b"\x1b[?2004l\n")?;
                 echo.flush()?;
@@ -974,6 +993,7 @@ fn read_keys(
                 }
                 echo.write_all(b"\x1b[?2004h")?;
                 echo.write_all(header.as_bytes())?;
+                screen = screen.at_start();
             }
             Key::LastArgument => {
                 let Some(history) = history.as_deref_mut().filter(|history| !history.paused) else {
@@ -1032,19 +1052,12 @@ fn read_keys(
                     );
             }
             Key::Byte(byte @ (b' '..=b'~' | 128..=255 | b'\t')) => {
-                if cursor == line.len() {
-                    line.push(byte);
-                    cursor += 1;
-                    echo.write_all(&[byte])?;
-                    echo.flush()?;
-                    continue;
-                }
                 line.insert(cursor, byte);
                 cursor += 1;
             }
             _ => continue,
         }
-        redraw(echo, input_prompt, &line, cursor)?;
+        screen.draw(echo, &line, cursor, None)?;
         echo.flush()?;
     }
     if let Some(down) = completion.and_then(|cycle| cycle.menu_offset) {
@@ -1163,12 +1176,13 @@ fn search_history<'a>(
         let direction = if backward { "reverse" } else { "forward" };
         let prompt = format!("({direction}-i-search)`{}': ", display(&query));
         let text = found.map_or("", |(_, text, _)| text);
-        write!(echo, "{prompt}{}", display(text.as_bytes()))?;
+        let visible = display(text.as_bytes());
+        write!(echo, "{prompt}{visible}")?;
         echo.flush()?;
         let Some(key) = read_key(input, shell)? else {
             return Ok(None);
         };
-        completion_menu::Screen::new(&prompt, text.as_bytes()).clear(echo)?;
+        completion_menu::Screen::new(&prompt, &visible).clear(echo)?;
         let repeat = match key {
             Key::Byte(18 | 19) => {
                 backward = key == Key::Byte(18);
@@ -1382,25 +1396,23 @@ fn next_word(line: &[u8], mut cursor: usize) -> usize {
 }
 
 fn display(bytes: &[u8]) -> String {
+    visible_text(bytes, false)
+}
+
+fn display_draft(bytes: &[u8]) -> String {
+    visible_text(bytes, true)
+}
+
+fn visible_text(bytes: &[u8], keep_newlines: bool) -> String {
     let mut visible = String::new();
     for ch in String::from_utf8_lossy(bytes).chars() {
-        if ch.is_control() {
+        if ch.is_control() && !(keep_newlines && ch == '\n') {
             visible.extend(ch.escape_default());
         } else {
             visible.push(ch);
         }
     }
     visible
-}
-
-fn redraw(echo: &mut impl Write, prompt: &str, line: &[u8], cursor: usize) -> io::Result<()> {
-    let before = display(&line[..cursor]);
-    let after = display(&line[cursor..]);
-    write!(echo, "\r\x1b[2K{prompt}{before}{after}")?;
-    if !after.is_empty() {
-        write!(echo, "\r{prompt}{before}")?;
-    }
-    Ok(())
 }
 
 fn read_editor_byte(

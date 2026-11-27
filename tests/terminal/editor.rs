@@ -183,8 +183,8 @@ fn private_commands_are_not_persisted_or_recalled() {
 fn bracketed_paste_can_be_edited_and_rejects_nul() {
     let mut tty = Terminal::start("paste> ", &[], |_| {});
     tty.expect("paste> ");
-    tty.send("\x1b[200~printf first > one\nprintf bad > two\x1b[201~");
-    tty.expect("printf bad > two");
+    tty.send("\x1b[200~printf first > one\r\nprintf bad > two\x1b[201~");
+    tty.expect("printf first > one\r\nprintf bad > two");
     assert!(!tty.home().join("one").exists());
     assert!(!tty.home().join("two").exists());
     tty.send(&format!("{}{}good\n", "\x1b[D".repeat(6), "\x7f".repeat(3)));
@@ -194,6 +194,28 @@ fn bracketed_paste_can_be_edited_and_rejects_nul() {
     tty.send("\x1b[200~printf unsafe > three\n\0\x1b[201~");
     tty.expect("\x07");
     assert!(!tty.home().join("three").exists());
+    tty.finish();
+}
+
+#[test]
+fn deleting_a_pasted_line_ending_and_wrap_clears_the_old_rows() {
+    let mut tty = Terminal::start("prompt header\n$ ", &[], |_| {});
+    tty.expect("prompt header\r\n$ ");
+    // The PTY is 80 columns wide. Including the prompt, this draft wraps
+    // once before the pasted trailing newline.
+    let prefix = format!("# {}", "x".repeat(76));
+    tty.send(&format!("\x1b[200~{prefix}stale\n\x1b[201~"));
+    tty.expect(&format!("$ {prefix}stale\r\n"));
+
+    tty.send("\x7f");
+    tty.expect(&format!("\x1b[2A\r\x1b[J$ {prefix}stale"));
+    tty.send("\x7f\x7f\x7f\x7f");
+    tty.expect(&format!("\x1b[1A\r\x1b[J$ {prefix}s"));
+    tty.send("\x7f");
+    let redraw = tty.expect(&format!("\x1b[1A\r\x1b[J$ {prefix}"));
+    assert!(!redraw.contains("prompt header"), "{redraw:?}");
+    tty.send("\n");
+    tty.expect("prompt header\r\n$ ");
     tty.finish();
 }
 
@@ -222,7 +244,7 @@ fn erasing_a_completion_does_not_repeat_the_multiline_prompt_header() {
     assert!(!output.contains("prompt header"), "{output:?}");
     tty.expect("prompt header\r\n$ ");
     tty.send("\x0c");
-    tty.expect("\x1b[H\x1b[2Jprompt header\r\n\r\x1b[2K$ ");
+    tty.expect("\x1b[H\x1b[2Jprompt header\r\n\r\x1b[J$ ");
     tty.finish();
 }
 
