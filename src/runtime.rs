@@ -3325,20 +3325,22 @@ impl<'a> Invocation<'a> {
                     let text = document.text.borrow();
                     let expanded;
                     let text = if document.expand {
-                        expanded = self.expand(&syntax::here_word(&text)?, status)?.join(" ");
-                        &expanded
+                        expanded = self
+                            .expand_bytes(&syntax::here_word(&text)?, status)?
+                            .join(&b' ');
+                        expanded.as_slice()
                     } else {
-                        &text
+                        text.as_bytes()
                     };
-                    descriptors[*fd] = here_input(text.as_bytes(), false)?;
+                    descriptors[*fd] = here_input(text, false)?;
                     continue;
                 }
                 Redirect::HereString { fd, word } => {
                     if self.agent_command() {
                         return Err("here-strings must be submitted by the user".into());
                     }
-                    let text = self.expand(word, status)?.join(" ");
-                    descriptors[*fd] = here_input(text.as_bytes(), true)?;
+                    let text = self.expand_bytes(word, status)?.join(&b' ');
+                    descriptors[*fd] = here_input(&text, true)?;
                     continue;
                 }
             };

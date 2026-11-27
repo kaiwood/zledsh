@@ -320,3 +320,20 @@ printf force >| "$path"
     assert!(output.stderr.is_empty(), "{output:?}");
     assert_eq!(fs::read(home.path().join(path)).unwrap(), b"force");
 }
+
+#[test]
+fn here_inputs_preserve_expanded_bytes() {
+    use std::os::unix::ffi::OsStrExt;
+    let home = tempfile::tempdir().unwrap();
+    let result = shell(home.path())
+        .env("VALUE", std::ffi::OsStr::from_bytes(b"a\xff b"))
+        .args([
+            "-c",
+            "/bin/cat <<EOF\n<$VALUE>\nEOF\n/bin/cat <<< \"$VALUE\"\n",
+        ])
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(result.stdout, b"<a\xff b>\na\xff b\n");
+    assert!(result.stderr.is_empty(), "{result:?}");
+}
