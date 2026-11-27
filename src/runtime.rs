@@ -946,14 +946,23 @@ impl<'a> Invocation<'a> {
         };
         let mut descriptors = original.clone();
         let direct_special = argv.first().is_some_and(|name| is_special_builtin(name));
-        if let Err(error) = self.redirect(
-            &command.redirects,
-            &mut descriptors,
-            &mut substitution_status,
-        ) {
+        let mut applied = 0;
+        let result = command.redirects.iter().try_for_each(|redirect| {
+            self.redirect(
+                std::slice::from_ref(redirect),
+                &mut descriptors,
+                &mut substitution_status,
+            )?;
+            applied += 1;
+            Ok::<(), String>(())
+        });
+        if let Err(error) = result {
             report(&descriptors[2], &error);
             self.status = if self.exited { 2 } else { 1 };
             self.special_builtin_error(direct_special);
+            if !self.exited && !self.agent_command() && direct_name(&argv) == Some("exec") {
+                self.commit_exec_redirects(&command.redirects[..applied], &descriptors);
+            }
             return;
         }
         let temporary = !argv.is_empty() && !direct_special;

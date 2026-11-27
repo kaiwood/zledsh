@@ -583,3 +583,31 @@ fn exec_stdin_redirect_changes_the_input_for_commands_and_stdin_scripts() {
     assert_eq!(output.stdout, b"replacement\n");
     assert!(output.stderr.is_empty(), "{output:?}");
 }
+
+#[test]
+fn command_exec_keeps_only_successful_redirections_on_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_zledsh"))
+        .current_dir(dir.path())
+        .env_clear()
+        .env("LC_ALL", "C")
+        .args([
+            "-c",
+            r#"
+exec 3>original
+command exec 4>&3 3>missing/file 5>skipped || printf 'status:%s\n' "$?"
+printf 'fd3\n' >&3
+printf 'fd4\n' >&4
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"status:1\n");
+    assert!(String::from_utf8_lossy(&output.stderr).starts_with("zledsh: missing/file:"));
+    assert_eq!(
+        fs::read(dir.path().join("original")).unwrap(),
+        b"fd3\nfd4\n"
+    );
+    assert!(!dir.path().join("skipped").exists());
+}

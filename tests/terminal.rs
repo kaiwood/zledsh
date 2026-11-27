@@ -133,3 +133,16 @@ fn completion_notice_is_printed_once_and_preserves_the_wait_status() {
     tty.expect("notice> ");
     tty.finish();
 }
+
+#[test]
+fn interactive_exec_keeps_earlier_redirect_after_later_failure() {
+    let mut tty = Terminal::start("exec> ", &[], |_| {});
+    tty.expect("exec> ");
+    tty.send("exec 3>kept 4>missing/file\n");
+    tty.expect("zledsh: missing/file:");
+    tty.expect("\x1b[?2004hexec> ");
+    tty.send("printf '%s\\n' \"$?\" >&3\n");
+    tty.expect("\x1b[?2004hexec> ");
+    assert_eq!(std::fs::read(tty.home().join("kept")).unwrap(), b"1\n");
+    tty.finish();
+}
