@@ -53,6 +53,9 @@ fn run_shell(
     if terminal {
         invocation.foreground = Some(Foreground::new()?);
     }
+    invocation.diagnostic_marker = transcript
+        .as_ref()
+        .map(|capture| capture.marker().to_owned());
     load_startup(invocation, input);
     if invocation.exited {
         return Ok(invocation.finish(input, Ok(invocation.status)));

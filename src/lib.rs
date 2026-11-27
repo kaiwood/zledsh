@@ -7,6 +7,7 @@ mod chatgpt;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod completion;
 mod condition;
+mod diagnostics;
 mod directory;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod filter;

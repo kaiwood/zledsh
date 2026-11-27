@@ -115,6 +115,7 @@ fn split_field(field: Field, ifs: &str) -> Vec<Field> {
 }
 
 pub(crate) struct Invocation<'a> {
+    pub diagnostic_marker: Option<std::path::PathBuf>,
     directory_stack: Vec<String>,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub interactive_history: Option<crate::history::History>,
@@ -186,6 +187,7 @@ struct PipelineVariables {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Substitution {
+    diagnostic_marker: Option<std::path::PathBuf>,
     task: WorkerTask,
     options: ShellOptions,
     trap_snapshot: BTreeMap<libc::c_int, String>,
@@ -220,6 +222,7 @@ enum WorkerTask {
 impl<'a> Invocation<'a> {
     pub fn new(name: &'a str, args: &[String]) -> Self {
         Self {
+            diagnostic_marker: None,
             directory_stack: Vec::new(),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             interactive_history: None,
@@ -2551,6 +2554,7 @@ impl<'a> Invocation<'a> {
             serde_json::from_reader(state).map_err(|_| "invalid shell worker state")?;
         let mut shell = Invocation::new(&saved.name, &saved.args);
         shell.options = saved.options;
+        shell.diagnostic_marker = saved.diagnostic_marker;
         shell.inherit_traps(saved.trap_snapshot);
         shell.directory_stack = saved.directory_stack;
         shell.getopts_offset = saved.getopts_offset;
@@ -2656,6 +2660,7 @@ impl<'a> Invocation<'a> {
 
     fn worker_state(&self, task: WorkerTask) -> Substitution {
         Substitution {
+            diagnostic_marker: self.diagnostic_marker.clone(),
             task,
             options: self.options,
             trap_snapshot: self.traps.snapshot(),

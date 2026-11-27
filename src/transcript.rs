@@ -15,12 +15,22 @@ const CHUNK: usize = 8192;
 const SIGNALS: [libc::c_int; 3] = [libc::SIGHUP, libc::SIGINT, libc::SIGTERM];
 static SIGNAL: AtomicI32 = AtomicI32::new(0);
 
-pub(crate) struct Transcript(UnixStream);
+pub(crate) struct Transcript {
+    channel: UnixStream,
+    marker: tempfile::NamedTempFile,
+    generation: Option<u64>,
+}
 
 impl Transcript {
+    pub fn marker(&self) -> &std::path::Path {
+        self.marker.path()
+    }
+
     pub fn begin(&mut self, input_pending: bool) -> io::Result<()> {
-        self.0.write_all(if input_pending { b"s" } else { b"b" })?;
-        self.0.read_exact(&mut [0])
+        self.generation = crate::diagnostics::generation(self.marker());
+        self.channel
+            .write_all(if input_pending { b"s" } else { b"b" })?;
+        self.channel.read_exact(&mut [0])
     }
 
     pub fn finish(&mut self) -> io::Result<Option<String>> {
@@ -32,16 +42,18 @@ impl Transcript {
     }
 
     fn finish_with(&mut self, request: &[u8; 1]) -> io::Result<Option<String>> {
-        self.0.write_all(request)?;
+        self.channel.write_all(request)?;
         let mut len = [0; 4];
-        self.0.read_exact(&mut len)?;
+        self.channel.read_exact(&mut len)?;
         let len = u32::from_be_bytes(len) as usize;
         if len == 0 || len > LIMIT {
             return Ok(None);
         }
         let mut bytes = vec![0; len];
-        self.0.read_exact(&mut bytes)?;
-        Ok(plain_text(&bytes))
+        self.channel.read_exact(&mut bytes)?;
+        let unchanged = self.generation.is_some()
+            && self.generation == crate::diagnostics::generation(self.marker());
+        Ok(if unchanged { plain_text(&bytes) } else { None })
     }
 }
 
@@ -65,6 +77,7 @@ pub(crate) fn run(shell: impl FnOnce(Option<Transcript>) -> io::Result<u8>) -> i
         drop(child);
         unsafe { UnixStream::from_raw_fd(child_fd) }
     };
+    let marker = tempfile::NamedTempFile::new()?;
     let mut master = -1;
     // Launch occurs before zledsh starts threads. forkpty makes the slave the
     // child's controlling terminal; foreground handoff stays in that session.
@@ -72,7 +85,11 @@ pub(crate) fn run(shell: impl FnOnce(Option<Transcript>) -> io::Result<u8>) -> i
         cvt(unsafe { libc::forkpty(&mut master, std::ptr::null_mut(), &mut original, &mut size) })?;
     if pid == 0 {
         drop(parent);
-        return shell(Some(Transcript(child)));
+        return shell(Some(Transcript {
+            channel: child,
+            marker,
+            generation: None,
+        }));
     }
     drop(child);
     let master = unsafe { OwnedFd::from_raw_fd(master) };
