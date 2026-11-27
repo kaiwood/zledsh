@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, Write};
@@ -1468,6 +1468,16 @@ impl<'a> Invocation<'a> {
                     }
                 };
             }
+            "export" if argv[1..] == ["-p"] => {
+                self.status = match self.list_exports(&descriptors[1]) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        report(&descriptors[2], &format!("export: {error}"));
+                        self.special_builtin_error(direct_special);
+                        2
+                    }
+                };
+            }
             "export" => {
                 self.status = 0;
                 for arg in &argv[1..] {
@@ -2109,15 +2119,38 @@ impl<'a> Invocation<'a> {
             .unwrap_or_else(|| OsString::from("/usr/bin:/bin"))
     }
 
+    fn list_exports(&self, output: &Descriptor) -> Result<(), String> {
+        let mut names: BTreeSet<_> = self.exported.iter().cloned().collect();
+        names.extend(
+            std::env::vars_os()
+                .filter_map(|(name, _)| name.into_string().ok())
+                .filter(|name| valid_name(name) && self.inherits_export(name)),
+        );
+        let mut listing = String::new();
+        for name in names {
+            listing.push_str("export ");
+            listing.push_str(&name);
+            if let Some(value) = self.variable_os(&name) {
+                let value = value
+                    .to_str()
+                    .ok_or_else(|| format!("-p requires UTF-8 values ({name})"))?;
+                listing.push('=');
+                listing.push_str(&quote_value(value));
+            }
+            listing.push('\n');
+        }
+        output.write(&listing).map_err(|error| error.to_string())
+    }
+
+    fn inherits_export(&self, name: &str) -> bool {
+        !self.unset.contains(name)
+            && (!matches!(name, "OPTIND" | "OPTARG") || self.exported.contains(name))
+    }
+
     fn execution_environment(&self) -> (OsString, HashMap<OsString, OsString>) {
         let path = self.command_path();
         let mut env: HashMap<OsString, OsString> = std::env::vars_os()
-            .filter(|(name, _)| {
-                !name.to_str().is_some_and(|name| {
-                    self.unset.contains(name)
-                        || (matches!(name, "OPTIND" | "OPTARG") && !self.exported.contains(name))
-                })
-            })
+            .filter(|(name, _)| name.to_str().is_none_or(|name| self.inherits_export(name)))
             .collect();
         for (name, value) in &self.variables {
             if self.exported.contains(name) || env.contains_key(OsStr::new(name)) {

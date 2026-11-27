@@ -463,6 +463,70 @@ fn errexit_checks_the_final_and_or_command_and_can_be_disabled() {
     }
 }
 
+// POSIX.1-2024 export -p: the listing can be used as shell input.
+#[test]
+fn export_p_round_trips_set_and_unset_exports() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = r#"
+EXPORT_INHERITED='updated'
+export EXPORT_QUOTED="a 'quote' and
+newline" EXPORT_EMPTY= EXPORT_UNSET
+unset EXPORT_REMOVED
+EXPORT_REMOVED=local
+EXPORT_LOCAL=local
+export -p > saved
+printf 'continued\n'
+"#;
+    assert_output(
+        shell(dir.path())
+            .env("EXPORT_INHERITED", "original")
+            .env("EXPORT_REMOVED", "original")
+            .args(["-c", source])
+            .output()
+            .unwrap(),
+        0,
+        "continued\n",
+        "",
+    );
+    let listing = fs::read_to_string(dir.path().join("saved")).unwrap();
+    assert!(listing.lines().any(|line| line == "export EXPORT_UNSET"));
+    assert!(!listing.contains("EXPORT_REMOVED") && !listing.contains("EXPORT_LOCAL"));
+    assert_output(
+        shell(dir.path())
+            .args([
+                "-c",
+                r#". ./saved
+printf '<%s>\n' "${EXPORT_UNSET-unset}"
+/usr/bin/printenv EXPORT_INHERITED
+/usr/bin/printenv EXPORT_QUOTED
+/usr/bin/printenv EXPORT_EMPTY
+EXPORT_UNSET=assigned
+/usr/bin/printenv EXPORT_UNSET"#,
+            ])
+            .output()
+            .unwrap(),
+        0,
+        "<unset>\nupdated\na 'quote' and\nnewline\n\nassigned\n",
+        "",
+    );
+}
+
+#[test]
+fn export_p_diagnoses_values_it_cannot_round_trip_as_text() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile::tempdir().unwrap();
+    assert_output(
+        shell(dir.path())
+            .env("NATIVE", std::ffi::OsStr::from_bytes(b"a\xff"))
+            .args(["-c", "export -p; printf wrong"])
+            .output()
+            .unwrap(),
+        2,
+        "",
+        "zledsh: export: -p requires UTF-8 values (NATIVE)\n",
+    );
+}
+
 #[test]
 fn readonly_preserves_values_across_assignment_unset_and_export() {
     let home = tempfile::tempdir().unwrap();

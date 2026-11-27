@@ -81,6 +81,8 @@ Verbose input and traces can reveal secrets in terminal scrollback and explicit 
 
 Use `readonly name=value` to protect a shell variable from reassignment or `unset`. `export name` can still export the existing value. `readonly -p` lists the protected variables.
 
+Use `export -p` to list exported shell variables as reusable `export` commands. Listing requires UTF-8 values; exporting a non-UTF-8 value to a child process does not.
+
 Prefix a command with an assignment to override a variable for that command, for example `LC_ALL=C sort names.txt`. The value is temporary for ordinary commands and functions. A direct special builtin such as `:` or `export` keeps the assignment in the current shell.
 
 Use `while getopts 'ab:' opt; do …; done` to parse script flags; `b:` requires a value and puts it in `$OPTARG`. After the loop, run `shift "$((OPTIND - 1))"` to leave only operands. Set `OPTIND=1` before parsing a new argument list.
