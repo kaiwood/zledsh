@@ -470,7 +470,7 @@ impl<'a> Invocation<'a> {
                 Statement::For { name, words, body } => {
                     let items = match words {
                         Some(words) => match self.expand_words(words, &mut None) {
-                            Ok(items) => items,
+                            Ok(items) => items.into_iter().map(OsString::into_vec).collect(),
                             Err(error) => {
                                 report(&descriptors[2], &error);
                                 self.status = 2;
@@ -478,25 +478,12 @@ impl<'a> Invocation<'a> {
                                 continue;
                             }
                         },
-                        None => match self
-                            .args
-                            .iter()
-                            .cloned()
-                            .map(String::from_utf8)
-                            .collect::<Result<Vec<_>, _>>()
-                        {
-                            Ok(args) => args,
-                            Err(_) => {
-                                report(&descriptors[2], "expected UTF-8 loop values");
-                                self.status = 2;
-                                continue;
-                            }
-                        },
+                        None => self.args.clone(),
                     };
                     self.status = 0;
                     self.loop_depth += 1;
                     for item in items {
-                        if let Err(error) = self.assign_value(name, item) {
+                        if let Err(error) = self.assign_bytes(name, item) {
                             report(&descriptors[2], &error);
                             self.status = 2;
                             self.check_errexit();
@@ -1730,7 +1717,7 @@ impl<'a> Invocation<'a> {
     fn assign_array(&mut self, name: &str, words: &[Word], local: bool) -> Result<u8, String> {
         self.ensure_writable(name)?;
         let mut status = None;
-        let values = self.expand_words(words, &mut status)?;
+        let values = text_operands(&self.expand_words(words, &mut status)?)?;
         if local {
             self.save_local(name)?;
         }
@@ -2650,12 +2637,12 @@ impl<'a> Invocation<'a> {
         &mut self,
         words: &[Word],
         status: &mut Option<u8>,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<OsString>, String> {
         let mut fields = Vec::new();
         for word in words {
             self.expand_argument(word, status, &mut fields)?;
         }
-        text_operands(&fields)
+        Ok(fields)
     }
 
     fn expand_command_words(

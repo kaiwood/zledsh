@@ -393,3 +393,22 @@ f "$@"
     assert_eq!(output.stdout, b"<v\xff><><><v\xff><>");
     assert!(output.stderr.is_empty(), "{output:?}");
 }
+
+#[test]
+fn for_loops_keep_explicit_and_implicit_byte_values() {
+    use std::os::unix::ffi::OsStrExt;
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .env("VALUE", std::ffi::OsStr::from_bytes(b"v\xff *"))
+        .args([
+            "-c",
+            r#"for value in "$VALUE" ''; do /usr/bin/printf '<%s>' "$value"; done
+set -- "$VALUE" ''
+for value; do /usr/bin/printf '<%s>' "$value"; done"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"<v\xff *><><v\xff *><>");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
