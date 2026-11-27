@@ -412,3 +412,14 @@ for value; do /usr/bin/printf '<%s>' "$value"; done"#,
     assert_eq!(output.stdout, b"<v\xff *><><v\xff *><>");
     assert!(output.stderr.is_empty(), "{output:?}");
 }
+
+#[test]
+fn builtin_printf_preserves_percent_s_bytes_in_redirections_and_pipelines() {
+    use std::os::unix::ffi::OsStrExt;
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path()).env("VALUE", std::ffi::OsStr::from_bytes(b"v\xff"))
+        .args(["-c", "printf '<%s>' text \"$VALUE\" '' > result; /bin/cat result; printf '%s' \"$VALUE\" | /bin/cat"]).output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"<text><v\xff><>v\xff");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}

@@ -1195,7 +1195,7 @@ impl<'a> Invocation<'a> {
             }
             return;
         }
-        let text_args = if matches!(name, "exec" | "export" | "cd" | "set") {
+        let text_args = if matches!(name, "exec" | "export" | "cd" | "set" | "printf") {
             Vec::new()
         } else {
             match text_operands(args) {
@@ -1602,12 +1602,12 @@ impl<'a> Invocation<'a> {
             }
             "print" | "printf" => {
                 let text = if name == "print" {
-                    print(args)
+                    print(args).map(String::into_bytes)
                 } else {
-                    printf(args)
+                    printf(&argv[1..])
                 };
                 self.status = match text
-                    .and_then(|text| descriptors[1].write(&text).map_err(|e| e.to_string()))
+                    .and_then(|text| descriptors[1].write_bytes(&text).map_err(|e| e.to_string()))
                 {
                     Ok(()) => 0,
                     Err(error) => {
@@ -3776,32 +3776,33 @@ fn print(args: &[String]) -> Result<String, String> {
     Ok(output)
 }
 
-fn printf(args: &[String]) -> Result<String, String> {
+fn printf(args: &[OsString]) -> Result<Vec<u8>, String> {
     let Some((format, args)) = args.split_first() else {
         return Err("expected a format".into());
     };
-    let mut output = String::new();
+    let format = format.to_str().ok_or("expected a UTF-8 format")?;
+    let mut output = Vec::new();
     let mut args = args.iter();
     loop {
-        let mut format = format.chars();
+        let mut format = format.bytes();
         let mut consumes_arguments = false;
         while let Some(ch) = format.next() {
             match ch {
-                '%' => match format.next() {
-                    Some('%') => output.push('%'),
-                    Some('s') => {
+                b'%' => match format.next() {
+                    Some(b'%') => output.push(b'%'),
+                    Some(b's') => {
                         consumes_arguments = true;
                         if let Some(arg) = args.next() {
-                            output.push_str(arg);
+                            output.extend_from_slice(arg.as_bytes());
                         }
                     }
                     _ => return Err("only %s and %% are supported".into()),
                 },
-                '\\' => match format.next() {
-                    Some('n') => output.push('\n'),
-                    Some('r') => output.push('\r'),
-                    Some('t') => output.push('\t'),
-                    Some('\\') => output.push('\\'),
+                b'\\' => match format.next() {
+                    Some(b'n') => output.push(b'\n'),
+                    Some(b'r') => output.push(b'\r'),
+                    Some(b't') => output.push(b'\t'),
+                    Some(b'\\') => output.push(b'\\'),
                     _ => return Err("unsupported format escape".into()),
                 },
                 ch => output.push(ch),
