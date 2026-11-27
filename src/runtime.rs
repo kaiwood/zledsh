@@ -603,6 +603,16 @@ impl<'a> Invocation<'a> {
         self.traps.inherited = Some(snapshot);
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub(crate) fn watches_input_signals(&self) -> bool {
+        self.traps.has_signal_actions()
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub(crate) fn dispatch_idle_traps(&mut self, input: &mut dyn BufRead) {
+        self.dispatch_traps(input, &self.persistent_fds.clone());
+    }
+
     fn dispatch_traps(&mut self, input: &mut dyn BufRead, descriptors: &Descriptors) {
         if self.running_trap || self.exited || self.agent_command() {
             return;

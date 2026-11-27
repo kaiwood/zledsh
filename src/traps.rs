@@ -105,6 +105,13 @@ pub(crate) struct Traps {
 }
 
 impl Traps {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn has_signal_actions(&self) -> bool {
+        self.actions
+            .iter()
+            .any(|(&signal, action)| signal != 0 && !action.is_empty())
+    }
+
     pub fn get(&self, signal: libc::c_int) -> Option<&str> {
         self.actions
             .get(&signal)

@@ -146,3 +146,31 @@ fn interactive_exec_keeps_earlier_redirect_after_later_failure() {
     assert_eq!(std::fs::read(tty.home().join("kept")).unwrap(), b"1\n");
     tty.finish();
 }
+
+#[test]
+fn idle_trap_runs_without_a_keypress_and_preserves_the_draft() {
+    let mut tty = Terminal::start("signal> ", &[], |home| {
+        executable(
+            &home.join("shell-pid"),
+            "#!/bin/sh\nprintf '%s\\n' \"$PPID\" > pid\n",
+        );
+    });
+    tty.expect("signal> ");
+    tty.send("trap 'printf \"idle-trap:%s\\n\" \"$?\"' USR1; ./shell-pid; false\n");
+    tty.expect("\x1b[?2004hsignal> ");
+    let pid = std::fs::read_to_string(tty.home().join("pid"))
+        .unwrap()
+        .trim()
+        .parse::<libc::pid_t>()
+        .unwrap();
+    let draft = "printf '%s\\n' 'first\nsecond'";
+    tty.send(&format!("\x1b[200~{draft}\x1b[201~"));
+    tty.expect("second'");
+    assert_eq!(unsafe { libc::kill(pid, libc::SIGUSR1) }, 0);
+    tty.expect("\r\nidle-trap:1\r\n");
+    tty.expect("second'");
+    tty.send("\n");
+    tty.expect("\r\nfirst\r\nsecond\r\n");
+    tty.expect("signal> ");
+    tty.finish();
+}

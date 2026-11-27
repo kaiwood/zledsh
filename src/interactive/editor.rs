@@ -267,6 +267,19 @@ fn read_keys(
         let mut screen =
             completion_menu::Screen::new(input_prompt, &display_draft(&line[..cursor]));
         match key {
+            Key::Trap => {
+                screen.clear(echo)?;
+                echo.write_all(b"\r\n")?;
+                echo.flush()?;
+                set_attributes(cooked)?;
+                shell.dispatch_idle_traps(input);
+                if shell.exited {
+                    return Ok(Line::End);
+                }
+                set_attributes(raw)?;
+                echo.write_all(b"\r\n")?;
+                screen = completion_menu::Screen::new(input_prompt, "").at_start();
+            }
             Key::Byte(b'\n' | b'\r') => {
                 if cursor != line.len() {
                     screen.draw(echo, &line, line.len(), None)?;
@@ -551,6 +564,7 @@ enum Key {
     LastArgument,
     ExternalEdit,
     Ignored,
+    Trap,
 }
 
 impl Key {
@@ -564,9 +578,12 @@ impl Key {
 }
 
 fn read_key(input: &mut impl BufRead, shell: &mut Invocation<'_>) -> io::Result<Option<Key>> {
-    match read_editor_byte(input, shell)? {
+    if wait_for_input(shell)? {
+        return Ok(Some(Key::Trap));
+    }
+    match read_key_byte(input)? {
         Some(27) => read_escape(input).map(Some),
-        Some(24) => Ok(Some(if read_editor_byte(input, shell)? == Some(5) {
+        Some(24) => Ok(Some(if read_key_byte(input)? == Some(5) {
             Key::ExternalEdit
         } else {
             Key::Ignored
@@ -668,6 +685,12 @@ fn search_history<'a>(
                 echo.write_all(b"\x1b[H\x1b[2J")?;
                 echo.write_all(header.as_bytes())?;
                 continue;
+            }
+            Key::Trap => {
+                return Ok(Some(SearchExit {
+                    selected: None,
+                    next: key,
+                }));
             }
             Key::Byte(7) => {
                 return Ok(Some(SearchExit {
@@ -880,26 +903,37 @@ fn visible_text(bytes: &[u8], keep_newlines: bool) -> String {
     visible
 }
 
-fn read_editor_byte(
-    input: &mut impl BufRead,
-    shell: &mut Invocation<'_>,
-) -> io::Result<Option<u8>> {
-    if let Some(jobs) = &mut shell.foreground {
-        while jobs.has_live_jobs() {
-            let mut fd = libc::pollfd {
-                fd: TTY,
-                events: libc::POLLIN,
-                revents: 0,
-            };
-            match unsafe { libc::poll(&mut fd, 1, 100) } {
-                0 => jobs.refresh()?,
-                -1 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => continue,
-                -1 => return Err(io::Error::last_os_error()),
-                _ => break,
+// A bounded poll while a trap or job is active avoids the race between
+// checking the pending flags and blocking on the terminal. No signal handler
+// runs shell code, and the idle path without traps or jobs still blocks.
+fn wait_for_input(shell: &mut Invocation<'_>) -> io::Result<bool> {
+    loop {
+        if crate::traps::pending().is_some() {
+            return Ok(true);
+        }
+        let jobs = shell
+            .foreground
+            .as_mut()
+            .filter(|jobs| jobs.has_live_jobs());
+        if jobs.is_none() && !shell.watches_input_signals() {
+            return Ok(false);
+        }
+        let mut fd = libc::pollfd {
+            fd: TTY,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        match unsafe { libc::poll(&mut fd, 1, 100) } {
+            0 => {
+                if let Some(jobs) = &mut shell.foreground {
+                    jobs.refresh()?;
+                }
             }
+            -1 if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted => continue,
+            -1 => return Err(io::Error::last_os_error()),
+            _ => return Ok(crate::traps::pending().is_some()),
         }
     }
-    read_key_byte(input)
 }
 
 pub(super) fn read_key_byte(input: &mut impl BufRead) -> io::Result<Option<u8>> {

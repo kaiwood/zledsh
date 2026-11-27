@@ -1,0 +1,7 @@
+# Shell signals and job control
+
+[POSIX.1-2024 §2.12](https://pubs.opengroup.org/onlinepubs/9799919799/utilities/V3_chap02.html#tag_19_12) requires caught traps to wait until a foreground utility has completed. In contrast, a trapped signal interrupts the `wait` builtin with status greater than 128, and the trap runs immediately afterward. The order of multiple pending traps is unspecified. [`trap`](https://pubs.opengroup.org/onlinepubs/9799919799/utilities/V3_chap02.html#trap) requires `EXIT` on normal termination; running it on a default fatal signal is optional and zledsh does not do so. Native subshells reset caught actions and retain ignored signals. A trap action preserves the previous status unless it exits the shell.
+
+The editor checks the pending flags before blocking, on an interrupted poll, and at most every 100 ms while signal handlers or live jobs are active. The signal handler still only sets atomic flags. Trap actions run with the terminal in cooked mode; the editor then restores its mode and redraws the draft. An interrupted history search returns to the original draft. No wakeup descriptor is needed or inherited by a child.
+
+Plain script input and the `read` builtin still use restartable reads, so caught actions can be deferred until command processing resumes. The foreground process collector retries interrupted waits intentionally; background `wait` instead checks for a pending trap between nonblocking collections and leaves the job available for a later wait. Optional job-control modes and notification behavior are unchanged.
