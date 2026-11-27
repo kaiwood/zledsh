@@ -142,6 +142,7 @@ fn run_shell(
             } else if instruction.trim().is_empty() {
                 eprintln!("Shell prompt instruction required after ?");
             } else if let Some(editor) = &editor {
+                history.record(&source);
                 let context = ShellContext::current(last_command.as_ref());
                 let program = invocation.variable("ZLEDSH_ASSISTANT_EXEC");
                 if let Some(program) = program.filter(|_| chatgpt.is_none() && !connect_chatgpt) {
@@ -151,15 +152,15 @@ fn run_shell(
                         (instruction.trim(), &context),
                         invocation,
                         input,
+                        &mut history,
                     )?;
                 } else if matching_identity() {
-                    let number = history.next;
                     let mut shell = AgentShell {
                         invocation,
                         transcript: transcript.as_mut(),
                         last_command: &mut last_command,
                         draft: &mut pending_draft,
-                        command_number: number,
+                        history: &mut history,
                     };
                     match ask_chatgpt(
                         editor,
@@ -240,7 +241,7 @@ struct AgentShell<'a, 'invocation> {
     transcript: Option<&'a mut Transcript>,
     last_command: &'a mut Option<LastCommand>,
     draft: &'a mut String,
-    command_number: usize,
+    history: &'a mut History,
 }
 
 impl AgentShell<'_, '_> {
@@ -267,7 +268,7 @@ impl AgentShell<'_, '_> {
             },
             Err(error) => return Ok(json!({"error": error.message()})),
         };
-        let prompt = crate::prompt::render(self.invocation, false, self.command_number);
+        let prompt = crate::prompt::render(self.invocation, false, self.history.next);
         writeln!(terminal, "{prompt}{command}")?;
         terminal.flush()?;
         if let Some(capture) = &mut self.transcript {
@@ -275,6 +276,7 @@ impl AgentShell<'_, '_> {
             capture.begin(transcript::input_pending())?;
         }
         self.invocation.run_agent_command(pipeline);
+        self.history.record(&command);
         let output = match &mut self.transcript {
             Some(capture) => capture.finish_agent()?,
             None => None,
@@ -376,6 +378,7 @@ fn ask(
     (instruction, context): (&str, &ShellContext),
     invocation: &mut Invocation<'_>,
     input: &mut impl BufRead,
+    history: &mut History,
 ) -> io::Result<String> {
     use crate::assistant::Turn;
     set_attributes(&editor.editor)?;
@@ -398,6 +401,7 @@ fn ask(
                     compound: None,
                 };
                 invocation.run_pipeline(&[command], input);
+                history.record(&format!("cd {}", crate::runtime::quote_value(&directory)));
             }
             show_answer(&answer);
             Ok(draft)
@@ -1431,6 +1435,10 @@ mod tests {
         let path = work.path().join("foo.txt");
         let command = format!("/usr/bin/touch '{}'", path.display());
         let mut invocation = Invocation::new("zledsh", &[]);
+        invocation
+            .run_source("unset HISTFILE", &mut io::empty())
+            .unwrap();
+        let mut history = History::new(&invocation);
         let mut draft = String::new();
         let mut last_command = None;
         let mut shell = AgentShell {
@@ -1438,7 +1446,7 @@ mod tests {
             transcript: None,
             last_command: &mut last_command,
             draft: &mut draft,
-            command_number: 1,
+            history: &mut history,
         };
         let mut display = BeforeExecution {
             path: &path,
@@ -1470,6 +1478,7 @@ mod tests {
         );
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
         assert_eq!(last_command.unwrap().source, command);
+        assert_eq!(history.entries().collect::<Vec<_>>(), [&command]);
     }
 
     struct BeforeExecution<'a> {

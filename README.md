@@ -138,7 +138,7 @@ At the `zledsh` prompt:
 - **Ctrl+X Ctrl+E** opens the draft in `VISUAL`, `EDITOR`, or `vi` (an executable name or path, not a shell command). Saving returns the text to the prompt without running it. A failed or interrupted editor keeps the original draft. Private drafts never go to the external editor.
 - Bracketed paste inserts text into the draft without running it. **Ctrl+_** undoes edits to the current draft, including a paste; undo does not carry across prompts or recalled history entries.
 
-History stays in memory unless you set `HISTFILE` before the first prompt, for example with `export HISTFILE="$HOME/.zledsh_history"` in `~/.zledshrc`. `HISTSIZE` defaults to 512. Unsafe history files are left untouched. Use `history pause` before entering sensitive text and `history resume` afterward. Pausing clears saved cuts and disables search, saving cuts, and yanking. It does not erase earlier history or hide input from terminal scrollback.
+History stays in memory unless you set `HISTFILE` before the first prompt, for example with `export HISTFILE="$HOME/.zledsh_history"` in `~/.zledshrc`. `HISTSIZE` defaults to 512. Submitted `?` requests and commands run by the agent are separate history entries, in order. Prepared drafts are only recorded if you submit them. Unsafe history files are left untouched. Use `history pause` before entering sensitive text and `history resume` afterward. Pausing clears saved cuts and disables search, saving cuts, and yanking. It does not erase earlier history or hide input from terminal scrollback.
 
 ### Try ChatGPT subscription sign-in
 

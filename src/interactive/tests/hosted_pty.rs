@@ -38,6 +38,7 @@ fn hosted_turns_in_a_real_terminal() {
             ("HOME", work.path().to_str().unwrap()),
             ("TERM", "xterm"),
             ("PROMPT", "test> "),
+            ("HISTFILE", "history.jsonl"),
         ])
         .env(CHILD, "1")
         .env_remove("ENV")
@@ -76,6 +77,31 @@ fn hosted_turns_in_a_real_terminal() {
         wait_for(&mut reader, "fixture pending\r\n")?;
         writer.write_all(b"\x03")?;
         wait_for(&mut reader, "turn cancelled\r\ntest> ")?;
+        let saved = fs::read_to_string(work.path().join("history.jsonl"))?;
+        let entries = saved
+            .lines()
+            .map(|line| serde_json::from_str::<(usize, String)>(line).unwrap().1)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entries,
+            [
+                "? create a file",
+                "touch foo.txt",
+                "? write to that file",
+                "printf bar > foo.txt",
+                "? cat the file",
+                "cat foo.txt",
+                "? memory cleared",
+                "? wait",
+            ]
+        );
+        writer.write_all(b"\x12? cat the file")?;
+        wait_for(
+            &mut reader,
+            "(reverse-i-search)`? cat the file': ? cat the file",
+        )?;
+        writer.write_all(b"\x07")?;
+        wait_for(&mut reader, "test> ")?;
         writer.write_all(b"exit\n")?;
         wait_for(&mut reader, "1 passed")?;
         Ok(())

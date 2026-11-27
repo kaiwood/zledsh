@@ -18,7 +18,7 @@ esac
         );
         fs::write(
             home.join(".zledshrc"),
-            "ZLEDSH_ASSISTANT_EXEC=\"$HOME/provider\"\n",
+            "ZLEDSH_ASSISTANT_EXEC=\"$HOME/provider\"\nHISTFILE=\"$HOME/history.jsonl\"\n",
         )
         .unwrap();
     });
@@ -56,6 +56,20 @@ esac
         b"draft"
     );
     assert!(!marker.exists());
+    let saved = fs::read_to_string(tty.home().join("history.jsonl")).unwrap();
+    let entries = saved
+        .lines()
+        .map(|line| serde_json::from_str::<(usize, String)>(line).unwrap().1)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entries,
+        [
+            "? waiting",
+            "? make a draft",
+            "cd 'moved'",
+            "printf draft > marker-edited"
+        ]
+    );
     tty.finish();
 }
 

@@ -3228,7 +3228,7 @@ fn direct_name(mut argv: &[String]) -> Option<&str> {
     None
 }
 
-fn quote_value(value: &str) -> String {
+pub(crate) fn quote_value(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
