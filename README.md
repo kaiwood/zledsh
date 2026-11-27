@@ -75,6 +75,10 @@ Use `zledsh -n ./script` to check syntax without running commands, expanding wor
 
 `set -e` (also `set -o errexit` or `zledsh -e`) exits on an unhandled command failure. It does not exit merely because a condition, a negated pipeline, or a non-final command in an `&&`/`||` list fails. Pipeline failures use the current `pipefail` setting. Turn it off with `set +e`.
 
+Use `set -v` (`set -o verbose`) to echo shell input to stderr as it is read. Use `set -x` (`set -o xtrace`) to trace expanded commands on stderr before running them. The trace starts with `PS4` (default `+ `). Turn the options off with `set +v` and `set +x`.
+
+Verbose input and traces can reveal secrets in terminal scrollback and explicit redirections, even while history is paused. zledsh does not add diagnostic output to history and drops agent output snapshots that overlap its own or its native workers’ diagnostic writes. This does not redact ordinary command output or traces from independently launched shells.
+
 Use `readonly name=value` to protect a shell variable from reassignment or `unset`. `export name` can still export the existing value. `readonly -p` lists the protected variables.
 
 Prefix a command with an assignment to override a variable for that command, for example `LC_ALL=C sort names.txt`. The value is temporary for ordinary commands and functions. A direct special builtin such as `:` or `export` keeps the assignment in the current shell.
