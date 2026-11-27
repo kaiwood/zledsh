@@ -203,7 +203,7 @@ struct PipelineVariables {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-struct Substitution {
+struct WorkerState {
     diagnostic_marker: Option<std::path::PathBuf>,
     task: WorkerTask,
     options: ShellOptions,
@@ -938,12 +938,7 @@ impl<'a> Invocation<'a> {
         shell.exported = state.exported;
         shell.readonly = state.readonly;
         shell.unset = state.unset;
-        let mut descriptors = inherited_descriptors();
-        for (fd, stream) in descriptors[..3].iter_mut().enumerate() {
-            if closed & (1 << fd) != 0 {
-                *stream = Descriptor::Closed;
-            }
-        }
+        let descriptors = worker_descriptors(closed);
         shell.run_pipeline_with_descriptors(std::slice::from_ref(command), input, &descriptors);
         Ok(shell.finish(input, Ok(shell.status)))
     }
@@ -2760,7 +2755,7 @@ impl<'a> Invocation<'a> {
     }
 
     fn run_worker(state: impl Read, closed: Option<u8>) -> Result<u8, String> {
-        let saved: Substitution =
+        let saved: WorkerState =
             serde_json::from_reader(state).map_err(|_| "invalid shell worker state")?;
         let mut shell = Invocation::new(&saved.name, &saved.args);
         shell.options = saved.options;
@@ -2781,12 +2776,7 @@ impl<'a> Invocation<'a> {
         shell.status = saved.status;
         shell.inherited_background_pid = saved.last_background_pid;
         if let Some(closed) = closed {
-            let mut descriptors = inherited_descriptors();
-            for (fd, descriptor) in descriptors[..3].iter_mut().enumerate() {
-                if (closed & (1 << fd)) != 0 {
-                    *descriptor = Descriptor::Closed;
-                }
-            }
+            let descriptors = worker_descriptors(closed);
             shell.persistent_fds = descriptors.clone();
             let mut input = BufReader::with_capacity(1, process::Stdin);
             match saved.task {
@@ -2868,8 +2858,8 @@ impl<'a> Invocation<'a> {
         Some(crate::completion::run_callback(command).unwrap_or_default())
     }
 
-    fn worker_state(&self, task: WorkerTask) -> Substitution {
-        Substitution {
+    fn worker_state(&self, task: WorkerTask) -> WorkerState {
+        WorkerState {
             diagnostic_marker: self.diagnostic_marker.clone(),
             task,
             options: self.options,
@@ -3650,6 +3640,16 @@ type Descriptors = [Descriptor; crate::SHELL_FDS];
 
 fn inherited_descriptors() -> Descriptors {
     std::array::from_fn(|fd| Descriptor::Inherited(fd as RawFd))
+}
+
+fn worker_descriptors(closed: u8) -> Descriptors {
+    let mut descriptors = inherited_descriptors();
+    for (fd, stream) in descriptors[..3].iter_mut().enumerate() {
+        if closed & (1 << fd) != 0 {
+            *stream = Descriptor::Closed;
+        }
+    }
+    descriptors
 }
 
 fn closed_stdio(streams: &Descriptors) -> u8 {
