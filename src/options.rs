@@ -5,6 +5,7 @@ pub(crate) struct ShellOptions {
     pub errexit: bool,
     pub pipefail: bool,
     pub noglob: bool,
+    pub noexec: bool,
     pub nounset: bool,
     pub globstar: bool,
     pub noclobber: bool,
@@ -18,6 +19,7 @@ impl ShellOptions {
             "errexit" => self.errexit = enabled,
             "pipefail" => self.pipefail = enabled,
             "globstar" => self.globstar = enabled,
+            "noexec" => self.noexec = enabled,
             "nounset" => self.nounset = enabled,
             "noglob" => self.noglob = enabled,
             "noclobber" => self.noclobber = enabled,
@@ -33,6 +35,7 @@ impl ShellOptions {
             ("errexit", self.errexit),
             ("globstar", self.globstar),
             ("noclobber", self.noclobber),
+            ("noexec", self.noexec),
             ("noglob", self.noglob),
             ("nounset", self.nounset),
             ("pipefail", self.pipefail),
@@ -45,6 +48,7 @@ impl ShellOptions {
         match letter {
             'a' => self.allexport = enabled,
             'e' => self.errexit = enabled,
+            'n' => self.noexec = enabled,
             'u' => self.nounset = enabled,
             'f' => self.noglob = enabled,
             'C' => self.noclobber = enabled,
@@ -74,6 +78,9 @@ impl ShellOptions {
         }
         if self.interactive {
             letters.push('i');
+        }
+        if self.noexec {
+            letters.push('n');
         }
         if self.nounset {
             letters.push('u');

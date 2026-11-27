@@ -279,7 +279,7 @@ impl<'a> Invocation<'a> {
                 Err(ParseError::Incomplete(_)) => continue,
                 Err(error) => return Err(error.message().to_owned()),
             }
-            if self.interrupted() {
+            if self.exited || self.returned || self.loop_control.is_some() {
                 return Ok(());
             }
             pending.clear();
@@ -605,6 +605,9 @@ impl<'a> Invocation<'a> {
                 2
             }
         };
+        if self.parse_only() {
+            return self.status;
+        }
         self.dispatch_traps(input, &self.persistent_fds.clone());
         if let Some(action) = self.traps.take_exit() {
             self.exited = false;
@@ -822,12 +825,16 @@ impl<'a> Invocation<'a> {
         crate::pattern::TextPattern::compile(chars)
     }
 
+    fn parse_only(&self) -> bool {
+        self.options.noexec && !self.options.interactive
+    }
+
     fn interrupted(&self) -> bool {
-        self.exited || self.returned || self.loop_control.is_some()
+        self.parse_only() || self.exited || self.returned || self.loop_control.is_some()
     }
 
     fn next_iteration(&mut self) -> bool {
-        if self.exited || self.returned {
+        if self.parse_only() || self.exited || self.returned {
             return false;
         }
         match self.loop_control.take() {

@@ -1397,3 +1397,39 @@ printf '<%s>\n' "$absent"
         );
     }
 }
+
+#[test]
+fn noexec_checks_later_syntax_without_expansion_or_side_effects() {
+    let home = tempfile::tempdir().unwrap();
+    let script =
+        "printf '%s' \"$(printf unexpected > substitution)\" > redirect\n/bin/touch external\n";
+    let output = shell(home.path())
+        .args(["-n", "-c", script])
+        .output()
+        .unwrap();
+    assert_output(output, 0, "", "");
+    fs::write(home.path().join("bad"), format!("{script}if true; then\n")).unwrap();
+    for args in [
+        vec!["-n", "bad"],
+        vec![
+            "-c",
+            "printf 'before\\n'; while true; do set -n; done\nif true; then\n",
+        ],
+    ] {
+        let from_script = args[0] == "-n";
+        let output = shell(home.path()).args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert_eq!(
+            output.stdout,
+            if from_script {
+                b"".as_slice()
+            } else {
+                b"before\n"
+            }
+        );
+        assert!(!output.stderr.is_empty());
+    }
+    for path in ["substitution", "redirect", "external"] {
+        assert!(!home.path().join(path).exists(), "{path}");
+    }
+}
