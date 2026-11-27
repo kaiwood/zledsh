@@ -1442,13 +1442,18 @@ impl<'a> Invocation<'a> {
                     }
                 };
             }
-            "printf" => {
-                self.status = match printf(args)
+            "print" | "printf" => {
+                let text = if name == "print" {
+                    print(args)
+                } else {
+                    printf(args)
+                };
+                self.status = match text
                     .and_then(|text| descriptors[1].write(&text).map_err(|e| e.to_string()))
                 {
                     Ok(()) => 0,
                     Err(error) => {
-                        report(&descriptors[2], &format!("printf: {error}"));
+                        report(&descriptors[2], &format!("{name}: {error}"));
                         1
                     }
                 };
@@ -3275,6 +3280,7 @@ pub(crate) const BUILTINS: &[&str] = &[
     "readonly",
     "unset",
     "read",
+    "print",
     "printf",
     "fg",
     "alias",
@@ -3453,6 +3459,62 @@ fn read_from<T>(
 
 fn report(output: &Descriptor, message: &str) {
     let _ = output.write(&format!("zledsh: {message}\n"));
+}
+
+fn print(args: &[String]) -> Result<String, String> {
+    let mut args = args.iter().peekable();
+    let (mut newline, mut raw) = (true, false);
+    while let Some(option) = args.next_if(|arg| arg.starts_with('-') && arg.len() > 1) {
+        if option == "--" {
+            break;
+        }
+        for flag in option[1..].chars() {
+            match flag {
+                'n' => newline = false,
+                'r' => raw = true,
+                _ => return Err(format!("unsupported option: -{flag}")),
+            }
+        }
+    }
+    let mut output = String::new();
+    for (index, arg) in args.enumerate() {
+        if index != 0 {
+            output.push(' ');
+        }
+        if raw {
+            output.push_str(arg);
+            continue;
+        }
+        let mut chars = arg.chars();
+        while let Some(ch) = chars.next() {
+            if ch != '\\' {
+                output.push(ch);
+                continue;
+            }
+            let escaped = match chars.next() {
+                Some('a') => '\x07',
+                Some('b') => '\x08',
+                Some('c') => return Ok(output),
+                Some('e') => '\x1b',
+                Some('f') => '\x0c',
+                Some('n') => '\n',
+                Some('r') => '\r',
+                Some('t') => '\t',
+                Some('v') => '\x0b',
+                Some('\\') => '\\',
+                Some(other) => {
+                    output.push('\\');
+                    other
+                }
+                None => '\\',
+            };
+            output.push(escaped);
+        }
+    }
+    if newline {
+        output.push('\n');
+    }
+    Ok(output)
 }
 
 fn printf(args: &[String]) -> Result<String, String> {

@@ -27,6 +27,8 @@ PROMPT='%n@%m %~ ‹$(git_branch)› %# '
 
 If you already define `git_branch` and set `PROMPT`, just add `set -o promptsubst`. Keep the prompt assignment single-quoted so `$(git_branch)` runs when the prompt is drawn, not when it is assigned. This option enables parameter, arithmetic, and command expansion in `PROMPT` only. It is off by default: enable it only for a trusted prompt, since the commands run with your permissions.
 
+For a multiline `PROMPT`, put a real newline inside the single-quoted assignment, or concatenate `$'\n'` with the quoted template. A plain `\n` inside single quotes stays literal. Prompt helpers can use `print -n` to omit the trailing newline. `print` supports `-n`, `-r` (no escape processing), `--`, and common escapes such as `\n` and `\t`; other zsh options such as `-P` are not supported.
+
 With a multiline prompt, the line editor keeps the header in place while you edit the command. Press Ctrl+L to clear the screen and redraw the whole prompt.
 
 Save `pid=$!` after starting a background job, then use `wait "$pid"` to collect its exit status. `wait "$first" "$second"` collects both statuses and returns the second. `wait -n` collects one completed job, optionally restricted to the supplied job IDs or PIDs; it returns 127 when none are eligible. A stopped job is not finished: `wait` keeps waiting until it exits. The interactive shell prints completion notices before a prompt without consuming the status. Explicitly listing a completed job with `jobs %1` reports and consumes its status.

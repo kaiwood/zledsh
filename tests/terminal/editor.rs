@@ -822,3 +822,28 @@ fn fc_lists_numbered_history_and_respects_private_mode() {
     tty.expect("[private] fc> ");
     tty.finish();
 }
+
+#[test]
+fn prompt_function_prints_branch_above_command_line() {
+    let mut tty = Terminal::start("unused> ", &[("NO_COLOR", "1")], |home| {
+        executable(&home.join("git"), "#!/bin/sh\nprintf 'topic\\n'\n");
+        fs::write(
+            home.join(".zledshrc"),
+            r#"
+export PATH="$HOME:$PATH"
+set -o promptsubst
+git_branch() {
+    local branch
+    branch=$(git branch --show-current 2>/dev/null) || return 0
+    [[ -n $branch ]] && print -n "‹${branch}› "
+}
+export PROMPT='%F{10}%n@%m %F{12}%~ %F{11}$(git_branch)%f
+$ '
+"#,
+        )
+        .unwrap();
+    });
+    let output = tty.expect("‹topic› \r\n$ ");
+    assert!(!output.contains("zledsh:"), "{output:?}");
+    tty.finish();
+}

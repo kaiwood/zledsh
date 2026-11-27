@@ -1433,3 +1433,29 @@ fn noexec_checks_later_syntax_without_expansion_or_side_effects() {
         assert!(!home.path().join(path).exists(), "{path}");
     }
 }
+
+#[test]
+fn print_supports_no_newline_raw_text_and_redirection() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+print -n '‹main› '
+print next line
+print 'two\nlines' > saved
+/bin/cat saved
+print -rn -- '-literal\n'
+print '\cignored'
+print -P wrong
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        1,
+        "‹main› next line\ntwo\nlines\n-literal\\n",
+        "zledsh: print: unsupported option: -P\n",
+    );
+}
