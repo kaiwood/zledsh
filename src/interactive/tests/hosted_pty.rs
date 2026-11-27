@@ -146,10 +146,10 @@ fn respond(request: &Value, cancelled: &AtomicBool) -> Result<chatgpt::Reply, ch
         ]}});
         return chatgpt::Session::fixture_stream(&format!("data: {event}\n\n"), cancelled);
     }
-    let (command, tool, answer) = match prompt["question"].as_str().unwrap() {
-        "create a file" => ("touch foo.txt", "run_shell_command", "created"),
-        "write to that file" => ("printf bar > foo.txt", "run_shell_command", "wrote"),
-        "cat the file" => ("cat foo.txt", "display_shell_output", "unexpected recap"),
+    let (command, needs_followup, answer) = match prompt["question"].as_str().unwrap() {
+        "create a file" => ("touch foo.txt", true, "created"),
+        "write to that file" => ("printf bar > foo.txt", true, "wrote"),
+        "cat the file" => ("cat foo.txt", false, "unexpected recap"),
         "wait" => {
             eprintln!("fixture pending");
             while !cancelled.load(Ordering::Relaxed) {
@@ -160,13 +160,13 @@ fn respond(request: &Value, cancelled: &AtomicBool) -> Result<chatgpt::Reply, ch
         _ => panic!("unexpected request"),
     };
     let item = if input.last().unwrap()["type"] == "function_call_output" {
-        assert_ne!(tool, "display_shell_output");
+        assert!(needs_followup);
         let result: Value =
             serde_json::from_str(input.last().unwrap()["output"].as_str().unwrap()).unwrap();
         assert_eq!(result["exit_status"], 0);
         json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":answer}]})
     } else {
-        json!({"type":"function_call", "namespace":"shell", "name":tool, "call_id":"fixture_call", "arguments":json!({"command":command}).to_string()})
+        json!({"type":"function_call", "namespace":"shell", "name":"run_shell_command", "call_id":"fixture_call", "arguments":json!({"command":command,"needs_followup":needs_followup}).to_string()})
     };
     let event = json!({"type":"response.completed", "response": {"object":"response", "status":"completed", "output":[item]}});
     chatgpt::Session::fixture_stream(&format!("data: {event}\n\n"), cancelled)
