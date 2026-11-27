@@ -55,7 +55,7 @@ For `rbenv shell` and Tab completion, use `eval "$(rbenv init - bash)"` instead 
 
 ### Script with `zledsh`
 
-Run a script with `zledsh ./setup.zledsh arg1 arg2`. The script path becomes `$0`; its arguments become `$1`, `$2`, and so on. The script need not be executable, and its commands can still read from stdin. If the script file is missing, `zledsh` reports the error and exits with status 127 without reading stdin. Use `zledsh -- script-name` if the name starts with `-`. To read the script itself from stdin and pass it arguments, use `zledsh -s arg1 arg2 < setup.zledsh`.
+Run a script with `zledsh ./setup.zledsh arg1 arg2`. The script path becomes `$0`; its arguments become `$1`, `$2`, and so on. The script need not be executable, and its commands can still read from stdin. If the script file is missing, `zledsh` reports the error and exits with status 127 without reading stdin. Use `zledsh -- script-name` if the name starts with `-`. To read the script itself from stdin and pass it arguments, use `zledsh -s arg1 arg2 < setup.zledsh`. When reading commands from a pipe or terminal, `zledsh` enables blocking reads on stdin if needed; the descriptor stays in blocking mode after the shell exits.
 
 Use `set -- first "two words"` to replace the positional arguments without changing `$0`, or `set --` to clear them. `$-` shows the active single-letter shell flags, including `i` in an interactive shell.
 

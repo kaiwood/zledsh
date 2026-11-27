@@ -20,6 +20,32 @@ impl Read for Stdin {
     }
 }
 
+pub(crate) fn enable_blocking_stdin() -> io::Result<()> {
+    let fd = libc::STDIN_FILENO;
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        let error = io::Error::last_os_error();
+        return if error.raw_os_error() == Some(libc::EBADF) {
+            Ok(())
+        } else {
+            Err(error)
+        };
+    }
+    if flags & libc::O_NONBLOCK != 0 {
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        if unsafe { libc::fstat(fd, stat.as_mut_ptr()) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let fifo = unsafe { stat.assume_init() }.st_mode & libc::S_IFMT == libc::S_IFIFO;
+        if (fifo || unsafe { libc::isatty(fd) } == 1)
+            && unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn null_stdin() -> io::Result<()> {
     let null = std::fs::File::open("/dev/null")?;
     if unsafe { libc::dup2(null.as_raw_fd(), libc::STDIN_FILENO) } < 0 {

@@ -218,6 +218,7 @@ fn run_command(
         let mut invocation =
             runtime::Invocation::new(name.to_str().ok_or("command name must be UTF-8")?, &args);
         invocation.options = options;
+        process::enable_blocking_stdin().map_err(|error| error.to_string())?;
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             use std::io::IsTerminal;

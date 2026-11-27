@@ -1,5 +1,9 @@
 use std::io::{Seek, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
 use std::process::{Command, Output, Stdio};
+
+use std::time::{Duration, Instant};
 
 fn from_pipe(args: &[&str], input: &[u8]) -> Output {
     run_with_pipe(Command::new(env!("CARGO_BIN_EXE_zledsh")).args(args), input)
@@ -60,6 +64,50 @@ fn s_flag_reads_commands_from_stdin_and_treats_operands_as_arguments() {
             env!("CARGO_BIN_EXE_zledsh")
         )
     );
+    assert!(output.stderr.is_empty());
+}
+
+// POSIX.1-2024 sh: STDIN (enable blocking reads on a FIFO).
+#[test]
+fn stdin_mode_clears_nonblocking_on_an_empty_fifo() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("input");
+    let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let reader = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&path)
+        .unwrap();
+    let mut writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_zledsh"))
+        .arg("-s")
+        .current_dir(dir.path())
+        .env_clear()
+        .env("HOME", dir.path())
+        .stdin(reader.try_clone().unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let blocking = loop {
+        if unsafe { libc::fcntl(reader.as_raw_fd(), libc::F_GETFL) } & libc::O_NONBLOCK == 0 {
+            break true;
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    if blocking {
+        writer.write_all(b"printf 'ready\\n'\n").unwrap();
+    }
+    drop(writer);
+    let output = child.wait_with_output().unwrap();
+    assert!(blocking, "stdin remained nonblocking: {output:?}");
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"ready\n");
     assert!(output.stderr.is_empty());
 }
 
