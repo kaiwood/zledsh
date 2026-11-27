@@ -76,21 +76,27 @@ pub fn launch() -> ExitCode {
     }
 }
 
+fn inherited_worker_state(value: &str) -> Option<File> {
+    let fd = value.parse::<RawFd>().ok()?;
+    if fd < SHELL_FDS as RawFd || !process::inherited_descriptor(fd) {
+        return None;
+    }
+    // SAFETY: the launcher reserved and passed this inherited fd for worker state.
+    Some(unsafe { File::from_raw_fd(fd) })
+}
+
 fn run_subshell(mut args: impl Iterator<Item = OsString>) -> Result<u8, String> {
-    let mut number = || {
-        args.next()
-            .and_then(|value| value.to_str()?.parse::<RawFd>().ok())
-    };
-    let Some(closed @ 0..=7) = number() else {
+    let closed = args
+        .next()
+        .and_then(|value| value.to_str()?.parse::<RawFd>().ok());
+    let Some(closed @ 0..=7) = closed else {
         return Err("invalid subshell descriptor mask".into());
     };
-    let Some(fd) =
-        number().filter(|&fd| fd >= SHELL_FDS as RawFd && process::inherited_descriptor(fd))
-    else {
-        return Err("missing subshell worker state".into());
-    };
-    // SAFETY: the launcher passes an inherited state descriptor owned by the worker.
-    runtime::Invocation::run_subshell(unsafe { File::from_raw_fd(fd) }, closed as u8)
+    let state = args
+        .next()
+        .and_then(|value| inherited_worker_state(value.to_str()?))
+        .ok_or("missing subshell worker state")?;
+    runtime::Invocation::run_subshell(state, closed as u8)
 }
 
 fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
@@ -113,14 +119,9 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
         eprintln!("zledsh: {name}: not available in a pipeline stage");
         return 1.into();
     }
-    let Ok(state_fd) = state_fd.parse::<RawFd>() else {
+    let Some(state) = inherited_worker_state(state_fd) else {
         return 2.into();
     };
-    if state_fd < SHELL_FDS as RawFd || !process::inherited_descriptor(state_fd) {
-        return 2.into();
-    }
-    // The launcher reserved this inherited descriptor for the worker state.
-    let state = unsafe { File::from_raw_fd(state_fd) };
     let command = syntax::Command {
         words: args
             .into_iter()
