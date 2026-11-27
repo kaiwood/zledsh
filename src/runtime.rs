@@ -1027,6 +1027,7 @@ impl<'a> Invocation<'a> {
                     | "set"
                     | "readonly"
                     | "umask"
+                    | "ulimit"
                     | "pushd"
                     | "popd"
                     | "dirs"
@@ -1232,6 +1233,23 @@ impl<'a> Invocation<'a> {
                         report(&descriptors[2], &format!("trap: {error}"));
                         self.special_builtin_error(direct_special);
                         2
+                    }
+                };
+            }
+            "ulimit" => {
+                self.status = match crate::ulimit::run(args).and_then(|output| {
+                    if output.is_empty() {
+                        Ok(())
+                    } else {
+                        descriptors[1]
+                            .write(&output)
+                            .map_err(|error| error.to_string())
+                    }
+                }) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        report(&descriptors[2], &format!("ulimit: {error}"));
+                        1
                     }
                 };
             }
@@ -1995,6 +2013,7 @@ impl<'a> Invocation<'a> {
                         | "set"
                         | "readonly"
                         | "umask"
+                        | "ulimit"
                         | "pushd"
                         | "popd"
                         | "dirs"
@@ -3191,7 +3210,7 @@ pub(crate) const BUILTINS: &[&str] = &[
     "exit", "exec", "cd", "pwd", "pushd", "popd", "dirs", "export", "readonly", "unset", "read",
     "printf", "fg", "alias", "unalias", "jobs", "bg", "wait", "command", ":", "true", "false",
     "eval", "break", "continue", ".", "source", "local", "set", "shift", "getopts", "umask",
-    "trap", "return", "complete", "compgen",
+    "trap", "return", "complete", "compgen", "ulimit",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {

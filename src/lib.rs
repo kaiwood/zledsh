@@ -33,6 +33,7 @@ mod terminal_modes;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod transcript;
 mod traps;
+mod ulimit;
 mod umask;
 
 use std::{

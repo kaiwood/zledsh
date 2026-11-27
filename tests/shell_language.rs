@@ -1332,3 +1332,29 @@ NAMED=enabled
         "",
     );
 }
+
+#[test]
+fn ulimit_reports_and_changes_process_local_limits() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+ulimit -S -f 128
+ulimit -f
+( ulimit -f 64; ulimit -S -f; ulimit -H -f )
+ulimit -S -f
+"$0" -c 'ulimit -f'
+ulimit -S -f 18446744073709551615 || printf 'rejected\n'
+"#,
+            env!("CARGO_BIN_EXE_zledsh"),
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        0,
+        "128\n64\n64\n128\n128\nrejected\n",
+        "zledsh: ulimit: invalid limit\n",
+    );
+}

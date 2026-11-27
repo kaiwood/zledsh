@@ -63,6 +63,8 @@ Use `set -o pipefail` (or start with `zledsh -o pipefail`) to report the rightmo
 
 `set -C` (also `set -o noclobber` or `zledsh -C`) makes `>` refuse to overwrite an existing regular file. Use `>|` to overwrite deliberately; `>>` still appends. `set +C` restores the default.
 
+Use `ulimit -a` to inspect resource limits or `ulimit -S -n 128` to set a soft limit on open files in the current shell and its children. Use `-H` for a hard limit; lowering it is generally irreversible for an unprivileged shell. `ulimit -t` (the XSI CPU limit) is not supported.
+
 `set -a` (`set -o allexport`) exports variables as they are assigned. `set +a` stops automatically exporting new assignments without clearing existing export attributes.
 
 `set -e` (also `set -o errexit` or `zledsh -e`) exits on an unhandled command failure. It does not exit merely because a condition, a negated pipeline, or a non-final command in an `&&`/`||` list fails. Pipeline failures use the current `pipefail` setting. Turn it off with `set +e`.
