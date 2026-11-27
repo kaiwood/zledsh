@@ -1209,6 +1209,11 @@ fn word(input: &mut Source<'_>) -> ParseResult<Word> {
         let assignment_only = started;
         if ch == '\\' && input.peek() == Some(&'\n') {
             input.next();
+            if input.peek().is_none() {
+                return Err(ParseError::Incomplete(
+                    "expected input after line continuation",
+                ));
+            }
             word.bare = false;
             continue;
         }

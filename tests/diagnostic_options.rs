@@ -128,3 +128,33 @@ wait
         );
     }
 }
+
+#[test]
+fn diagnostic_flags_reach_shell_workers_and_verbose_keeps_physical_continuations() {
+    let home = tempfile::tempdir().unwrap();
+    let source = concat!(
+        "printf '%s\\n' \\\n",
+        "continued\n",
+        "eval 'printf \"flags:%s\\n\" \"$-\"'\n",
+        "( printf 'worker:%s\\n' \"$-\" )\n",
+    );
+    expect(
+        run(home.path(), &["-v", "-c", source], ""),
+        "continued\nflags:v\nworker:v\n",
+        concat!(
+            "printf '%s\\n' \\\ncontinued\n",
+            "eval 'printf \"flags:%s\\n\" \"$-\"'\n",
+            "printf \"flags:%s\\n\" \"$-\"",
+            "( printf 'worker:%s\\n' \"$-\" )\n",
+        ),
+    );
+    expect(
+        run(
+            home.path(),
+            &["-x", "-c", "( printf '%s\\n' \"$-\" )\n"],
+            "",
+        ),
+        "x\n",
+        "+ printf '%s\\n' x\n",
+    );
+}
