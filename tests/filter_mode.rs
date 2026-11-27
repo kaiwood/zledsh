@@ -70,7 +70,11 @@ printf '%s\n' '{"answer":"  3 2 1\n\nlast line without newline","draft":"touch d
 fn assert_failure(output: Output, message: &str) {
     assert_eq!(output.status.code(), Some(2), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
-    assert!(String::from_utf8(output.stderr).unwrap().contains(message));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(message),
+        "expected stderr to contain {message:?}, got {stderr:?}"
+    );
 }
 
 #[test]
@@ -97,7 +101,7 @@ fn validates_arguments_and_input_before_starting_provider() {
 }
 
 #[test]
-fn handles_empty_results_and_provider_failures() {
+fn preserves_an_empty_provider_answer() {
     let home = tempfile::tempdir().unwrap();
     provider(home.path(), r#"printf '%s' '{"answer":""}'"#);
     let output = run(home.path(), &["--filter", "delete everything"], b"", true);
@@ -106,17 +110,21 @@ fn handles_empty_results_and_provider_failures() {
         output.stdout.is_empty() && output.stderr.is_empty(),
         "{output:?}"
     );
+}
 
-    provider(home.path(), r#"printf '%s' '{"answer":"partial"}'; exit 1"#);
-    assert_failure(
-        run(home.path(), &["--filter", "a"], b"", true),
-        "provider failed",
-    );
-    provider(home.path(), r#"printf '%s' '{"draft":"only a draft"}'"#);
-    assert_failure(
-        run(home.path(), &["--filter", "a"], b"", true),
-        "answer string",
-    );
+#[test]
+fn reports_provider_failures() {
+    for (body, message) in [
+        (
+            r#"printf '%s' '{"answer":"partial"}'; exit 1"#,
+            "provider failed",
+        ),
+        (r#"printf '%s' '{"draft":"only a draft"}'"#, "answer string"),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        provider(home.path(), body);
+        assert_failure(run(home.path(), &["--filter", "a"], b"", true), message);
+    }
 }
 
 #[test]
