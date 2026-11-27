@@ -47,17 +47,18 @@ impl TextPattern {
         ))
     }
 
-    pub(crate) fn trim<'a>(&self, value: &'a str, prefix: bool, longest: bool) -> &'a str {
+    pub(crate) fn trim<'a>(&self, value: &'a [u8], prefix: bool, longest: bool) -> &'a [u8] {
         let mut result = value;
-        // At character boundaries only, so a returned slice remains UTF-8.
-        for boundary in value
-            .char_indices()
-            .map(|(i, _)| i)
-            .chain(std::iter::once(value.len()))
-        {
+        // Keep valid UTF-8 scalars together; each ill-formed byte remains a unit.
+        let boundaries =
+            std::iter::once(0).chain(crate::read_fields::units(value).scan(0, |offset, unit| {
+                *offset += unit.map_or(1, char::len_utf8);
+                Some(*offset)
+            }));
+        for boundary in boundaries {
             let (left, right) = value.split_at(boundary);
             let (candidate, retained) = if prefix { (left, right) } else { (right, left) };
-            if self.matches(candidate.as_bytes()) {
+            if self.matches(candidate) {
                 result = retained;
                 if prefix != longest {
                     break;

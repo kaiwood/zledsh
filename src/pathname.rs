@@ -1,4 +1,4 @@
-use std::ffi::OsString;
+use std::ffi::{CString, OsString};
 
 use crate::pattern::{self, TextPattern};
 use std::fs;
@@ -136,8 +136,19 @@ pub(crate) fn expand(Pattern(components): Pattern) -> Vec<OsString> {
     if check_literal_tail {
         paths.retain(|path| fs::symlink_metadata(path).is_ok());
     }
-    // POSIX/C collation order. Per-shell locale selection is not implemented.
-    paths.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+    // Locale collation with a bytewise tie-breaker, including for invalid names.
+    let mut keyed: Vec<_> = paths
+        .into_iter()
+        .map(|path| {
+            let key = CString::new(path.as_bytes()).expect("filesystem paths do not contain NUL");
+            (path, key)
+        })
+        .collect();
+    keyed.sort_unstable_by(|(left, lkey), (right, rkey)| {
+        crate::locale::Locale::collate(lkey, rkey)
+            .then_with(|| left.as_bytes().cmp(right.as_bytes()))
+    });
+    let mut paths: Vec<_> = keyed.into_iter().map(|(path, _)| path).collect();
     if used_recursion {
         paths.dedup();
     }

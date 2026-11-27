@@ -87,26 +87,85 @@ fn pathname_expansion_passes_exact_filename_bytes_in_each_execution_scope() {
     }
 }
 
+fn installed_utf8_locale() -> Option<&'static str> {
+    ["en_US.UTF-8", "C.UTF-8"].into_iter().find(|name| {
+        let name = std::ffi::CString::new(*name).unwrap();
+        let locale =
+            unsafe { libc::newlocale(libc::LC_CTYPE_MASK, name.as_ptr(), std::ptr::null_mut()) };
+        if locale.is_null() {
+            return false;
+        }
+        unsafe { libc::freelocale(locale) };
+        true
+    })
+}
+
 #[test]
-fn locale_selection_does_not_change_current_matching_or_path_order() {
+fn locale_selects_character_matching_with_lc_all_precedence() {
     let home = tempfile::tempdir().unwrap();
-    for name in ["z.txt", "a.txt", "é.txt"] {
-        fs::write(home.path().join(name), "").unwrap();
-    }
-    for locale in ["C", "en_US.UTF-8"] {
-        let output = shell(home.path())
-            .env("LC_ALL", locale)
-            .args([
-                "-c",
-                r#"
+    fs::write(home.path().join("é.txt"), "").unwrap();
+    let source = r#"
 case é in [[:alpha:]]) printf 'alpha\n';; *) printf 'not-alpha\n';; esac
-printf '%s\n' *.txt
-"#,
-            ])
+printf '%s\n' ?.txt
+word=étail
+printf '%s\n' "${word#?}"
+"#;
+    for (all, expected) in [
+        ("C", "not-alpha\n?.txt\nétail\n"),
+        ("", "alpha\né.txt\ntail\n"),
+    ] {
+        let locale = installed_utf8_locale();
+        if all.is_empty() && locale.is_none() {
+            eprintln!("no supported UTF-8 locale installed");
+            continue;
+        }
+        let output = shell(home.path())
+            .env("LC_ALL", all)
+            .env("LC_CTYPE", locale.unwrap_or("C"))
+            .args(["-c", source])
             .output()
             .unwrap();
         assert!(output.status.success(), "{output:?}");
-        assert_eq!(output.stdout, "not-alpha\na.txt\nz.txt\né.txt\n".as_bytes());
+        assert_eq!(output.stdout, expected.as_bytes(), "LC_ALL={all:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+    }
+}
+
+#[test]
+fn pathname_order_follows_collation_category() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let home = tempfile::tempdir().unwrap();
+    let names = "z.txt\na.txt\né.txt\n";
+    for name in names.lines() {
+        fs::write(home.path().join(name), "").unwrap();
+    }
+    for locale in [Some("C"), installed_utf8_locale()] {
+        let Some(locale) = locale else {
+            eprintln!("no supported non-C collation fixture");
+            continue;
+        };
+        let mut sort = Command::new("/usr/bin/sort")
+            .env_clear()
+            .env("LC_COLLATE", locale)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        sort.stdin
+            .take()
+            .unwrap()
+            .write_all(names.as_bytes())
+            .unwrap();
+        let expected = sort.wait_with_output().unwrap();
+        assert!(expected.status.success());
+        let output = shell(home.path())
+            .env("LC_COLLATE", locale)
+            .args(["-c", "printf '%s\\n' *.txt"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, expected.stdout, "{locale}");
         assert!(output.stderr.is_empty(), "{output:?}");
     }
 }

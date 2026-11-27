@@ -798,9 +798,9 @@ impl<'a> Invocation<'a> {
                 let left = value(self, left)?;
                 match operator.as_str() {
                     "=" | "==" | "!=" => {
-                        let matched = self
-                            .expand_pattern(right, &mut None)?
-                            .matches(left.as_bytes());
+                        let pattern = self.expand_pattern(right, &mut None)?;
+                        let matched =
+                            self.with_matching_locale(|| pattern.matches(left.as_bytes()));
                         Ok(matched != (operator == "!="))
                     }
                     "=~" => {
@@ -850,18 +850,38 @@ impl<'a> Invocation<'a> {
         word: &Word,
         clauses: &[CaseClause],
     ) -> Result<Option<usize>, String> {
-        let word = self.expand(word, &mut None)?.join(" ");
+        let word = self
+            .expand_parts(word, &mut None, false, false)?
+            .into_iter()
+            .map(field_bytes)
+            .collect::<Vec<_>>()
+            .join(&b' ');
         for (index, clause) in clauses.iter().enumerate() {
             for pattern in &clause.patterns {
-                if self
-                    .expand_pattern(pattern, &mut None)?
-                    .matches(word.as_bytes())
-                {
+                let pattern = self.expand_pattern(pattern, &mut None)?;
+                if self.with_matching_locale(|| pattern.matches(&word)) {
                     return Ok(Some(index));
                 }
             }
         }
         Ok(None)
+    }
+
+    fn matching_locale(&self) -> Option<crate::locale::Locale> {
+        let setting = |category| {
+            ["LC_ALL", category, "LANG"]
+                .iter()
+                .find_map(|name| self.variable(name).filter(|value| !value.is_empty()))
+                .unwrap_or_else(|| "C".into())
+        };
+        crate::locale::Locale::new(&setting("LC_CTYPE"), &setting("LC_COLLATE"))
+    }
+
+    fn with_matching_locale<T>(&self, operation: impl FnOnce() -> T) -> T {
+        match self.matching_locale() {
+            Some(locale) => locale.with(operation),
+            None => operation(),
+        }
     }
 
     fn expand_pattern(
@@ -2693,7 +2713,7 @@ impl<'a> Invocation<'a> {
                     if self.agent_command() {
                         return Err("pathname expansion must be submitted by the user".into());
                     }
-                    let matches = crate::pathname::expand(pattern);
+                    let matches = self.with_matching_locale(|| crate::pathname::expand(pattern));
                     if !matches.is_empty() {
                         output.extend(matches);
                         continue;
@@ -3168,9 +3188,11 @@ impl<'a> Invocation<'a> {
                     let value = self
                         .require_parameter(name, self.parameter_value(name))?
                         .unwrap_or_default();
-                    let value = value.to_string_lossy();
+                    let value = value.into_vec();
                     let pattern = self.expand_pattern(pattern, status)?;
-                    field.push(fragment(pattern.trim(&value, *prefix, *longest).into()));
+                    let trimmed =
+                        self.with_matching_locale(|| pattern.trim(&value, *prefix, *longest));
+                    field.push(bytes(trimmed.to_vec()));
                 }
                 Part::Length(name) => {
                     let length = self
@@ -3198,14 +3220,19 @@ impl<'a> Invocation<'a> {
                             ParameterOperator::Assign | ParameterOperator::Error
                         ) {
                             let expanded = match default {
-                                Some(word) => self.expand(word, status)?.join(" "),
-                                None => String::new(),
+                                Some(word) => self
+                                    .expand_parts(word, status, false, false)?
+                                    .into_iter()
+                                    .map(field_bytes)
+                                    .collect::<Vec<_>>()
+                                    .join(&b' '),
+                                None => Vec::new(),
                             };
                             if *operator == ParameterOperator::Error {
                                 let description = if expanded.is_empty() {
                                     "parameter is unset or null".into()
                                 } else {
-                                    expanded
+                                    String::from_utf8_lossy(&expanded).into_owned()
                                 };
                                 return Err(self.parameter_error(format!("{name}: {description}")));
                             }
@@ -3214,10 +3241,10 @@ impl<'a> Invocation<'a> {
                                     "{name}: cannot assign to this parameter"
                                 )));
                             }
-                            if let Err(error) = self.assign_value(name, expanded.clone()) {
+                            if let Err(error) = self.assign_bytes(name, expanded.clone()) {
                                 return Err(self.parameter_error(error));
                             }
-                            field.push(fragment(expanded));
+                            field.push(bytes(expanded));
                             continue;
                         }
                         if let Some(default) =
@@ -3228,10 +3255,10 @@ impl<'a> Invocation<'a> {
                             if !field_splitting && expanded.len() > 1 {
                                 let text = expanded
                                     .into_iter()
-                                    .map(field_text)
-                                    .collect::<Result<Vec<_>, _>>()?
-                                    .join(" ");
-                                field.push(fragment(text));
+                                    .map(field_bytes)
+                                    .collect::<Vec<_>>()
+                                    .join(&b' ');
+                                field.push(bytes(text));
                                 continue;
                             }
                             let mut expanded = expanded.into_iter();

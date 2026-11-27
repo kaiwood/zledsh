@@ -18,6 +18,7 @@ mod getopts;
 mod history;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod interactive;
+mod locale;
 mod options;
 mod pathname;
 mod pattern;
