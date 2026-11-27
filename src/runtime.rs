@@ -1196,7 +1196,7 @@ impl<'a> Invocation<'a> {
             self.status = 2;
             return;
         }
-        let text_args = if matches!(name, "exec" | "export") {
+        let text_args = if matches!(name, "exec" | "export" | "cd") {
             Vec::new()
         } else {
             match text_operands(args) {
@@ -1394,7 +1394,7 @@ impl<'a> Invocation<'a> {
             }
             "cd" | "pwd" => {
                 let result = if name == "cd" {
-                    self.change_directory(args, Some(&descriptors[1]))
+                    self.change_directory(&argv[1..], Some(&descriptors[1]))
                 } else {
                     self.print_directory(args, &descriptors[1])
                 };
@@ -1874,7 +1874,7 @@ impl<'a> Invocation<'a> {
             return Err("expected pwd [-L|-P]".into());
         }
         self.working_directory(physical)
-            .and_then(|path| output.write(&format!("{}\n", path.display())))
+            .and_then(|path| write_path(output, &path))
             .map_err(|error| error.to_string())
     }
 
@@ -1888,7 +1888,7 @@ impl<'a> Invocation<'a> {
 
     fn change_directory(
         &mut self,
-        args: &[String],
+        args: &[OsString],
         output: Option<&Descriptor>,
     ) -> Result<(), String> {
         use std::path::{Path, PathBuf};
@@ -1913,9 +1913,9 @@ impl<'a> Invocation<'a> {
         let mut path = PathBuf::from(operand);
         let mut print = print_previous;
         if !operand.is_absolute() && !operand.starts_with(".") && !operand.starts_with("..") {
-            if let Some(cdpath) = self.variable("CDPATH") {
-                for entry in cdpath.split(':') {
-                    let candidate = Path::new(entry).join(operand);
+            if let Some(cdpath) = self.variable_os("CDPATH") {
+                for entry in cdpath.as_bytes().split(|&byte| byte == b':') {
+                    let candidate = Path::new(OsStr::from_bytes(entry)).join(operand);
                     if candidate.is_dir() {
                         path = candidate;
                         print |= !entry.is_empty();
@@ -1931,19 +1931,17 @@ impl<'a> Invocation<'a> {
             Some(crate::directory::normalize(&previous.join(&path)).map_err(chdir_error)?)
         };
         std::env::set_current_dir(logical.as_deref().unwrap_or(&path)).map_err(chdir_error)?;
-        self.assign_value("OLDPWD", previous.to_string_lossy().into_owned())?;
+        self.assign_bytes("OLDPWD", previous.into_os_string().into_vec())?;
         self.exported.insert("OLDPWD".into());
         let current = match logical.map_or_else(std::env::current_dir, Ok) {
             Ok(path) => path,
             Err(error) if require_pwd && physical => return Err(error.to_string()),
             Err(_) => return Ok(()),
         };
-        self.assign_value("PWD", current.to_string_lossy().into_owned())?;
+        self.assign_bytes("PWD", current.as_os_str().as_bytes().to_vec())?;
         self.exported.insert("PWD".into());
         if let Some(output) = output.filter(|_| print) {
-            output
-                .write(&format!("{}\n", current.display()))
-                .map_err(|error| error.to_string())?;
+            write_path(output, &current).map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -1995,7 +1993,7 @@ impl<'a> Invocation<'a> {
                 stack.insert(1, absolute.to_string_lossy().into_owned());
             }
             ("pushd", [path]) => {
-                self.change_directory(&["--".into(), path.clone()], None)?;
+                self.change_directory(&["--".into(), path.into()], None)?;
                 stack.insert(
                     0,
                     self.working_directory(false)
@@ -2020,7 +2018,7 @@ impl<'a> Invocation<'a> {
             .map_err(|error| error.to_string())?
             != std::path::Path::new(&stack[0])
         {
-            self.change_directory(&["--".into(), stack[0].clone()], None)?;
+            self.change_directory(&["--".into(), stack[0].as_str().into()], None)?;
         }
         self.directory_stack = stack[1..].to_vec();
         output
@@ -3416,17 +3414,21 @@ fn worker_payload(state: &impl serde::Serialize) -> io::Result<File> {
     Ok(payload)
 }
 
-fn directory_options(mut args: &[String], cd: bool) -> Result<(bool, bool, &[String]), String> {
+fn directory_options<T: AsRef<OsStr>>(
+    mut args: &[T],
+    cd: bool,
+) -> Result<(bool, bool, &[T]), String> {
     let mut physical = false;
     let mut require_pwd = false;
     while let [first, tail @ ..] = args {
+        let first = first.as_ref();
         if first == "--" {
             return Ok((physical, require_pwd, tail));
         }
-        if first == "-" || !first.starts_with('-') {
+        if first == "-" || !first.as_bytes().starts_with(b"-") {
             break;
         }
-        for flag in first[1..].chars() {
+        for flag in first.to_str().ok_or("expected UTF-8 directory options")?[1..].chars() {
             match flag {
                 'L' => physical = false,
                 'P' => physical = true,
@@ -3683,17 +3685,27 @@ impl Descriptor {
     }
 
     fn write(&self, text: &str) -> io::Result<()> {
+        self.write_bytes(text.as_bytes())
+    }
+
+    fn write_bytes(&self, bytes: &[u8]) -> io::Result<()> {
         match self {
             Self::Inherited(1) => {
                 let mut output = io::stdout().lock();
-                output.write_all(text.as_bytes())?;
+                output.write_all(bytes)?;
                 output.flush()
             }
-            Self::Inherited(2) => io::stderr().lock().write_all(text.as_bytes()),
-            Self::File(file) => file.as_ref().write_all(text.as_bytes()),
-            _ => File::from(self.duplicate()?).write_all(text.as_bytes()),
+            Self::Inherited(2) => io::stderr().lock().write_all(bytes),
+            Self::File(file) => file.as_ref().write_all(bytes),
+            _ => File::from(self.duplicate()?).write_all(bytes),
         }
     }
+}
+
+fn write_path(output: &Descriptor, path: &std::path::Path) -> io::Result<()> {
+    let mut line = path.as_os_str().as_bytes().to_vec();
+    line.push(b'\n');
+    output.write_bytes(&line)
 }
 
 fn read_from<T>(

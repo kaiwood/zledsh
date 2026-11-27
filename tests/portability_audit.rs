@@ -337,3 +337,37 @@ fn here_inputs_preserve_expanded_bytes() {
     assert_eq!(result.stdout, b"<a\xff b>\na\xff b\n");
     assert!(result.stderr.is_empty(), "{result:?}");
 }
+
+#[test]
+fn directory_builtins_keep_native_path_bytes() {
+    use std::os::unix::ffi::OsStrExt;
+    let home = tempfile::tempdir().unwrap();
+    let base = home.path().canonicalize().unwrap();
+    let child = base.join(std::ffi::OsStr::from_bytes(b"dir\xff"));
+    if let Err(error) = fs::create_dir(&child) {
+        #[cfg(target_os = "macos")]
+        if error.raw_os_error() == Some(libc::EILSEQ) {
+            eprintln!("filesystem rejected non-UTF-8 directory: {error}");
+            return;
+        }
+        panic!("{error}");
+    }
+    let output = shell(&base)
+        .env("DEST", &child)
+        .args([
+            "-c",
+            r#"
+cd -L "$DEST" && pwd -L && pwd -P && /usr/bin/printenv PWD && cd - && /usr/bin/printenv OLDPWD
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let mut expected = Vec::new();
+    for path in [&child, &child, &child, &base, &child] {
+        expected.extend_from_slice(path.as_os_str().as_bytes());
+        expected.push(b'\n');
+    }
+    assert_eq!(output.stdout, expected);
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
