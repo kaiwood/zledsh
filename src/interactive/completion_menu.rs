@@ -32,6 +32,13 @@ impl<'a> Screen<'a> {
         screen
     }
 
+    pub(super) fn clear(&self, echo: &mut impl Write) -> io::Result<()> {
+        if self.old_row > 0 {
+            write!(echo, "\x1b[{}A", self.old_row.min(self.rows - 1))?;
+        }
+        echo.write_all(b"\r\x1b[J")
+    }
+
     pub(super) fn draw(
         self,
         echo: &mut impl Write,
@@ -44,10 +51,8 @@ impl<'a> Screen<'a> {
         let after = display(&line[cursor..]);
         let caret = self.position(&before, "");
         let end = self.position(&before, &after);
-        if self.old_row > 0 {
-            write!(echo, "\x1b[{}A", self.old_row.min(self.rows - 1))?;
-        }
-        write!(echo, "\r\x1b[J{}{before}{after}", self.prompt)?;
+        self.clear(echo)?;
+        write!(echo, "{}{before}{after}", self.prompt)?;
         let height = self.rows.saturating_sub(end.row + 1).min(12);
         let drawn = if height == 0 {
             0

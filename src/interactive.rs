@@ -747,6 +747,7 @@ fn read_keys(
                 continue;
             };
             history.refresh();
+            completion_menu::Screen::new(input_prompt, &line[..cursor]).clear(echo)?;
             let Some(result) = search_history(
                 input,
                 echo,
@@ -1144,11 +1145,12 @@ fn search_history<'a>(
         let direction = if backward { "reverse" } else { "forward" };
         let prompt = format!("({direction}-i-search)`{}': ", display(&query));
         let text = found.map_or("", |(_, text, _)| text);
-        redraw(echo, &prompt, text.as_bytes(), text.len())?;
+        write!(echo, "{prompt}{}", display(text.as_bytes()))?;
         echo.flush()?;
         let Some(key) = read_key(input, shell)? else {
             return Ok(None);
         };
+        completion_menu::Screen::new(&prompt, text.as_bytes()).clear(echo)?;
         let repeat = match key {
             Key::Byte(18 | 19) => {
                 backward = key == Key::Byte(18);

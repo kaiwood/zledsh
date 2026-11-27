@@ -479,6 +479,33 @@ fn reverse_search_cycles_matches_and_preserves_cancelled_draft() {
 }
 
 #[test]
+fn reverse_search_clears_wrapped_matches_when_updating_and_cancelling() {
+    let mut tty = Terminal::start("header\nsearch> ", &[], |_| {});
+    tty.expect("header\r\nsearch> ");
+    let word = format!("wrapped-{}", "x".repeat(90));
+    for value in ["wrapped-short", &word] {
+        tty.send(&format!("/bin/echo {value}\n"));
+        tty.expect(&format!("\r\n{value}\r\n"));
+        tty.expect("search> ");
+    }
+    tty.send("/bin/echo draft\x12wrapped");
+    tty.expect(&format!("(reverse-i-search)`wrapped': /bin/echo {word}"));
+    tty.send("\x12");
+    let update = tty.expect("(reverse-i-search)`wrapped': /bin/echo wrapped-short");
+    assert!(update.contains("\x1b[1A\r\x1b[J"), "{update:?}");
+    tty.send("\x7f");
+    tty.expect(&format!("(reverse-i-search)`wrappe': /bin/echo {word}"));
+    tty.send("\x07");
+    let restored = tty.expect("search> /bin/echo draft");
+    assert!(restored.contains("\x1b[1A\r\x1b[J"), "{restored:?}");
+    assert!(!restored.contains("header"), "{restored:?}");
+    tty.send("\n");
+    tty.expect("\r\ndraft\r\n");
+    tty.expect("search> ");
+    tty.finish();
+}
+
+#[test]
 fn delete_and_control_history_navigation_preserve_the_draft() {
     let mut tty = Terminal::start("keys> ", &[], |_| {});
     tty.expect("keys> ");
