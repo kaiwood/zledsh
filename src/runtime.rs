@@ -315,10 +315,12 @@ impl<'a> Invocation<'a> {
             }
             pending.clear();
         }
-        if let Err(error) = self.parse(&pending) {
-            return Err(error.message().to_owned());
+        if pending.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        self.parse(&pending)
+            .map(|_| ())
+            .map_err(|error| error.message().to_owned())
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
