@@ -73,10 +73,6 @@ fn hosted_turns_in_a_real_terminal() {
         wait_for(&mut reader, "\r\ntest> ")?;
         writer.write_all(b"? memory cleared\n")?;
         wait_for(&mut reader, "cleared\r\ntest> ")?;
-        writer.write_all(b"? wait\n")?;
-        wait_for(&mut reader, "fixture pending\r\n")?;
-        writer.write_all(b"\x03")?;
-        wait_for(&mut reader, "turn cancelled\r\ntest> ")?;
         let saved = fs::read_to_string(work.path().join("history.jsonl"))?;
         let entries = saved
             .lines()
@@ -92,7 +88,6 @@ fn hosted_turns_in_a_real_terminal() {
                 "? cat the file",
                 "cat foo.txt",
                 "? memory cleared",
-                "? wait",
             ]
         );
         writer.write_all(b"\x12? cat the file")?;
@@ -146,6 +141,12 @@ fn hosted_turns_in_a_real_terminal() {
         wait_for(&mut reader, "\r\nclean\r\ntest> ")?;
         writer.write_all(b"? clean output returns\n")?;
         wait_for(&mut reader, "clean snapshot received\r\ntest> ")?;
+        // A cancelled worker may still be unwinding after the prompt returns.
+        writer.write_all(b"? wait\n")?;
+        wait_for(&mut reader, "fixture pending\r\n")?;
+        writer.write_all(b"\x03")?;
+        wait_for(&mut reader, "turn cancelled\r\ntest> ")?;
+        assert!(fs::read_to_string(work.path().join("history.jsonl"))?.contains("\"? wait\""));
         writer.write_all(b"exit\n")?;
         wait_for(&mut reader, "1 passed")?;
         Ok(())
