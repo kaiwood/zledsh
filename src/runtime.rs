@@ -2175,8 +2175,8 @@ impl<'a> Invocation<'a> {
         if background && self.agent_command() {
             return Err(io::Error::other("agent cannot start background jobs"));
         }
-        let (path, env) = self.execution_environment();
-        let mut stdin = if background || self.agent_command() {
+        let agent_env = self.agent_command().then(|| self.execution_environment());
+        let mut stdin = if background || agent_env.is_some() {
             Descriptor::File(Rc::new(File::open("/dev/null")?))
         } else {
             original[0].clone()
@@ -2195,7 +2195,7 @@ impl<'a> Invocation<'a> {
             let mut descriptors = original.clone();
             descriptors[0] = stdin;
             descriptors[1] = stdout;
-            if !self.agent_command() {
+            let Some((path, env)) = &agent_env else {
                 let child = if let Some(compound) = &command.compound {
                     self.subshell_stage(std::slice::from_ref(compound.as_ref()), &descriptors)?
                 } else {
@@ -2206,7 +2206,7 @@ impl<'a> Invocation<'a> {
                     Descriptor::File(Rc::new(File::from(read)))
                 });
                 continue;
-            }
+            };
             // Assistant commands must pass the existing checks before launch;
             // never send an unchecked assistant command to a shell worker.
             if command.compound.is_some() {
@@ -2306,11 +2306,11 @@ impl<'a> Invocation<'a> {
                 ];
                 args.extend(argv);
                 (
-                    process::Exec::new(&args, &path, env.clone())?,
+                    process::Exec::new(&args, path, env.clone())?,
                     Some(state_fd),
                 )
             } else {
-                (process::Exec::new(&argv, &path, env.clone())?, None)
+                (process::Exec::new(&argv, path, env.clone())?, None)
             };
             let mut child = stage(exec, &name, &descriptors)?;
             child.worker_state = worker_state;
