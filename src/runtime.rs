@@ -143,7 +143,7 @@ pub(crate) struct Invocation<'a> {
     getopts_offset: usize,
     persistent_fds: Descriptors,
     fd_versions: [u64; crate::SHELL_FDS],
-    variables: HashMap<String, String>,
+    variables: HashMap<String, Vec<u8>>,
     arrays: HashMap<String, BTreeMap<usize, String>>,
     aliases: HashMap<String, String>,
     functions: HashMap<String, Script>,
@@ -173,7 +173,7 @@ pub(crate) struct Invocation<'a> {
 }
 
 struct SavedVariable {
-    value: Option<String>,
+    value: Option<Vec<u8>>,
     array: Option<BTreeMap<usize, String>>,
     exported: bool,
     readonly: bool,
@@ -196,7 +196,7 @@ struct PipelineVariables {
     trap_snapshot: BTreeMap<libc::c_int, String>,
     directory_stack: Vec<String>,
     ignore_errexit: bool,
-    variables: HashMap<String, String>,
+    variables: HashMap<String, Vec<u8>>,
     exported: HashSet<String>,
     readonly: HashSet<String>,
     unset: HashSet<String>,
@@ -213,7 +213,7 @@ struct Substitution {
     name: String,
     args: Vec<Vec<u8>>,
     getopts_offset: usize,
-    variables: HashMap<String, String>,
+    variables: HashMap<String, Vec<u8>>,
     arrays: HashMap<String, BTreeMap<usize, String>>,
     aliases: HashMap<String, String>,
     functions: HashMap<String, Script>,
@@ -251,8 +251,8 @@ impl<'a> Invocation<'a> {
             persistent_fds: inherited_descriptors(),
             fd_versions: [0; crate::SHELL_FDS],
             variables: HashMap::from([
-                ("IFS".into(), DEFAULT_IFS.into()),
-                ("OPTIND".into(), "1".into()),
+                ("IFS".into(), DEFAULT_IFS.as_bytes().to_vec()),
+                ("OPTIND".into(), b"1".to_vec()),
             ]),
             arrays: HashMap::new(),
             aliases: HashMap::new(),
@@ -1025,7 +1025,7 @@ impl<'a> Invocation<'a> {
                 let [field] = fields.as_slice() else {
                     return Err("assignment must expand to one value".into());
                 };
-                let (name, _) = field.split_once('=').ok_or("expected an assignment")?;
+                let (name, value) = assignment_parts(field)?;
                 self.ensure_writable(name)?;
                 if temporary {
                     saved
@@ -1035,9 +1035,9 @@ impl<'a> Invocation<'a> {
                 if export_prefix {
                     self.exported.insert(name.into());
                 }
-                self.assign(field)?;
+                self.assign_bytes(name, value.to_vec())?;
                 if self.options.xtrace {
-                    assignments.push(field.clone());
+                    assignments.push(String::from_utf8_lossy(field).into_owned());
                 }
             }
             Ok(())
@@ -1176,7 +1176,7 @@ impl<'a> Invocation<'a> {
             self.status = 2;
             return;
         }
-        let text_args = if name == "exec" {
+        let text_args = if matches!(name, "exec" | "export") {
             Vec::new()
         } else {
             match text_operands(args) {
@@ -1463,8 +1463,13 @@ impl<'a> Invocation<'a> {
             }
             "export" => {
                 self.status = 0;
-                for arg in args {
-                    let name = arg.split_once('=').map_or(arg.as_str(), |(name, _)| name);
+                for arg in &argv[1..] {
+                    let bytes = arg.as_encoded_bytes();
+                    let boundary = bytes
+                        .iter()
+                        .position(|&byte| byte == b'=')
+                        .unwrap_or(bytes.len());
+                    let name = std::str::from_utf8(&bytes[..boundary]).unwrap_or_default();
                     if !valid_name(name) {
                         report(
                             &descriptors[2],
@@ -1473,10 +1478,12 @@ impl<'a> Invocation<'a> {
                         self.status = 2;
                         break;
                     }
-                    if let Err(error) = self.assign(arg) {
-                        report(&descriptors[2], &format!("export: {error}"));
-                        self.status = 2;
-                        break;
+                    if let Some(value) = bytes.get(boundary + 1..) {
+                        if let Err(error) = self.assign_bytes(name, value.to_vec()) {
+                            report(&descriptors[2], &format!("export: {error}"));
+                            self.status = 2;
+                            break;
+                        }
                     }
                     self.exported.insert(name.to_owned());
                 }
@@ -2026,13 +2033,13 @@ impl<'a> Invocation<'a> {
     fn set(&mut self, args: &[String], output: &Descriptor) -> Result<(), String> {
         if args.is_empty() {
             let mut variables: BTreeMap<_, _> = std::env::vars_os()
-                .filter_map(|(name, value)| {
-                    Some((name.into_string().ok()?, value.into_string().ok()?))
-                })
+                .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_vec())))
                 .filter(|(name, _)| valid_name(name) && !self.unset.contains(name))
                 .collect();
             variables.extend(self.variables.clone());
             for (name, value) in variables {
+                let value =
+                    String::from_utf8(value).map_err(|_| "set listing requires UTF-8 values")?;
                 let quoted = quote_value(&value);
                 output
                     .write(&format!("{name}={quoted}\n"))
@@ -2101,7 +2108,7 @@ impl<'a> Invocation<'a> {
             .collect();
         for (name, value) in &self.variables {
             if self.exported.contains(name) || env.contains_key(OsStr::new(name)) {
-                env.insert(name.into(), value.into());
+                env.insert(name.into(), OsString::from_vec(value.clone()));
             }
         }
         (path, env)
@@ -2567,6 +2574,10 @@ impl<'a> Invocation<'a> {
     }
 
     fn assign_value(&mut self, name: &str, value: String) -> Result<(), String> {
+        self.assign_bytes(name, value.into_bytes())
+    }
+
+    fn assign_bytes(&mut self, name: &str, value: Vec<u8>) -> Result<(), String> {
         self.ensure_writable(name)?;
         if name == "OPTIND" {
             self.getopts_offset = 0;
@@ -2579,13 +2590,17 @@ impl<'a> Invocation<'a> {
     }
 
     fn variable_os(&self, name: &str) -> Option<OsString> {
-        self.variables.get(name).map(OsString::from).or_else(|| {
-            if self.unset.contains(name) {
-                None
-            } else {
-                std::env::var_os(name)
-            }
-        })
+        self.variables
+            .get(name)
+            .cloned()
+            .map(OsString::from_vec)
+            .or_else(|| {
+                if self.unset.contains(name) {
+                    None
+                } else {
+                    std::env::var_os(name)
+                }
+            })
     }
 
     pub fn variable(&self, name: &str) -> Option<String> {
@@ -2629,7 +2644,7 @@ impl<'a> Invocation<'a> {
                 fields.extend(
                     self.expand_assignment(word, status)?
                         .into_iter()
-                        .map(OsString::from),
+                        .map(OsString::from_vec),
                 );
             } else {
                 self.expand_argument(word, status, &mut fields)?;
@@ -2767,7 +2782,7 @@ impl<'a> Invocation<'a> {
             .insert("COMP_WORDS".into(), words.into_iter().enumerate().collect());
         self.arrays.insert("COMPREPLY".into(), BTreeMap::new());
         self.variables
-            .insert("COMP_CWORD".into(), index.to_string());
+            .insert("COMP_CWORD".into(), index.to_string().into_bytes());
         self.arrays.remove("COMP_CWORD");
         let null = Descriptor::File(Rc::new(
             File::options()
@@ -2931,11 +2946,12 @@ impl<'a> Invocation<'a> {
         &mut self,
         word: &Word,
         status: &mut Option<u8>,
-    ) -> Result<Vec<String>, String> {
-        self.expand_parts(word, status, false, true)?
+    ) -> Result<Vec<Vec<u8>>, String> {
+        Ok(self
+            .expand_parts(word, status, false, true)?
             .into_iter()
-            .map(field_text)
-            .collect()
+            .map(field_bytes)
+            .collect())
     }
 
     fn evaluate_arithmetic(
@@ -3501,6 +3517,15 @@ fn is_special_builtin(name: &str) -> bool {
             | "trap"
             | "unset"
     )
+}
+
+fn assignment_parts(field: &[u8]) -> Result<(&str, &[u8]), String> {
+    let boundary = field
+        .iter()
+        .position(|&byte| byte == b'=')
+        .ok_or("expected an assignment")?;
+    let name = std::str::from_utf8(&field[..boundary]).map_err(|_| "invalid assignment name")?;
+    Ok((name, &field[boundary + 1..]))
 }
 
 fn text_operands(args: &[OsString]) -> Result<Vec<String>, String> {

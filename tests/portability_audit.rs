@@ -212,3 +212,16 @@ fn executable_format_failures_never_fall_back_to_an_interpreter() {
     assert!(output.stdout.is_empty() && output.stderr.is_empty());
     assert_eq!(fs::read(home.join("marker")).unwrap(), b"unexpected");
 }
+
+#[test]
+fn scalar_assignments_and_exports_preserve_native_values() {
+    use std::os::unix::ffi::OsStrExt;
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .env("INPUT", std::ffi::OsStr::from_bytes(b"a\xff b"))
+        .args(["-c", r#"first=$INPUT; export SECOND="$first"; ( /usr/bin/printenv SECOND ); /usr/bin/printf '<%s>' "$first""#])
+        .output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"a\xff b\n<a\xff b>");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
