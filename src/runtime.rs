@@ -1196,7 +1196,19 @@ impl<'a> Invocation<'a> {
             self.status = 2;
             return;
         }
-        let text_args = if matches!(name, "exec" | "export" | "cd") {
+        if !bypass_functions && !is_special_builtin(name) && self.functions.contains_key(name) {
+            if self.agent_command() {
+                report(
+                    &descriptors[2],
+                    "shell functions must be submitted by the user",
+                );
+                self.status = 2;
+            } else {
+                self.call_function(name, args, input, &descriptors);
+            }
+            return;
+        }
+        let text_args = if matches!(name, "exec" | "export" | "cd" | "set") {
             Vec::new()
         } else {
             match text_operands(args) {
@@ -1210,18 +1222,6 @@ impl<'a> Invocation<'a> {
             }
         };
         let args = text_args.as_slice();
-        if !bypass_functions && !is_special_builtin(name) && self.functions.contains_key(name) {
-            if self.agent_command() {
-                report(
-                    &descriptors[2],
-                    "shell functions must be submitted by the user",
-                );
-                self.status = 2;
-            } else {
-                self.call_function(name, args, input, &descriptors);
-            }
-            return;
-        }
         let direct_special = !bypass_functions && is_special_builtin(name);
         match name {
             ":" | "true" => self.status = 0,
@@ -1252,7 +1252,7 @@ impl<'a> Invocation<'a> {
                 self.status = self.set_locals(args, &descriptors[2]);
             }
             "set" => {
-                self.status = match self.set(args, &descriptors[1]) {
+                self.status = match self.set(&argv[1..], &descriptors[1]) {
                     Ok(()) => 0,
                     Err(error) => {
                         report(&descriptors[2], &format!("set: {error}"));
@@ -1668,7 +1668,7 @@ impl<'a> Invocation<'a> {
     fn call_function(
         &mut self,
         name: &str,
-        args: &[String],
+        args: &[impl AsRef<OsStr>],
         input: &mut dyn BufRead,
         descriptors: &Descriptors,
     ) {
@@ -1680,7 +1680,9 @@ impl<'a> Invocation<'a> {
         let body = self.functions[name].clone();
         let previous = std::mem::replace(
             &mut self.args,
-            args.iter().map(|arg| arg.as_bytes().to_vec()).collect(),
+            args.iter()
+                .map(|arg| arg.as_ref().as_bytes().to_vec())
+                .collect(),
         );
         self.locals.push(HashMap::new());
         self.script_depth += 1;
@@ -2048,7 +2050,7 @@ impl<'a> Invocation<'a> {
         status
     }
 
-    fn set(&mut self, args: &[String], output: &Descriptor) -> Result<(), String> {
+    fn set(&mut self, args: &[OsString], output: &Descriptor) -> Result<(), String> {
         if args.is_empty() {
             let mut variables: BTreeMap<_, _> = std::env::vars_os()
                 .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_vec())))
@@ -2068,11 +2070,14 @@ impl<'a> Invocation<'a> {
         let mut remaining = args;
         let mut options = self.options;
         while let [flag, rest @ ..] = remaining {
-            match flag.as_str() {
-                "-o" | "+o" => {
+            match flag.to_str() {
+                Some("-o" | "+o") => {
                     let enabled = flag == "-o";
                     if let Some((name, rest)) = rest.split_first() {
-                        options.set_named(name, enabled)?;
+                        options.set_named(
+                            name.to_str().ok_or("expected UTF-8 option name")?,
+                            enabled,
+                        )?;
                         remaining = rest;
                     } else {
                         for (name, active) in options.named() {
@@ -2086,15 +2091,18 @@ impl<'a> Invocation<'a> {
                         break;
                     }
                 }
-                "--" => {
+                Some("--") => {
                     self.args = rest.iter().map(|arg| arg.as_bytes().to_vec()).collect();
                     break;
                 }
-                value if value.len() > 1 && value.starts_with(['-', '+']) => {
+                Some(value) if value.len() > 1 && value.starts_with(['-', '+']) => {
                     for letter in value[1..].chars() {
                         options.set_short(letter, value.starts_with('-'))?;
                     }
                     remaining = rest;
+                }
+                None if flag.as_bytes().len() > 1 && flag.as_bytes().starts_with(b"-") => {
+                    return Err("expected UTF-8 option flags".into());
                 }
                 _ => {
                     self.args = remaining

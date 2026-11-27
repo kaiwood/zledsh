@@ -371,3 +371,25 @@ cd -L "$DEST" && pwd -L && pwd -P && /usr/bin/printenv PWD && cd - && /usr/bin/p
     assert_eq!(output.stdout, expected);
     assert!(output.stderr.is_empty(), "{output:?}");
 }
+
+#[test]
+fn function_calls_and_set_forward_byte_positionals() {
+    use std::os::unix::ffi::OsStrExt;
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .env("VALUE", std::ffi::OsStr::from_bytes(b"v\xff"))
+        .args([
+            "-c",
+            r#"
+f() { /usr/bin/printf '<%s>' "$@"; set -- "$2"; /usr/bin/printf '<%s>' "$1"; }
+set -- "$VALUE" ''
+f "$@"
+/usr/bin/printf '<%s>' "$@"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"<v\xff><><><v\xff><>");
+    assert!(output.stderr.is_empty(), "{output:?}");
+}
