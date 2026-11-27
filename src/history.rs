@@ -42,6 +42,85 @@ impl History {
         self.entries.iter().map(|(_, command)| command.as_str())
     }
 
+    pub(crate) fn list(&mut self, args: &[String]) -> Result<String, String> {
+        if self.paused {
+            return Err("history is paused".into());
+        }
+        let (mut list, mut numbers, mut reverse) = (false, true, false);
+        let mut args = args.iter().peekable();
+        while let Some(flag) = args.next_if(|arg| {
+            arg.starts_with('-') && arg.len() > 1 && !arg.as_bytes()[1].is_ascii_digit()
+        }) {
+            if flag == "--" {
+                break;
+            }
+            for option in flag[1..].chars() {
+                match option {
+                    'l' => list = true,
+                    'n' => numbers = false,
+                    'r' => reverse = true,
+                    _ => return Err("expected fc -l [-nr] [first [last]]".into()),
+                }
+            }
+        }
+        let (first, last) = (args.next(), args.next());
+        if !list || args.next().is_some() {
+            return Err("expected fc -l [-nr] [first [last]]".into());
+        }
+        self.refresh();
+        let len = self.entries.len();
+        if len == 0 {
+            return if first.is_none() {
+                Ok(String::new())
+            } else {
+                Err("no history entries".into())
+            };
+        }
+        let select = |selector: &str| -> Result<usize, String> {
+            let digits = selector.strip_prefix(['+', '-']).unwrap_or(selector);
+            if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                let number = digits
+                    .parse::<usize>()
+                    .map_err(|_| "history number is too large")?;
+                if number == 0 {
+                    return Err("history numbers must be nonzero".into());
+                }
+                return Ok(if selector.starts_with('-') {
+                    len.saturating_sub(number)
+                } else {
+                    self.entries
+                        .partition_point(|entry| entry.0 < number)
+                        .min(len - 1)
+                });
+            }
+            self.entries
+                .iter()
+                .rposition(|(_, command)| command.starts_with(selector))
+                .ok_or_else(|| "no matching history entry".into())
+        };
+        let first = first.map_or(Ok(len.saturating_sub(16)), |value| select(value))?;
+        let last = last.map_or(Ok(len - 1), |value| select(value))?;
+        reverse ^= first > last;
+        let entries = &self.entries[first.min(last)..=first.max(last)];
+        let mut output = String::new();
+        for index in 0..entries.len() {
+            let (number, command) = &entries[if reverse {
+                entries.len() - index - 1
+            } else {
+                index
+            }];
+            if numbers {
+                output.push_str(&number.to_string());
+            }
+            for line in command.split('\n') {
+                output.push('\t');
+                output.push_str(line);
+                output.push('\n');
+            }
+        }
+        Ok(output)
+    }
+
     pub fn control(&mut self, source: &str) -> bool {
         match source.trim() {
             "history pause" => self.paused = true,

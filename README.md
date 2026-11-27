@@ -148,6 +148,8 @@ At the `zledsh` prompt:
 
 History stays in memory unless you set `HISTFILE` before the first prompt, for example with `export HISTFILE="$HOME/.zledsh_history"` in `~/.zledshrc`. `HISTSIZE` defaults to 512. Submitted `?` requests and commands run by the agent are separate history entries, in order. Prepared drafts are only recorded if you submit them. Unsafe history files are left untouched. Use `history pause` before entering sensitive text and `history resume` afterward. Pausing clears saved cuts and disables search, saving cuts, and yanking. It does not erase earlier history or hide input from terminal scrollback.
 
+Use `fc -l` to list the last 16 entries, `fc -lnr` to omit numbers and reverse the order, or `fc -l -3 -1` for a range. Listing is available in the live interactive shell, not in pipeline or substitution workers, private mode, or agent commands. The listing is not included in the agent’s terminal-output snapshot. Editing and replay with `fc` are not implemented.
+
 ### Try ChatGPT subscription sign-in
 
 On Linux, browser sign-in requires `xdg-open` and a desktop browser. The first time, start `zledsh --chatgpt`, then continue in your browser with a ChatGPT account eligible for plan usage. Back at the `zledsh` prompt, try `? Say hello in one sentence`. No API key, Codex CLI, or local provider executable is needed. This uses [OpenAI’s Sign in with ChatGPT flow](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) and the [Responses API for ChatGPT plan usage](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference).

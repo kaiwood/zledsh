@@ -208,15 +208,23 @@ fn run_shell(
         if let Some(capture) = &mut capture {
             capture.begin(input_pending)?;
         }
+        invocation.listed_history = false;
         match parsed {
-            Ok(commands) => invocation.run(&commands, input),
+            Ok(commands) => {
+                invocation.interactive_history = Some(history);
+                invocation.run(&commands, input);
+                history = invocation
+                    .interactive_history
+                    .take()
+                    .expect("interactive history");
+            }
             Err(error) => {
                 eprintln!("zledsh: {}", error.message());
                 invocation.status = 2;
             }
         }
         let output = match capture {
-            Some(capture) => capture.finish()?,
+            Some(capture) => capture.finish()?.filter(|_| !invocation.listed_history),
             None => None,
         };
         history.record(&source);

@@ -102,6 +102,13 @@ fn hosted_turns_in_a_real_terminal() {
         )?;
         writer.write_all(b"\x07")?;
         wait_for(&mut reader, "test> ")?;
+        writer.write_all(b"fc -l 1 2\n")?;
+        wait_for(
+            &mut reader,
+            "1\t? create a file\r\n2\ttouch foo.txt\r\ntest> ",
+        )?;
+        writer.write_all(b"? listing stays local\n")?;
+        wait_for(&mut reader, "listing kept local\r\ntest> ")?;
         writer.write_all(b"exit\n")?;
         wait_for(&mut reader, "1 passed")?;
         Ok(())
@@ -169,6 +176,14 @@ fn respond(request: &Value, cancelled: &AtomicBool) -> Result<chatgpt::Reply, ch
     if prompt["question"] == "memory cleared" {
         let event = json!({"type":"response.completed", "response": {"object":"response", "status":"completed", "output":[
             {"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"cleared"}]}
+        ]}});
+        return chatgpt::Session::fixture_stream(&format!("data: {event}\n\n"), cancelled);
+    }
+    if prompt["question"] == "listing stays local" {
+        assert_eq!(prompt["context"]["last_command"], "fc -l 1 2");
+        assert!(prompt["context"]["last_output"].is_null());
+        let event = json!({"type":"response.completed", "response": {"object":"response", "status":"completed", "output":[
+            {"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"listing kept local"}]}
         ]}});
         return chatgpt::Session::fixture_stream(&format!("data: {event}\n\n"), cancelled);
     }

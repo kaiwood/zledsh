@@ -794,3 +794,31 @@ fn exit_trap_runs_when_leaving_an_interactive_shell() {
         b"interactive\n"
     );
 }
+
+#[test]
+fn fc_lists_numbered_history_and_respects_private_mode() {
+    let mut tty = Terminal::start("fc> ", &[], |_| {});
+    tty.expect("fc> ");
+    for source in ["printf 'first\\n'", "printf 'second\\n'"] {
+        tty.send(&format!("{source}\n"));
+        tty.expect("\x1b[?2004hfc> ");
+    }
+    tty.send("fc -l 1 2\n");
+    tty.expect("\r\n1\tprintf 'first\\n'\r\n2\tprintf 'second\\n'\r\n");
+    tty.expect("\x1b[?2004hfc> ");
+    tty.send("fc -ln -2 1\n");
+    tty.expect("\r\n\tprintf 'second\\n'\r\n\tprintf 'first\\n'\r\n");
+    tty.expect("\x1b[?2004hfc> ");
+    tty.send("fc -l 'printf' 2 > listed\n");
+    tty.expect("\x1b[?2004hfc> ");
+    assert_eq!(
+        fs::read_to_string(tty.home().join("listed")).unwrap(),
+        "2\tprintf 'second\\n'\n"
+    );
+    tty.send("history pause\n");
+    tty.expect("[private] fc> ");
+    tty.send("fc -l\n");
+    tty.expect("zledsh: fc: history is paused");
+    tty.expect("[private] fc> ");
+    tty.finish();
+}

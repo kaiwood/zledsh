@@ -116,6 +116,10 @@ fn split_field(field: Field, ifs: &str) -> Vec<Field> {
 
 pub(crate) struct Invocation<'a> {
     directory_stack: Vec<String>,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub interactive_history: Option<crate::history::History>,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub listed_history: bool,
     name: &'a str,
     args: Vec<String>,
     getopts_offset: usize,
@@ -216,6 +220,10 @@ impl<'a> Invocation<'a> {
     pub fn new(name: &'a str, args: &[String]) -> Self {
         Self {
             directory_stack: Vec::new(),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            interactive_history: None,
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            listed_history: false,
             name,
             args: args.to_vec(),
             getopts_offset: 0,
@@ -1035,6 +1043,7 @@ impl<'a> Invocation<'a> {
                     | "readonly"
                     | "umask"
                     | "ulimit"
+                    | "fc"
                     | "pushd"
                     | "popd"
                     | "dirs"
@@ -1240,6 +1249,26 @@ impl<'a> Invocation<'a> {
                         report(&descriptors[2], &format!("trap: {error}"));
                         self.special_builtin_error(direct_special);
                         2
+                    }
+                };
+            }
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            "fc" => {
+                self.status = match self
+                    .interactive_history
+                    .as_mut()
+                    .ok_or_else(|| "requires interactive shell history".to_owned())
+                    .and_then(|history| history.list(args))
+                    .and_then(|listing| {
+                        self.listed_history = true;
+                        descriptors[1]
+                            .write(&listing)
+                            .map_err(|error| error.to_string())
+                    }) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        report(&descriptors[2], &format!("fc: {error}"));
+                        1
                     }
                 };
             }
@@ -2021,6 +2050,7 @@ impl<'a> Invocation<'a> {
                         | "readonly"
                         | "umask"
                         | "ulimit"
+                        | "fc"
                         | "pushd"
                         | "popd"
                         | "dirs"
@@ -3234,10 +3264,45 @@ fn here_document_error(error: io::Error) -> String {
 }
 
 pub(crate) const BUILTINS: &[&str] = &[
-    "exit", "exec", "cd", "pwd", "pushd", "popd", "dirs", "export", "readonly", "unset", "read",
-    "printf", "fg", "alias", "unalias", "jobs", "bg", "wait", "command", ":", "true", "false",
-    "eval", "break", "continue", ".", "source", "local", "set", "shift", "getopts", "umask",
-    "trap", "return", "complete", "compgen", "ulimit",
+    "exit",
+    "exec",
+    "cd",
+    "pwd",
+    "pushd",
+    "popd",
+    "dirs",
+    "export",
+    "readonly",
+    "unset",
+    "read",
+    "printf",
+    "fg",
+    "alias",
+    "unalias",
+    "jobs",
+    "bg",
+    "wait",
+    "command",
+    ":",
+    "true",
+    "false",
+    "eval",
+    "break",
+    "continue",
+    ".",
+    "source",
+    "local",
+    "set",
+    "shift",
+    "getopts",
+    "umask",
+    "trap",
+    "return",
+    "complete",
+    "compgen",
+    "ulimit",
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    "fc",
 ];
 
 pub(crate) fn is_builtin(name: &str) -> bool {
