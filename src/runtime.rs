@@ -2179,18 +2179,19 @@ impl<'a> Invocation<'a> {
         };
         let mut stages = Vec::new();
         for (index, command) in commands.iter().enumerate() {
-            let next = if index + 1 == commands.len() {
-                None
+            let (stdout, next_stdin) = if index + 1 == commands.len() {
+                (original[1].clone(), Descriptor::Closed)
             } else {
-                Some(process::pipe()?)
-            };
-            let (stdout, next_input) = match next {
-                Some((read, write)) => (Descriptor::File(Rc::new(File::from(write))), Some(read)),
-                None => (original[1].clone(), None),
+                let (read, write) = process::pipe()?;
+                (
+                    Descriptor::File(Rc::new(File::from(write))),
+                    Descriptor::File(Rc::new(File::from(read))),
+                )
             };
             let mut descriptors = original.clone();
             descriptors[0] = stdin;
             descriptors[1] = stdout;
+            stdin = next_stdin;
             let Some((path, env)) = &agent_env else {
                 let child = if let Some(compound) = &command.compound {
                     self.subshell_stage(std::slice::from_ref(compound.as_ref()), &descriptors)?
@@ -2198,9 +2199,6 @@ impl<'a> Invocation<'a> {
                     self.worker_stage(WorkerTask::Stage(command.clone()), &descriptors)?
                 };
                 stages.push(child);
-                stdin = next_input.map_or(Descriptor::Closed, |read| {
-                    Descriptor::File(Rc::new(File::from(read)))
-                });
                 continue;
             };
             // Assistant commands must pass the existing checks before launch;
@@ -2301,10 +2299,6 @@ impl<'a> Invocation<'a> {
             let mut child = stage(exec, &name, &descriptors)?;
             child.worker_state = worker_state;
             stages.push(child);
-            match next_input {
-                Some(read) => stdin = Descriptor::File(Rc::new(File::from(read))),
-                None => break,
-            }
         }
         self.start_stages(stages, background)
     }
