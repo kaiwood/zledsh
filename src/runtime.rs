@@ -1122,6 +1122,7 @@ impl<'a> Invocation<'a> {
                 } else {
                     report(&descriptors[2], "shift: expected a valid argument count");
                     self.status = 1;
+                    self.special_builtin_error(direct_special);
                 }
             }
             "return" => {

@@ -1493,3 +1493,37 @@ printf 'caller:%s\n' "$1"
         "",
     );
 }
+
+#[test]
+fn shift_errors_are_fatal_only_for_direct_noninteractive_calls() {
+    let home = tempfile::tempdir().unwrap();
+    for count in ["3", "-1", "nonnumeric"] {
+        let source = format!("set -- one two; shift {count}; printf unreachable");
+        let output = shell(home.path()).args(["-c", &source]).output().unwrap();
+        assert_output(
+            output,
+            1,
+            "",
+            "zledsh: shift: expected a valid argument count\n",
+        );
+    }
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+set -- one two
+command shift 3 || printf 'status:%s count:%s args:%s,%s\n' "$?" "$#" "$1" "$2"
+shift 0
+shift
+printf 'remaining:%s\n' "$1"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        0,
+        "status:1 count:2 args:one,two\nremaining:two\n",
+        "zledsh: shift: expected a valid argument count\n",
+    );
+}

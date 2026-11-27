@@ -91,7 +91,7 @@ Use `trap 'cleanup_command' EXIT` to run cleanup when the shell exits. The actio
 
 Use `pushd directory` to change directories while saving the current one, `popd` to return, and `dirs` to view the stack. Bare `pushd` swaps the top two entries; `+N` and `-N` select entries from the left or right, starting at zero.
 
-A direct special builtin can terminate a noninteractive script on a usage or redirection error, even without `set -e`. Use `command` to handle the error as a status instead: `command export 'bad-name' || printf 'export failed\n'`. A nonzero result from successfully executed code, such as `eval false`, is not itself a builtin error.
+A direct special builtin can terminate a noninteractive script on a usage or redirection error, even without `set -e`. Use `command` to handle the error as a status instead: `command export 'bad-name' || printf 'export failed\n'`. A nonzero result from successfully executed code, such as `eval false`, is not itself a builtin error. An invalid `shift` count leaves positional parameters unchanged; use `command shift` if a noninteractive script should handle the failure instead of exiting.
 
 Use `zledsh -i` to force interactive input even on a pipe. It loads startup files, prints prompts, and keeps reading after a syntax error. Raw editing and terminal job control still require a terminal.
 
