@@ -2738,16 +2738,24 @@ impl<'a> Invocation<'a> {
     }
 
     fn evaluate_arithmetic_text(&mut self, expression: &str) -> Result<i64, String> {
-        crate::arithmetic::evaluate(expression, |name, assignment| {
+        let mut unset = None;
+        let result = crate::arithmetic::evaluate(expression, |name, assignment| {
             if let Some(value) = assignment {
                 self.assign_value(name, value.to_string())
                     .map_err(|_| "assignment to a read-only variable")?;
                 Ok(None)
             } else {
+                if self.options.nounset && self.variable_os(name).is_none() {
+                    unset = Some(format!("{name}: parameter is unset"));
+                    return Err("unset arithmetic parameter");
+                }
                 Ok(self.variable(name))
             }
-        })
-        .map_err(str::to_owned)
+        });
+        if let Some(error) = unset {
+            return Err(self.parameter_error(error));
+        }
+        result.map_err(str::to_owned)
     }
 
     fn parameter_value(&self, name: &str) -> Option<OsString> {
@@ -2764,6 +2772,13 @@ impl<'a> Invocation<'a> {
         } else {
             self.variable_os(name)
         }
+    }
+
+    fn require_parameter<T>(&mut self, name: &str, value: Option<T>) -> Result<Option<T>, String> {
+        if self.options.nounset && value.is_none() {
+            return Err(self.parameter_error(format!("{name}: parameter is unset")));
+        }
+        Ok(value)
     }
 
     fn parameter_error(&mut self, message: String) -> String {
@@ -2843,11 +2858,10 @@ impl<'a> Invocation<'a> {
                 }
                 Part::Name => field.push(fragment(self.name.into())),
                 Part::Status => field.push(fragment(self.status.to_string())),
-                Part::LastBackground => field.push(fragment(
-                    self.last_background_pid()
-                        .map(|pid| pid.to_string())
-                        .unwrap_or_default(),
-                )),
+                Part::LastBackground => {
+                    let pid = self.require_parameter("!", self.last_background_pid())?;
+                    field.push(fragment(pid.map(|pid| pid.to_string()).unwrap_or_default()));
+                }
                 Part::Positional { star } if *star && (part.quoted || !field_splitting) => {
                     // POSIX.1-2024 2.5.2: only join $* in a non-splitting context.
                     let ifs = self.variable("IFS");
@@ -2925,14 +2939,16 @@ impl<'a> Invocation<'a> {
                     prefix,
                     longest,
                 } => {
-                    let value = self.parameter_value(name).unwrap_or_default();
+                    let value = self
+                        .require_parameter(name, self.parameter_value(name))?
+                        .unwrap_or_default();
                     let value = value.to_string_lossy();
                     let pattern = self.expand_pattern(pattern, status)?;
                     field.push(fragment(pattern.trim(&value, *prefix, *longest).into()));
                 }
                 Part::Length(name) => {
                     let length = self
-                        .parameter_value(name)
+                        .require_parameter(name, self.parameter_value(name))?
                         .map_or(0, |value| value.to_string_lossy().chars().count());
                     field.push(fragment(length.to_string()));
                 }
@@ -2942,9 +2958,13 @@ impl<'a> Invocation<'a> {
                     if_empty,
                     operator,
                 } => {
-                    let value = self
-                        .parameter_value(name)
-                        .filter(|value| !if_empty || !value.is_empty());
+                    let value = self.parameter_value(name);
+                    let value = if default.is_none() {
+                        self.require_parameter(name, value)?
+                    } else {
+                        value
+                    };
+                    let value = value.filter(|value| !if_empty || !value.is_empty());
                     let alternate = *operator == ParameterOperator::Alternate;
                     if value.is_some() == alternate {
                         if matches!(

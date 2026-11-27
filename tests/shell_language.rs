@@ -1358,3 +1358,42 @@ ulimit -S -f 18446744073709551615 || printf 'rejected\n'
         "zledsh: ulimit: invalid limit\n",
     );
 }
+
+#[test]
+fn nounset_distinguishes_missing_values_and_stops_noninteractive_expansion() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-u",
+            "-c",
+            r#"
+empty=
+printf '<%s>\n' "$empty" "$@" "$*" "${1-default}" "${missing:=set}"
+printf '%s\n' "$((0 && absent))"
+( printf '%s\n' "$1" ) || printf 'worker failed\n'
+set +u
+printf '<%s>\n' "$absent"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        0,
+        "<>\n<>\n<default>\n<set>\n0\nworker failed\n<>\n",
+        "zledsh: 1: parameter is unset\n",
+    );
+    for word in ["$absent", "${#absent}", "${absent#x}", "$((absent + 1))"] {
+        let source = format!("printf '%s' \"{word}\"; printf unexpected");
+        let output = shell(home.path())
+            .args(["-o", "nounset", "-c", &source])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{word}");
+        assert!(output.stdout.is_empty(), "{word}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("absent: parameter is unset"),
+            "{output:?}"
+        );
+    }
+}

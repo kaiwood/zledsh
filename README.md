@@ -67,6 +67,8 @@ Use `ulimit -a` to inspect resource limits or `ulimit -S -n 128` to set a soft l
 
 `set -a` (`set -o allexport`) exports variables as they are assigned. `set +a` stops automatically exporting new assignments without clearing existing export attributes.
 
+`set -u` (`set -o nounset`) diagnoses unset parameters in ordinary parameter and arithmetic expansions. Empty values, `$@`, `$*`, and explicit defaults such as `${name:-default}` still work. Noninteractive execution stops on an unset-parameter expansion error; an interactive shell stays open.
+
 `set -e` (also `set -o errexit` or `zledsh -e`) exits on an unhandled command failure. It does not exit merely because a condition, a negated pipeline, or a non-final command in an `&&`/`||` list fails. Pipeline failures use the current `pipefail` setting. Turn it off with `set +e`.
 
 Use `readonly name=value` to protect a shell variable from reassignment or `unset`. `export name` can still export the existing value. `readonly -p` lists the protected variables.
