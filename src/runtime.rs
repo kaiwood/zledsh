@@ -2346,6 +2346,9 @@ impl<'a> Invocation<'a> {
             self.getopts_offset = 0;
         }
         self.variables.insert(name.into(), value);
+        if self.options.allexport {
+            self.exported.insert(name.into());
+        }
         Ok(())
     }
 

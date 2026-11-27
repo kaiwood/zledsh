@@ -1297,3 +1297,38 @@ printf 'invalid=%s\n' "$?"
         "zledsh: [[: invalid regular expression\n",
     );
 }
+
+#[test]
+fn allexport_marks_assignments_in_their_own_execution_environment() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-a",
+            "-c",
+            r#"
+printf '%s\n' "$-"
+BEFORE=outside
+TEMP=value /usr/bin/printenv TEMP
+: "${DEFAULT:=default}" "$((NUMBER=42))"
+read LINE <<EOF
+read
+EOF
+( WORKER=inside; /usr/bin/printenv WORKER )
+set +a
+AFTER=not-exported
+for name in BEFORE DEFAULT NUMBER LINE; do /usr/bin/printenv "$name"; done
+for name in TEMP AFTER WORKER; do /usr/bin/printenv "$name" || :; done
+set -o allexport
+NAMED=enabled
+/usr/bin/printenv NAMED
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        0,
+        "a\nvalue\ninside\noutside\ndefault\n42\nread\nenabled\n",
+        "",
+    );
+}

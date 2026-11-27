@@ -1,6 +1,7 @@
 #[derive(Clone, Copy, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ShellOptions {
     pub interactive: bool,
+    pub allexport: bool,
     pub errexit: bool,
     pub pipefail: bool,
     pub noglob: bool,
@@ -12,6 +13,7 @@ pub(crate) struct ShellOptions {
 impl ShellOptions {
     pub fn set_named(&mut self, name: &str, enabled: bool) -> Result<(), String> {
         match name {
+            "allexport" => self.allexport = enabled,
             "errexit" => self.errexit = enabled,
             "pipefail" => self.pipefail = enabled,
             "globstar" => self.globstar = enabled,
@@ -25,6 +27,7 @@ impl ShellOptions {
 
     pub fn named(self) -> impl Iterator<Item = (&'static str, bool)> {
         [
+            ("allexport", self.allexport),
             ("errexit", self.errexit),
             ("globstar", self.globstar),
             ("noclobber", self.noclobber),
@@ -37,6 +40,7 @@ impl ShellOptions {
 
     pub fn set_short(&mut self, letter: char, enabled: bool) -> Result<(), String> {
         match letter {
+            'a' => self.allexport = enabled,
             'e' => self.errexit = enabled,
             'f' => self.noglob = enabled,
             'C' => self.noclobber = enabled,
@@ -54,6 +58,9 @@ impl ShellOptions {
         let mut letters = String::new();
         if self.noclobber {
             letters.push('C');
+        }
+        if self.allexport {
+            letters.push('a');
         }
         if self.errexit {
             letters.push('e');

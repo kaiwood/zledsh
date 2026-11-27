@@ -63,6 +63,8 @@ Use `set -o pipefail` (or start with `zledsh -o pipefail`) to report the rightmo
 
 `set -C` (also `set -o noclobber` or `zledsh -C`) makes `>` refuse to overwrite an existing regular file. Use `>|` to overwrite deliberately; `>>` still appends. `set +C` restores the default.
 
+`set -a` (`set -o allexport`) exports variables as they are assigned. `set +a` stops automatically exporting new assignments without clearing existing export attributes.
+
 `set -e` (also `set -o errexit` or `zledsh -e`) exits on an unhandled command failure. It does not exit merely because a condition, a negated pipeline, or a non-final command in an `&&`/`||` list fails. Pipeline failures use the current `pipefail` setting. Turn it off with `set +e`.
 
 Use `readonly name=value` to protect a shell variable from reassignment or `unset`. `export name` can still export the existing value. `readonly -p` lists the protected variables.
