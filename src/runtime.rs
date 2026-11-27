@@ -963,7 +963,10 @@ impl<'a> Invocation<'a> {
             }
         };
         let mut descriptors = original.clone();
-        let direct_special = argv.first().is_some_and(|name| is_special_builtin(name));
+        let direct_special = argv
+            .first()
+            .and_then(|name| name.to_str())
+            .is_some_and(is_special_builtin);
         let mut applied = 0;
         let result = command.redirects.iter().try_for_each(|redirect| {
             self.redirect(
@@ -1028,7 +1031,12 @@ impl<'a> Invocation<'a> {
         self.restore_variables(saved);
     }
 
-    fn trace_command(&mut self, assignments: &[String], argv: &[String], stderr: &Descriptor) {
+    fn trace_command(
+        &mut self,
+        assignments: &[String],
+        argv: &[impl AsRef<OsStr>],
+        stderr: &Descriptor,
+    ) {
         if !self.options.xtrace || (assignments.is_empty() && argv.is_empty()) {
             return;
         }
@@ -1039,7 +1047,12 @@ impl<'a> Invocation<'a> {
         self.exited = status;
         let mut trace = prefix.unwrap_or_else(|| "+ ".into());
         let mut first = true;
-        for word in assignments.iter().chain(argv) {
+        for word in assignments
+            .iter()
+            .map(OsStr::new)
+            .chain(argv.iter().map(AsRef::as_ref))
+        {
+            let word = word.to_string_lossy();
             if !std::mem::replace(&mut first, false) {
                 trace.push(' ');
             }
@@ -1048,9 +1061,9 @@ impl<'a> Invocation<'a> {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b"_./=:+-".contains(&b))
             {
-                trace.push_str(word);
+                trace.push_str(&word);
             } else {
-                trace.push_str(&quote_value(word));
+                trace.push_str(&quote_value(&word));
             }
         }
         trace.push('\n');
@@ -1059,7 +1072,7 @@ impl<'a> Invocation<'a> {
 
     fn execute_argv(
         &mut self,
-        mut argv: &[String],
+        mut argv: &[OsString],
         input: &mut dyn BufRead,
         descriptors: Descriptors,
         substitution_status: Option<u8>,
@@ -1074,10 +1087,16 @@ impl<'a> Invocation<'a> {
             bypass_functions = true;
             match rest {
                 [flag, names @ ..] if flag == "-v" => {
-                    self.status = self.describe_commands(names, &descriptors);
+                    self.status = match text_operands(names) {
+                        Ok(names) => self.describe_commands(&names, &descriptors),
+                        Err(error) => {
+                            report(&descriptors[2], &error);
+                            2
+                        }
+                    };
                     return;
                 }
-                [flag, ..] if flag.starts_with('-') && flag != "--" => {
+                [flag, ..] if flag.as_encoded_bytes().starts_with(b"-") && flag != "--" => {
                     report(&descriptors[2], "command: expected -v or a command name");
                     self.status = 2;
                     return;
@@ -1090,9 +1109,17 @@ impl<'a> Invocation<'a> {
             self.status = substitution_status.unwrap_or(0);
             return;
         };
+        let Some(name) = name.to_str() else {
+            self.status = self.external(argv, descriptors, pipeline_stage);
+            return;
+        };
+        if !is_builtin(name) && (bypass_functions || !self.functions.contains_key(name)) {
+            self.status = self.external(argv, descriptors, pipeline_stage);
+            return;
+        }
         if self.agent_command()
             && matches!(
-                name.as_str(),
+                name,
                 "exit"
                     | "fg"
                     | "bg"
@@ -1120,6 +1147,20 @@ impl<'a> Invocation<'a> {
             self.status = 2;
             return;
         }
+        let text_args = if name == "exec" {
+            Vec::new()
+        } else {
+            match text_operands(args) {
+                Ok(args) => args,
+                Err(error) => {
+                    report(&descriptors[2], &format!("{name}: {error}"));
+                    self.status = 2;
+                    self.special_builtin_error(!bypass_functions && is_special_builtin(name));
+                    return;
+                }
+            }
+        };
+        let args = text_args.as_slice();
         if !bypass_functions && !is_special_builtin(name) && self.functions.contains_key(name) {
             if self.agent_command() {
                 report(
@@ -1133,7 +1174,7 @@ impl<'a> Invocation<'a> {
             return;
         }
         let direct_special = !bypass_functions && is_special_builtin(name);
-        match name.as_str() {
+        match name {
             ":" | "true" => self.status = 0,
             "false" => self.status = 1,
             "break" | "continue" => {
@@ -1257,7 +1298,8 @@ impl<'a> Invocation<'a> {
                 }
             }
             "exec" => {
-                let args = args.strip_prefix(&[String::from("--")]).unwrap_or(args);
+                let args = &argv[1..];
+                let args = args.strip_prefix(&[OsString::from("--")]).unwrap_or(args);
                 if args.is_empty() {
                     self.commit_exec_redirects(redirects, &descriptors);
                     self.status = 0;
@@ -1541,10 +1583,10 @@ impl<'a> Invocation<'a> {
                     .foreground
                     .get_or_insert_with(crate::foreground::Foreground::noninteractive);
                 let selector = args.first().map(String::as_str);
-                let result = if matches!(name.as_str(), "fg" | "bg") && args.len() > 1 {
+                let result = if matches!(name, "fg" | "bg") && args.len() > 1 {
                     Err(io::Error::other("unexpected job arguments"))
                 } else {
-                    match name.as_str() {
+                    match name {
                         "fg" => jobs.resume(selector),
                         "bg" => jobs.background(selector),
                         "wait" => jobs.wait_background(args),
@@ -2091,7 +2133,10 @@ impl<'a> Invocation<'a> {
                 ));
             }
             let mut status = None;
-            let argv = match self.expand_command_words(&command.words, &mut status) {
+            let argv = match self
+                .expand_command_words(&command.words, &mut status)
+                .and_then(|argv| text_operands(&argv))
+            {
                 Err(error) => {
                     report(&descriptors[2], &error);
                     vec!["exit".into(), "2".into()]
@@ -2244,11 +2289,11 @@ impl<'a> Invocation<'a> {
         }
     }
 
-    fn replace_shell(&self, argv: &[String], descriptors: &Descriptors) -> u8 {
+    fn replace_shell(&self, argv: &[OsString], descriptors: &Descriptors) -> u8 {
         let (path, env) = self.execution_environment();
-        let name = &argv[0];
+        let name = argv[0].to_string_lossy();
         let error = match process::Exec::new(argv, &path, env)
-            .and_then(|exec| stage(exec, name, descriptors))
+            .and_then(|exec| stage(exec, &name, descriptors))
         {
             Ok(stage) => process::replace(&stage),
             Err(error) => error,
@@ -2264,12 +2309,12 @@ impl<'a> Invocation<'a> {
 
     fn external(
         &mut self,
-        argv: &[String],
+        argv: &[impl AsRef<OsStr>],
         mut descriptors: Descriptors,
         pipeline_stage: bool,
     ) -> u8 {
         let (path, env) = self.execution_environment();
-        let name = &argv[0];
+        let name = argv[0].as_ref().to_string_lossy();
         let exec = match process::Exec::new(argv, &path, env) {
             Ok(exec) => exec,
             Err(error) => {
@@ -2286,7 +2331,7 @@ impl<'a> Invocation<'a> {
                 }
             }
         }
-        let child = match stage(exec, name, &descriptors) {
+        let child = match stage(exec, &name, &descriptors) {
             Ok(child) => child,
             Err(error) => {
                 report(&descriptors[2], &format!("{name}: {error}"));
@@ -2521,20 +2566,24 @@ impl<'a> Invocation<'a> {
         for word in words {
             self.expand_argument(word, status, &mut fields)?;
         }
-        Ok(fields)
+        text_operands(&fields)
     }
 
     fn expand_command_words(
         &mut self,
         words: &[Word],
         status: &mut Option<u8>,
-    ) -> Result<Vec<String>, String> {
+    ) -> Result<Vec<OsString>, String> {
         let mut fields = Vec::new();
         for word in words {
             if word.assignment
                 && matches!(direct_name(&fields), Some("export" | "local" | "readonly"))
             {
-                fields.extend(self.expand_assignment(word, status)?);
+                fields.extend(
+                    self.expand_assignment(word, status)?
+                        .into_iter()
+                        .map(OsString::from),
+                );
             } else {
                 self.expand_argument(word, status, &mut fields)?;
             }
@@ -2546,7 +2595,7 @@ impl<'a> Invocation<'a> {
         &mut self,
         word: &Word,
         status: &mut Option<u8>,
-        output: &mut Vec<String>,
+        output: &mut Vec<OsString>,
     ) -> Result<(), String> {
         if let Some(alternatives) = crate::brace::alternatives(word)? {
             if self.agent_command() {
@@ -2564,13 +2613,13 @@ impl<'a> Invocation<'a> {
         &mut self,
         word: &Word,
         status: &mut Option<u8>,
-        output: &mut Vec<String>,
+        output: &mut Vec<OsString>,
     ) -> Result<(), String> {
         let ifs = self.variable("IFS");
         for field in self.expand_parts(word, status, true, false)? {
             for field in split_field(field, ifs.as_deref().unwrap_or(DEFAULT_IFS)) {
                 if self.options.noglob && !self.agent_command() {
-                    output.push(field_text(field));
+                    output.push(field_text(field).into());
                     continue;
                 }
                 let chars = field.iter().flat_map(|part| {
@@ -2581,13 +2630,13 @@ impl<'a> Invocation<'a> {
                     if self.agent_command() {
                         return Err("pathname expansion must be submitted by the user".into());
                     }
-                    let matches = crate::pathname::expand(pattern)?;
+                    let matches = crate::pathname::expand(pattern);
                     if !matches.is_empty() {
                         output.extend(matches);
                         continue;
                     }
                 }
-                output.push(field_text(field));
+                output.push(field_text(field).into());
             }
         }
         Ok(())
@@ -3408,14 +3457,27 @@ fn is_special_builtin(name: &str) -> bool {
     )
 }
 
-fn direct_name(mut argv: &[String]) -> Option<&str> {
+fn text_operands(args: &[OsString]) -> Result<Vec<String>, String> {
+    args.iter()
+        .map(|arg| {
+            arg.to_str()
+                .map(str::to_owned)
+                .ok_or_else(|| "expected UTF-8 operands".into())
+        })
+        .collect()
+}
+
+fn direct_name<T: AsRef<OsStr>>(mut argv: &[T]) -> Option<&str> {
     while let [name, rest @ ..] = argv {
+        let name = name.as_ref().to_str()?;
         if name != "command" {
             return Some(name);
         }
         match rest {
-            [flag, rest @ ..] if flag == "--" => argv = rest,
-            [flag, ..] if flag.starts_with('-') => return Some("command"),
+            [flag, rest @ ..] if flag.as_ref() == "--" => argv = rest,
+            [flag, ..] if flag.as_ref().as_encoded_bytes().starts_with(b"-") => {
+                return Some("command");
+            }
             _ => argv = rest,
         }
     }

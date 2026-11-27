@@ -61,7 +61,7 @@ fn compile_component(chars: &[(char, bool)], globstar: bool) -> Result<Component
     }
 }
 
-pub(crate) fn expand(Pattern(components): Pattern) -> Result<Vec<String>, String> {
+pub(crate) fn expand(Pattern(components): Pattern) -> Vec<OsString> {
     let mut paths = vec![OsString::new()];
     let check_literal_tail = matches!(components.last(), Some(Component::Literal(_)));
     let absolute = matches!(components.first(), Some(Component::Literal(text)) if text.is_empty());
@@ -142,12 +142,6 @@ pub(crate) fn expand(Pattern(components): Pattern) -> Result<Vec<String>, String
         paths.dedup();
     }
     paths
-        .into_iter()
-        .map(|path| {
-            path.into_string()
-                .map_err(|_| "pathname match is not UTF-8".into())
-        })
-        .collect()
 }
 
 fn recursive_matches(prefix: OsString, files: bool, output: &mut Vec<OsString>) {

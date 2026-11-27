@@ -43,8 +43,8 @@ pub(crate) fn inherited_descriptor(fd: RawFd) -> bool {
     flags >= 0 && flags & libc::FD_CLOEXEC == 0
 }
 
-fn candidates(name: &str, path: &OsStr) -> impl Iterator<Item = PathBuf> {
-    let explicit = name.contains('/');
+fn candidates(name: &OsStr, path: &OsStr) -> impl Iterator<Item = PathBuf> {
+    let explicit = name.as_bytes().contains(&b'/');
     let name = name.to_owned();
     explicit.then(|| PathBuf::from(&name)).into_iter().chain(
         std::env::split_paths(path)
@@ -54,7 +54,7 @@ fn candidates(name: &str, path: &OsStr) -> impl Iterator<Item = PathBuf> {
 }
 
 pub(crate) fn find_executable(name: &str, path: &OsStr) -> Option<PathBuf> {
-    candidates(name, path).find(|path| {
+    candidates(name.as_ref(), path).find(|path| {
         path.is_file()
             && cstring(path.as_os_str()).is_ok_and(|path| unsafe {
                 libc::faccessat(libc::AT_FDCWD, path.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0
@@ -70,11 +70,11 @@ pub(crate) struct Exec {
 
 impl Exec {
     pub fn new(
-        argv: &[String],
+        argv: &[impl AsRef<OsStr>],
         path: &OsStr,
         environment: impl IntoIterator<Item = (OsString, OsString)>,
     ) -> io::Result<Self> {
-        let candidates = candidates(&argv[0], path)
+        let candidates = candidates(argv[0].as_ref(), path)
             .map(|path| cstring(path.as_os_str()))
             .collect::<io::Result<Vec<_>>>()?;
         let args = ExecVector::new(argv.iter().map(|arg| cstring(arg.as_ref())))?;

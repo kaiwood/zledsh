@@ -42,20 +42,48 @@ fn non_utf8_read_and_substitution_report_distinct_errors() {
     );
 }
 
-#[cfg(target_os = "linux")]
 #[test]
-fn pathname_expansion_rejects_non_utf8_matches() {
+fn pathname_expansion_passes_exact_filename_bytes_in_each_execution_scope() {
     use std::os::unix::ffi::OsStrExt;
 
     let home = tempfile::tempdir().unwrap();
-    fs::write(home.path().join(std::ffi::OsStr::from_bytes(b"f\xff")), "").unwrap();
-    let output = shell(home.path())
-        .args(["-c", "printf '%s' f*"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    assert_eq!(output.stderr, b"zledsh: pathname match is not UTF-8\n");
+    // Include a space and a metacharacter to catch re-splitting and re-globbing.
+    let name = std::ffi::OsStr::from_bytes(b"f\xff *");
+    if let Err(error) = fs::write(home.path().join(name), "") {
+        #[cfg(target_os = "macos")]
+        if error.raw_os_error() == Some(libc::EILSEQ) {
+            eprintln!("filesystem rejected the non-UTF-8 fixture: {error}");
+            return;
+        }
+        panic!("cannot create non-UTF-8 pathname: {error}");
+    }
+    fs::write(home.path().join("fa"), "").unwrap();
+    fs::create_dir(home.path().join("nested")).unwrap();
+    fs::write(home.path().join("nested").join(name), "").unwrap();
+    for (source, expected) in [
+        (r#"/usr/bin/printf '<%s>' f*"#, b"<fa><f\xff *>".as_slice()),
+        (
+            r#"/usr/bin/printf '<%s>' f* | /bin/cat"#,
+            b"<fa><f\xff *>".as_slice(),
+        ),
+        (
+            r#"( command /usr/bin/printf '<%s>' f* )"#,
+            b"<fa><f\xff *>".as_slice(),
+        ),
+        (
+            r#"exec /usr/bin/printf '<%s>' f*"#,
+            b"<fa><f\xff *>".as_slice(),
+        ),
+        (
+            r#"set -o globstar; /usr/bin/printf '<%s>' **/f*"#,
+            b"<fa><f\xff *><nested/f\xff *>".as_slice(),
+        ),
+    ] {
+        let output = shell(home.path()).args(["-c", source]).output().unwrap();
+        assert!(output.status.success(), "{source}: {output:?}");
+        assert_eq!(output.stdout, expected, "{source}");
+        assert!(output.stderr.is_empty(), "{source}: {output:?}");
+    }
 }
 
 #[test]
