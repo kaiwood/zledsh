@@ -270,3 +270,40 @@ fn terminal_probe() {
     );
     println!("foreground read: {}", input.trim_end());
 }
+
+#[test]
+fn job_control_probe() {
+    if std::env::var_os(ROLE).is_none() {
+        return;
+    }
+    // Never fork while the test is about to stop this group. On Linux a
+    // stopped vfork child can pin its parent before waitpid sees a stop.
+    let group = unsafe { libc::getpgrp() };
+    assert_eq!(cvt(unsafe { libc::tcgetpgrp(0) }).unwrap(), group);
+    let mut resumed = false;
+    // Observe a real SIGCONT, not just the shell's bookkeeping in jobs.
+    static CONTINUED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    use std::sync::atomic::Ordering;
+    extern "C" fn continued(_: libc::c_int) {
+        CONTINUED.store(true, Ordering::Relaxed);
+    }
+    assert_ne!(
+        unsafe { libc::signal(libc::SIGCONT, continued as *const () as usize) },
+        libc::SIG_ERR
+    );
+    println!("worker ready");
+    io::stdout().flush().unwrap();
+    until(|| {
+        if CONTINUED.load(Ordering::Relaxed) && !resumed {
+            resumed = true;
+            println!("worker resumed");
+            io::stdout().flush().unwrap();
+        }
+        (resumed && unsafe { libc::tcgetpgrp(0) } == group).then_some(())
+    });
+    println!("worker foreground");
+    io::stdout().flush().unwrap();
+    loop {
+        unsafe { libc::pause() };
+    }
+}

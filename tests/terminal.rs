@@ -41,17 +41,10 @@ fn pipeline_stops_and_resumes_as_a_foreground_group() {
 #[test]
 fn stopped_job_can_run_in_background_and_return_to_foreground() {
     let mut tty = Terminal::start("job> ", &[], |home| {
-        executable(
-            &home.join("worker"),
-            r#"#!/bin/sh
-trap 'printf "worker resumed\n"' CONT
-printf 'worker ready\n'
-while :; do /bin/sleep 1; done
-"#,
-        )
+        std::os::unix::fs::symlink(std::env::current_exe().unwrap(), home.join("probe")).unwrap();
     });
     tty.expect("job> ");
-    tty.send("./worker\n");
+    tty.send("./probe --exact pty::job_control_probe --nocapture\n");
     tty.expect("worker ready\r\n");
     tty.send("\x1a");
     tty.expect("Stopped\r\n");
@@ -60,13 +53,16 @@ while :; do /bin/sleep 1; done
     tty.expect("[1] Stopped ");
     tty.expect("job> ");
     tty.send("bg %1\n");
-    tty.expect("job> ");
+    let background = tty.expect("job> ");
+    if !background.contains("worker resumed\r\n") {
+        tty.expect("worker resumed\r\n");
+    }
     tty.send("jobs\n");
     tty.expect("[1] Running ");
     tty.expect("job> ");
     tty.send("fg %1\n");
     tty.expect("fg %1\x1b[?2004l\r\n");
-    tty.expect("worker resumed\r\n");
+    tty.expect("worker foreground\r\n");
     tty.send("\x03");
     tty.expect("job> ");
     tty.send("printf '%s\\n' \"$?\"\n");
