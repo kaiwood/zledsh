@@ -173,6 +173,19 @@ Later sessions can start with plain `zledsh`: if no local provider is configured
 
 The experimental `?` prompt is available in interactive `zledsh` with the line editor enabled. Set `ZLEDSH_ASSISTANT_EXEC` to the absolute path of a trusted local provider executable. It receives a JSON object with `instruction` and `context` (`cwd`, `last_command`, `exit_status`, and `last_output`) on stdin and returns a JSON object with optional `answer`, `directory`, and `draft` strings. It does not receive shell history or terminal input. The optional directory changes the live shell’s cwd; a draft is placed in the editor and only runs if you submit it. Ctrl+C cancels the turn, and private mode blocks requests.
 
+## Transform text in a pipeline
+
+```sh
+printf '%s\n' '1 2 3' | zledsh --filter 'reverse the list'
+# 3 2 1
+```
+
+`--filter` reads all of stdin through EOF and sends it in one request. Input must be UTF-8 and at most 64 KiB; larger input is rejected, not truncated. Quote the instruction as one argument (up to 8192 bytes). On success, stdout contains only the result, with no newline added by `zledsh`. Errors go to stderr and return a nonzero status.
+
+Filter mode uses the exported `ZLEDSH_ASSISTANT_EXEC` if set, or your saved ChatGPT session otherwise. Use `zledsh --chatgpt --filter 'instruction'` to force ChatGPT. If sign-in is needed, the pipeline fails without opening a browser; run `zledsh --chatgpt` separately to sign in. Filter mode does not load startup files, send shell history or command context, or execute anything returned by the provider. With ChatGPT, your instruction and input are sent to OpenAI; only pipe in data you intend to share.
+
+A local provider must support filter requests: it receives `{"mode":"filter","instruction":"reverse the list","context":{"input":"1 2 3\n"}}` and returns an `answer` string, for example `{"answer":"3 2 1\n"}`. An empty answer is valid. `directory` and `draft` are ignored. The interactive `?` protocol is unchanged.
+
 ## Current limits
 
 `zledsh` is not a drop-in replacement for POSIX `sh` or Bash. It does not claim POSIX conformance. Non-UTF-8 inputs are not supported in several expansion paths, and patterns use the C locale. Some alias replacements inside `$(...)` cannot affect how the shell finds the closing delimiter or reads here-documents. There is no automatic fallback for executable text without a shebang.

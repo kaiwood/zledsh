@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use crate::shell_context::ShellContext;
 
 const MAX_REPLY: usize = 64 * 1024;
+pub(crate) const MAX_INSTRUCTION: usize = 8192;
 
 pub enum Turn {
     Cancelled,
@@ -20,28 +21,66 @@ pub enum Turn {
 }
 
 pub fn turn(program: &Path, instruction: &str, context: &ShellContext) -> io::Result<Turn> {
-    if !program.is_absolute() || instruction.len() > 8192 {
+    if !program.is_absolute() || instruction.len() > MAX_INSTRUCTION {
         return Err(io::Error::other(
             "provider must be an absolute path and instructions at most 8192 bytes",
         ));
     }
+    let Some(reply) = request(
+        program,
+        json!({ "instruction": instruction, "context": context }),
+        true,
+    )?
+    else {
+        return Ok(Turn::Cancelled);
+    };
+    let answer = field(&reply, "answer")?;
+    let directory = field(&reply, "directory")?;
+    let draft = field(&reply, "draft")?;
+    if draft.chars().any(char::is_control) {
+        return Err(io::Error::other(
+            "provider draft must be a single printable line",
+        ));
+    }
+    Ok(Turn::Reply {
+        answer,
+        draft,
+        directory,
+    })
+}
+
+pub(crate) fn filter(program: &Path, instruction: &str, input: &str) -> io::Result<String> {
+    if !program.is_absolute() {
+        return Err(io::Error::other("provider must be an absolute path"));
+    }
+    request(
+        program,
+        json!({ "mode": "filter", "instruction": instruction, "context": { "input": input } }),
+        false,
+    )?
+    .and_then(|reply| reply["answer"].as_str().map(ToOwned::to_owned))
+    .ok_or_else(|| io::Error::other("expected a provider reply with an answer string"))
+}
+
+fn request(program: &Path, payload: Value, interactive: bool) -> io::Result<Option<Value>> {
     let mut request = tempfile::tempfile()?;
-    serde_json::to_writer(
-        &mut request,
-        &json!({ "instruction": instruction, "context": context }),
-    )
-    .map_err(io::Error::other)?;
+    serde_json::to_writer(&mut request, &payload).map_err(io::Error::other)?;
     request.write_all(b"\n")?;
     request.rewind()?;
-    let mut child = Provider(
-        Command::new(program)
-            .process_group(0)
+    let mut command = Command::new(program);
+    // In filter mode the child stays in the pipeline's group so it receives terminal signals.
+    if interactive {
+        command.process_group(0);
+    }
+    let mut child = Provider {
+        child: command
             .stdin(Stdio::from(request))
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()?,
-    );
-    let mut reply = child.0.stdout.take().unwrap();
+        own_group: interactive,
+    };
+    let mut reply = child.child.stdout.take().unwrap();
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut bytes = Vec::new();
     let mut buffer = [0; 4096];
@@ -50,7 +89,7 @@ pub fn turn(program: &Path, instruction: &str, context: &ShellContext) -> io::Re
         if Instant::now() >= deadline {
             return Err(io::Error::other("provider timed out"));
         }
-        if let Some(status) = if eof { child.0.try_wait()? } else { None } {
+        if let Some(status) = if eof { child.child.try_wait()? } else { None } {
             if !status.success() {
                 return Err(io::Error::other("provider failed"));
             }
@@ -58,7 +97,7 @@ pub fn turn(program: &Path, instruction: &str, context: &ShellContext) -> io::Re
         }
         let mut fds = [
             libc::pollfd {
-                fd: libc::STDIN_FILENO,
+                fd: if interactive { libc::STDIN_FILENO } else { -1 },
                 events: libc::POLLIN,
                 revents: 0,
             },
@@ -79,7 +118,7 @@ pub fn turn(program: &Path, instruction: &str, context: &ShellContext) -> io::Re
             let mut key = 0u8;
             let count = unsafe { libc::read(libc::STDIN_FILENO, (&mut key as *mut u8).cast(), 1) };
             if count == 0 || key == 3 {
-                return Ok(Turn::Cancelled);
+                return Ok(None);
             }
         }
         if fds[1].revents != 0 {
@@ -96,19 +135,7 @@ pub fn turn(program: &Path, instruction: &str, context: &ShellContext) -> io::Re
     if !reply.is_object() {
         return Err(io::Error::other("expected a provider reply object"));
     }
-    let answer = field(&reply, "answer")?;
-    let directory = field(&reply, "directory")?;
-    let draft = field(&reply, "draft")?;
-    if draft.chars().any(char::is_control) {
-        return Err(io::Error::other(
-            "provider draft must be a single printable line",
-        ));
-    }
-    Ok(Turn::Reply {
-        answer,
-        draft,
-        directory,
-    })
+    Ok(Some(reply))
 }
 
 fn field(reply: &Value, name: &str) -> io::Result<String> {
@@ -120,13 +147,20 @@ fn field(reply: &Value, name: &str) -> io::Result<String> {
     })
 }
 
-struct Provider(Child);
+struct Provider {
+    child: Child,
+    own_group: bool,
+}
 
 impl Drop for Provider {
     fn drop(&mut self) {
-        if !matches!(self.0.try_wait(), Ok(Some(_))) {
-            unsafe { libc::kill(-(self.0.id() as libc::pid_t), libc::SIGKILL) };
-            let _ = self.0.wait();
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            if self.own_group {
+                unsafe { libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL) };
+            } else {
+                let _ = self.child.kill();
+            }
+            let _ = self.child.wait();
         }
     }
 }

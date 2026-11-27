@@ -9,6 +9,8 @@ mod completion;
 mod condition;
 mod directory;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+mod filter;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 mod foreground;
 mod getopts;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -132,11 +134,22 @@ fn run_pipeline_builtin(args: impl Iterator<Item = OsString>) -> ExitCode {
         .into()
 }
 
-fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Result<u8, String> {
+fn run_command(
+    name: OsString,
+    mut args: std::iter::Peekable<impl Iterator<Item = OsString>>,
+) -> Result<u8, String> {
+    let mut option = args.next();
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    match option.as_deref().and_then(|arg| arg.to_str()) {
+        Some("--filter") => return filter::run(args, false),
+        Some("--chatgpt") if args.next_if(|arg| arg == "--filter").is_some() => {
+            return filter::run(args, true);
+        }
+        _ => {}
+    }
     let mut options = options::ShellOptions::default();
     let mut read_stdin = false;
     let mut command_string = false;
-    let mut option = args.next();
     loop {
         match option.as_deref().and_then(|arg| arg.to_str()) {
             Some(flag @ ("-o" | "+o")) => {
@@ -227,7 +240,10 @@ fn run_command(name: OsString, mut args: impl Iterator<Item = OsString>) -> Resu
             println!("       zledsh [-i] [--] script [args...]");
             println!("       zledsh [-i] -s [--] [args...]");
             #[cfg(any(target_os = "macos", target_os = "linux"))]
-            println!("       zledsh --chatgpt | --chatgpt-sign-out");
+            {
+                println!("       zledsh --chatgpt | --chatgpt-sign-out");
+                println!("       zledsh [--chatgpt] --filter instruction");
+            }
             Ok(0)
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
