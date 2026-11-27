@@ -27,7 +27,7 @@ impl Transcript {
     }
 
     pub fn begin(&mut self, input_pending: bool) -> io::Result<()> {
-        self.generation = crate::diagnostics::generation(self.marker());
+        self.generation = crate::diagnostics::generation(self.marker()).ok();
         self.channel
             .write_all(if input_pending { b"s" } else { b"b" })?;
         self.channel.read_exact(&mut [0])
@@ -52,7 +52,7 @@ impl Transcript {
         let mut bytes = vec![0; len];
         self.channel.read_exact(&mut bytes)?;
         let unchanged = self.generation.is_some()
-            && self.generation == crate::diagnostics::generation(self.marker());
+            && self.generation == crate::diagnostics::generation(self.marker()).ok();
         Ok(if unchanged { plain_text(&bytes) } else { None })
     }
 }
