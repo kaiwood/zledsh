@@ -2448,11 +2448,12 @@ impl<'a> Invocation<'a> {
             if terminated {
                 line.pop();
             }
-            let mut chars = std::str::from_utf8(&line)
-                .map_err(|_| "input is not UTF-8")?
-                .chars();
+            if line.contains(&0) {
+                return Err("input contains a NUL byte".into());
+            }
+            let mut chars = crate::read_fields::units(&line);
             while let Some(ch) = chars.next() {
-                if ch == '\\' && !raw {
+                if ch == Ok('\\') && !raw {
                     match chars.next() {
                         Some(escaped) => characters.push((escaped, true)),
                         None if terminated => {
@@ -2482,7 +2483,7 @@ impl<'a> Invocation<'a> {
             names.len(),
         );
         for (name, value) in names.iter().zip(fields) {
-            self.assign_value(name, value)?;
+            self.assign_bytes(name, value)?;
         }
         Ok(complete)
     }
@@ -2889,7 +2890,7 @@ impl<'a> Invocation<'a> {
         Ok(child)
     }
 
-    fn substitute(&self, source: &str) -> Result<(String, u8), String> {
+    fn substitute(&self, source: &str) -> Result<(Vec<u8>, u8), String> {
         const MAX_OUTPUT: u64 = 16 * 1024 * 1024;
         if self.agent_command() {
             return Err("command substitutions must be submitted by the user".into());
@@ -2930,9 +2931,7 @@ impl<'a> Invocation<'a> {
         while bytes.last() == Some(&b'\n') {
             bytes.pop();
         }
-        let text =
-            String::from_utf8(bytes).map_err(|_| "command substitution output is not UTF-8")?;
-        Ok((text, status))
+        Ok((bytes, status))
     }
 
     fn expand(&mut self, word: &Word, status: &mut Option<u8>) -> Result<Vec<String>, String> {
@@ -3158,7 +3157,7 @@ impl<'a> Invocation<'a> {
                 Part::Substitution(source) => {
                     let (text, code) = self.substitute(source)?;
                     *status = Some(code);
-                    field.push(fragment(text));
+                    field.push(bytes(text));
                 }
                 Part::Trim {
                     name,

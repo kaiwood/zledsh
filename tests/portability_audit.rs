@@ -27,20 +27,20 @@ fn positional_arguments_preserve_bytes_across_shell_workers() {
 }
 
 #[test]
-fn non_utf8_read_and_substitution_report_distinct_errors() {
+fn read_and_substitution_preserve_non_utf8_values() {
     let home = tempfile::tempdir().unwrap();
-    fs::write(home.path().join("bytes"), b"\xff\nvalid\n").unwrap();
+    fs::write(home.path().join("bytes"), b"\xff:part two\nvalid\n").unwrap();
+    fs::write(home.path().join("capture"), b"one \xfe\n\n").unwrap();
     let output = shell(home.path())
-        .args(["-c", r#"read -r first; printf '%s\n' "$?"; read -r next; printf '%s\n' "$next"; result=$(/bin/cat bytes)"#])
+        .args(["-c", r#"IFS=: read -r first rest; read -r next; /usr/bin/printf '<%s>' "$first" "$rest" "$next"; result=$(/bin/cat capture); /usr/bin/printf '<%s>' "$result" $result"#])
         .stdin(fs::File::open(home.path().join("bytes")).unwrap())
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    assert_eq!(output.stdout, b"2\nvalid\n");
+        .output().unwrap();
+    assert!(output.status.success(), "{output:?}");
     assert_eq!(
-        output.stderr,
-        b"zledsh: read: input is not UTF-8\nzledsh: command substitution output is not UTF-8\n"
+        output.stdout,
+        b"<\xff><part two><valid><one \xfe><one><\xfe>"
     );
+    assert!(output.stderr.is_empty(), "{output:?}");
 }
 
 #[test]

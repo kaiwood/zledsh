@@ -1,11 +1,34 @@
+pub(crate) type Unit = Result<char, u8>;
+
+pub(crate) fn units(bytes: &[u8]) -> impl Iterator<Item = Unit> + '_ {
+    bytes.utf8_chunks().flat_map(|chunk| {
+        chunk
+            .valid()
+            .chars()
+            .map(Ok)
+            .chain(chunk.invalid().iter().copied().map(Err))
+    })
+}
+
 // POSIX read stops splitting before the last variable, which receives the
 // original remainder (not a rejoin of the split fields).
-pub(crate) fn split(mut input: &[(char, bool)], ifs: &str, count: usize) -> Vec<String> {
-    let is_separator = |&(ch, escaped): &(char, bool)| !escaped && ifs.contains(ch);
-    let is_white = |item: &(char, bool)| is_separator(item) && " \t\n".contains(item.0);
+pub(crate) fn split(mut input: &[(Unit, bool)], ifs: &str, count: usize) -> Vec<Vec<u8>> {
+    let is_separator =
+        |&(ch, escaped): &(Unit, bool)| !escaped && ch.is_ok_and(|ch| ifs.contains(ch));
+    let is_white =
+        |item: &(Unit, bool)| is_separator(item) && item.0.is_ok_and(|ch| " \t\n".contains(ch));
     let trim_start =
-        |input: &[(char, bool)]| input.iter().take_while(|item| is_white(item)).count();
-    let text = |input: &[(char, bool)]| input.iter().map(|&(ch, _)| ch).collect::<String>();
+        |input: &[(Unit, bool)]| input.iter().take_while(|item| is_white(item)).count();
+    let text = |input: &[(Unit, bool)]| {
+        let mut bytes = Vec::new();
+        for &(unit, _) in input {
+            match unit {
+                Ok(ch) => bytes.extend_from_slice(ch.encode_utf8(&mut [0; 4]).as_bytes()),
+                Err(byte) => bytes.push(byte),
+            }
+        }
+        bytes
+    };
     let mut fields = Vec::with_capacity(count);
     if !ifs.is_empty() {
         for _ in 1..count {
@@ -29,6 +52,6 @@ pub(crate) fn split(mut input: &[(char, bool)], ifs: &str, count: usize) -> Vec<
         input = &input[start..end];
     }
     fields.push(text(input));
-    fields.resize(count, String::new());
+    fields.resize(count, Vec::new());
     fields
 }
