@@ -1459,3 +1459,37 @@ print -P wrong
         "zledsh: print: unsupported option: -P\n",
     );
 }
+
+#[test]
+fn return_unwinds_only_the_innermost_sourced_file_or_function() {
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        home.path().join("inner"),
+        "printf 'inner:%s\n' \"$1\"\nreturn 7\nprintf unreachable\n",
+    )
+    .unwrap();
+    fs::write(home.path().join("outer"), ". ./inner nested || printf 'inner-status:%s\n' \"$?\"\nprintf 'outer:%s\n' \"$1\"\nfalse\nreturn\nprintf unreachable\n").unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+set -- caller
+. ./outer top || printf 'outer-status:%s\n' "$?"
+f() {
+    . ./inner function || printf 'source-status:%s\n' "$?"
+    printf 'function:%s\n' "$1"
+    return 9
+}
+f arg || printf 'function-status:%s\n' "$?"
+printf 'caller:%s\n' "$1"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        0,
+        "inner:nested\ninner-status:7\nouter:top\nouter-status:1\ninner:function\nsource-status:7\nfunction:arg\nfunction-status:9\ncaller:caller\n",
+        "",
+    );
+}

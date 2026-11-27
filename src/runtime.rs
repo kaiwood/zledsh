@@ -137,6 +137,7 @@ pub(crate) struct Invocation<'a> {
     inherited_background_pid: Option<libc::pid_t>,
     shell_worker: bool,
     script_depth: u8,
+    sourced_depth: u8,
     loop_depth: usize,
     loop_control: Option<LoopControl>,
     locals: Vec<HashMap<String, SavedVariable>>,
@@ -244,6 +245,7 @@ impl<'a> Invocation<'a> {
             inherited_background_pid: None,
             shell_worker: false,
             script_depth: 0,
+            sourced_depth: 0,
             loop_depth: 0,
             loop_control: None,
             locals: Vec::new(),
@@ -1128,13 +1130,15 @@ impl<'a> Invocation<'a> {
                     [arg] => arg.parse::<i64>().ok().map(|n| n as u8),
                     _ => None,
                 };
-                if let Some(code) = code.filter(|_| !self.locals.is_empty()) {
+                if let Some(code) =
+                    code.filter(|_| self.sourced_depth > 0 || !self.locals.is_empty())
+                {
                     self.status = code;
                     self.returned = true;
                 } else {
                     report(
                         &descriptors[2],
-                        "return: expected a function and an optional numeric status",
+                        "return: expected a function or sourced file and an optional numeric status",
                     );
                     self.status = 2;
                     self.special_builtin_error(direct_special);
@@ -1164,12 +1168,15 @@ impl<'a> Invocation<'a> {
                     Ok(source) => {
                         let saved = (!args.is_empty())
                             .then(|| std::mem::replace(&mut self.args, args.to_vec()));
+                        self.sourced_depth += 1;
                         let ran = self.run_nested(
                             &format!("{name}: {}", path.display()),
                             &source,
                             input,
                             &descriptors,
                         );
+                        self.sourced_depth -= 1;
+                        self.returned = false;
                         if let Some(saved) = saved {
                             self.args = saved;
                         }
