@@ -6,23 +6,24 @@ fn shell(home: &std::path::Path) -> Command {
     command
 }
 
-// These fixtures record current representation limits, not required behavior.
 #[test]
-fn non_utf8_argument_is_rejected_before_execution() {
+fn positional_arguments_preserve_bytes_across_shell_workers() {
     use std::os::unix::ffi::OsStrExt;
 
     let home = tempfile::tempdir().unwrap();
     let output = shell(home.path())
-        .args(["-c", "printf unexpected", "name"])
-        .arg(std::ffi::OsStr::from_bytes(b"\xff"))
+        .args([
+            "-c",
+            r#"/usr/bin/printf '<%s>' "$1"; ( /usr/bin/printf '<%s>' "$@" ) | /bin/cat"#,
+            "name",
+        ])
+        .arg(std::ffi::OsStr::from_bytes(b"\xff *"))
+        .args(["", "café"])
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    assert_eq!(
-        output.stderr,
-        b"zledsh: positional arguments must be UTF-8\n"
-    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"<\xff *><\xff *><><caf\xc3\xa9>");
+    assert!(output.stderr.is_empty(), "{output:?}");
 }
 
 #[test]

@@ -210,7 +210,7 @@ fn run_command(
                     return Err(format!("unsupported option: {arg:?}"));
                 }
             }
-            positional_args(option.into_iter().chain(args))?
+            positional_args(option.into_iter().chain(args))
         } else {
             Vec::new()
         };
@@ -264,7 +264,7 @@ fn run_command(
             let source = option.to_str().ok_or("-c command must be UTF-8")?;
             let name = args.next().unwrap_or(name);
             let name = name.to_str().ok_or("command name must be UTF-8")?;
-            let args = positional_args(args)?;
+            let args = positional_args(args);
             let mut invocation = runtime::Invocation::new(name, &args);
             invocation.options = options;
             load_forced_startup(options.interactive, &mut invocation, &mut input);
@@ -279,7 +279,7 @@ fn run_command(
         }
         _ if end_options || !option.as_encoded_bytes().starts_with(b"-") => {
             let path = option.to_str().ok_or("script name must be UTF-8")?;
-            let args = positional_args(args)?;
+            let args = positional_args(args);
             let script = match File::open(path) {
                 Ok(script) => script,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -315,10 +315,9 @@ fn load_forced_startup(
     }
 }
 
-fn positional_args(args: impl Iterator<Item = OsString>) -> Result<Vec<String>, String> {
-    args.map(OsString::into_string)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| "positional arguments must be UTF-8".into())
+fn positional_args(args: impl Iterator<Item = OsString>) -> Vec<Vec<u8>> {
+    use std::os::unix::ffi::OsStringExt;
+    args.map(OsString::into_vec).collect()
 }
 
 fn run_input(

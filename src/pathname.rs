@@ -2,13 +2,13 @@ use std::ffi::OsString;
 
 use crate::pattern::{self, TextPattern};
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::Path;
 
 pub(crate) struct Pattern(Vec<Component>);
 
 enum Component {
-    Literal(String),
+    Literal(OsString),
     Recursive,
     Wildcard {
         pattern: TextPattern,
@@ -19,13 +19,13 @@ enum Component {
 // POSIX 2.14.3: separate components before interpreting brackets, and keep
 // shell quoting independent of backslashes that come from expansion results.
 pub(crate) fn pattern(
-    chars: impl Iterator<Item = (char, bool)>,
+    chars: impl Iterator<Item = (u8, bool)>,
     globstar: bool,
 ) -> Result<Option<Pattern>, String> {
     let mut components = Vec::new();
     let mut component = Vec::new();
     for (ch, quoted) in pattern::unescape(chars) {
-        if ch == '/' {
+        if ch == b'/' {
             components.push(compile_component(&component, globstar)?);
             component.clear();
         } else {
@@ -44,20 +44,20 @@ pub(crate) fn pattern(
         .then_some(Pattern(components)))
 }
 
-fn compile_component(chars: &[(char, bool)], globstar: bool) -> Result<Component, String> {
-    if globstar && chars == [('*', false), ('*', false)] {
+fn compile_component(chars: &[(u8, bool)], globstar: bool) -> Result<Component, String> {
+    if globstar && chars == [(b'*', false), (b'*', false)] {
         return Ok(Component::Recursive);
     }
     let (pattern, active) = TextPattern::encode(chars)?;
     if active {
         Ok(Component::Wildcard {
             pattern,
-            leading_dot: chars.first().is_some_and(|&(ch, _)| ch == '.'),
+            leading_dot: chars.first().is_some_and(|&(ch, _)| ch == b'.'),
         })
     } else {
-        Ok(Component::Literal(
+        Ok(Component::Literal(OsString::from_vec(
             chars.iter().map(|&(ch, _)| ch).collect(),
-        ))
+        )))
     }
 }
 

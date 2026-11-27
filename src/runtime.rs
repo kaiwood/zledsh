@@ -3,6 +3,7 @@ use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStringExt;
 use std::process::Stdio;
 use std::rc::Rc;
 
@@ -23,7 +24,7 @@ enum Origin {
 }
 
 struct Fragment {
-    text: String,
+    text: Vec<u8>,
     origin: Origin,
 }
 
@@ -64,8 +65,12 @@ fn login_home(login: &str) -> Option<String> {
     }
 }
 
-fn field_text(field: Field) -> String {
-    field.into_iter().map(|part| part.text).collect()
+fn field_bytes(field: Field) -> Vec<u8> {
+    field.into_iter().flat_map(|part| part.text).collect()
+}
+
+fn field_text(field: Field) -> Result<String, String> {
+    String::from_utf8(field_bytes(field)).map_err(|_| "expected UTF-8 text".into())
 }
 
 fn split_field(field: Field, ifs: &str) -> Vec<Field> {
@@ -83,8 +88,20 @@ fn split_field(field: Field, ifs: &str) -> Vec<Field> {
             candidate.push(part);
             continue;
         }
-        for ch in part.text.chars() {
-            if !ifs.contains(ch) {
+        let units = part.text.utf8_chunks().flat_map(|chunk| {
+            let valid = chunk.valid();
+            valid
+                .char_indices()
+                .map(move |(i, ch)| (Some(ch), &valid.as_bytes()[i..i + ch.len_utf8()]))
+                .chain(
+                    chunk
+                        .invalid()
+                        .iter()
+                        .map(|byte| (None, std::slice::from_ref(byte))),
+                )
+        });
+        for (ch, bytes) in units {
+            if !ch.is_some_and(|ch| ifs.contains(ch)) {
                 if whitespace && !candidate.is_empty() {
                     output.push(std::mem::take(&mut candidate));
                 }
@@ -93,14 +110,14 @@ fn split_field(field: Field, ifs: &str) -> Vec<Field> {
                     .last_mut()
                     .filter(|last| last.origin == Origin::Expansion)
                 {
-                    last.text.push(ch);
+                    last.text.extend_from_slice(bytes);
                 } else {
                     candidate.push(Fragment {
-                        text: ch.into(),
+                        text: bytes.to_vec(),
                         origin: Origin::Expansion,
                     });
                 }
-            } else if DEFAULT_IFS.contains(ch) {
+            } else if ch.is_some_and(|ch| DEFAULT_IFS.contains(ch)) {
                 whitespace = true;
             } else {
                 output.push(std::mem::take(&mut candidate));
@@ -122,7 +139,7 @@ pub(crate) struct Invocation<'a> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub listed_history: bool,
     name: &'a str,
-    args: Vec<String>,
+    args: Vec<Vec<u8>>,
     getopts_offset: usize,
     persistent_fds: Descriptors,
     fd_versions: [u64; crate::SHELL_FDS],
@@ -173,7 +190,7 @@ enum LoopControl {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PipelineVariables {
     name: String,
-    args: Vec<String>,
+    args: Vec<Vec<u8>>,
     getopts_offset: usize,
     options: ShellOptions,
     trap_snapshot: BTreeMap<libc::c_int, String>,
@@ -194,7 +211,7 @@ struct Substitution {
     directory_stack: Vec<String>,
     ignore_errexit: bool,
     name: String,
-    args: Vec<String>,
+    args: Vec<Vec<u8>>,
     getopts_offset: usize,
     variables: HashMap<String, String>,
     arrays: HashMap<String, BTreeMap<usize, String>>,
@@ -220,7 +237,7 @@ enum WorkerTask {
 }
 
 impl<'a> Invocation<'a> {
-    pub fn new(name: &'a str, args: &[String]) -> Self {
+    pub fn new(name: &'a str, args: &[Vec<u8>]) -> Self {
         Self {
             diagnostic_marker: None,
             directory_stack: Vec::new(),
@@ -461,7 +478,20 @@ impl<'a> Invocation<'a> {
                                 continue;
                             }
                         },
-                        None => self.args.clone(),
+                        None => match self
+                            .args
+                            .iter()
+                            .cloned()
+                            .map(String::from_utf8)
+                            .collect::<Result<Vec<_>, _>>()
+                        {
+                            Ok(args) => args,
+                            Err(_) => {
+                                report(&descriptors[2], "expected UTF-8 loop values");
+                                self.status = 2;
+                                continue;
+                            }
+                        },
                     };
                     self.status = 0;
                     self.loop_depth += 1;
@@ -775,22 +805,21 @@ impl<'a> Invocation<'a> {
                     }
                     "=~" => {
                         let fields = self.expand_parts(right, &mut None, false, false)?;
-                        let regex = fields
-                            .iter()
-                            .map(|field| {
-                                field
-                                    .iter()
-                                    .map(|part| {
-                                        if part.origin == Origin::Quoted {
-                                            crate::condition::quote_regex(&part.text)
-                                        } else {
-                                            part.text.clone()
-                                        }
-                                    })
-                                    .collect::<String>()
-                            })
-                            .collect::<Vec<_>>()
-                            .join(" ");
+                        let mut regex = String::new();
+                        for (index, field) in fields.iter().enumerate() {
+                            if index != 0 {
+                                regex.push(' ');
+                            }
+                            for part in field {
+                                let text = std::str::from_utf8(&part.text)
+                                    .map_err(|_| "expected UTF-8 regex")?;
+                                if part.origin == Origin::Quoted {
+                                    regex.push_str(&crate::condition::quote_regex(text));
+                                } else {
+                                    regex.push_str(text);
+                                }
+                            }
+                        }
                         crate::condition::regex(&left, &regex)
                     }
                     "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" => {
@@ -843,11 +872,11 @@ impl<'a> Invocation<'a> {
         let fields = self.expand_parts(word, status, false, false)?;
         let chars = fields.iter().enumerate().flat_map(|(index, field)| {
             (index != 0)
-                .then_some((' ', false))
+                .then_some((b' ', false))
                 .into_iter()
                 .chain(field.iter().flat_map(|part| {
                     let quoted = part.origin == Origin::Quoted;
-                    part.text.chars().map(move |ch| (ch, quoted))
+                    part.text.iter().copied().map(move |ch| (ch, quoted))
                 }))
         });
         crate::pattern::TextPattern::compile(chars)
@@ -1269,8 +1298,12 @@ impl<'a> Invocation<'a> {
                 };
                 match std::fs::read_to_string(&path) {
                     Ok(source) => {
-                        let saved = (!args.is_empty())
-                            .then(|| std::mem::replace(&mut self.args, args.to_vec()));
+                        let saved = (!args.is_empty()).then(|| {
+                            std::mem::replace(
+                                &mut self.args,
+                                args.iter().map(|arg| arg.as_bytes().to_vec()).collect(),
+                            )
+                        });
                         self.sourced_depth += 1;
                         let ran = self.run_nested(
                             &format!("{name}: {}", path.display()),
@@ -1618,7 +1651,10 @@ impl<'a> Invocation<'a> {
             return;
         }
         let body = self.functions[name].clone();
-        let previous = std::mem::replace(&mut self.args, args.to_vec());
+        let previous = std::mem::replace(
+            &mut self.args,
+            args.iter().map(|arg| arg.as_bytes().to_vec()).collect(),
+        );
         self.locals.push(HashMap::new());
         self.script_depth += 1;
         self.run_with_descriptors(&body, input, descriptors);
@@ -2026,7 +2062,7 @@ impl<'a> Invocation<'a> {
                     }
                 }
                 "--" => {
-                    self.args = rest.to_vec();
+                    self.args = rest.iter().map(|arg| arg.as_bytes().to_vec()).collect();
                     break;
                 }
                 value if value.len() > 1 && value.starts_with(['-', '+']) => {
@@ -2036,7 +2072,10 @@ impl<'a> Invocation<'a> {
                     remaining = rest;
                 }
                 _ => {
-                    self.args = remaining.to_vec();
+                    self.args = remaining
+                        .iter()
+                        .map(|arg| arg.as_bytes().to_vec())
+                        .collect();
                     break;
                 }
             }
@@ -2456,8 +2495,16 @@ impl<'a> Invocation<'a> {
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|index| *index > 0)
             .unwrap_or(1);
+        let converted;
         let parameters = if explicit.is_empty() {
-            &self.args
+            converted = self
+                .args
+                .iter()
+                .cloned()
+                .map(String::from_utf8)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| "expected UTF-8 option operands")?;
+            &converted
         } else {
             explicit
         };
@@ -2619,12 +2666,12 @@ impl<'a> Invocation<'a> {
         for field in self.expand_parts(word, status, true, false)? {
             for field in split_field(field, ifs.as_deref().unwrap_or(DEFAULT_IFS)) {
                 if self.options.noglob && !self.agent_command() {
-                    output.push(field_text(field).into());
+                    output.push(OsString::from_vec(field_bytes(field)));
                     continue;
                 }
                 let chars = field.iter().flat_map(|part| {
                     let quoted = part.origin == Origin::Quoted;
-                    part.text.chars().map(move |ch| (ch, quoted))
+                    part.text.iter().copied().map(move |ch| (ch, quoted))
                 });
                 if let Some(pattern) = crate::pathname::pattern(chars, self.options.globstar)? {
                     if self.agent_command() {
@@ -2636,7 +2683,7 @@ impl<'a> Invocation<'a> {
                         continue;
                     }
                 }
-                output.push(field_text(field).into());
+                output.push(OsString::from_vec(field_bytes(field)));
             }
         }
         Ok(())
@@ -2874,11 +2921,10 @@ impl<'a> Invocation<'a> {
     }
 
     fn expand(&mut self, word: &Word, status: &mut Option<u8>) -> Result<Vec<String>, String> {
-        Ok(self
-            .expand_parts(word, status, false, false)?
+        self.expand_parts(word, status, false, false)?
             .into_iter()
             .map(field_text)
-            .collect())
+            .collect()
     }
 
     fn expand_assignment(
@@ -2886,11 +2932,10 @@ impl<'a> Invocation<'a> {
         word: &Word,
         status: &mut Option<u8>,
     ) -> Result<Vec<String>, String> {
-        Ok(self
-            .expand_parts(word, status, false, true)?
+        self.expand_parts(word, status, false, true)?
             .into_iter()
             .map(field_text)
-            .collect())
+            .collect()
     }
 
     fn evaluate_arithmetic(
@@ -2932,7 +2977,7 @@ impl<'a> Invocation<'a> {
             if index == 0 {
                 Some(self.name.into())
             } else {
-                self.args.get(index - 1).map(OsString::from)
+                self.args.get(index - 1).cloned().map(OsString::from_vec)
             }
         } else {
             self.variable_os(name)
@@ -2980,14 +3025,15 @@ impl<'a> Invocation<'a> {
             } else {
                 Origin::Expansion
             };
-            let fragment = |text| Fragment { text, origin };
+            let bytes = |text| Fragment { text, origin };
+            let fragment = |text: String| bytes(text.into_bytes());
             let protected = |text: &str| Fragment {
-                text: text.into(),
+                text: text.as_bytes().to_vec(),
                 origin: Origin::Quoted,
             };
             match &part.kind {
                 Part::Literal(text) => field.push(Fragment {
-                    text: text.clone(),
+                    text: text.as_bytes().to_vec(),
                     origin: if part.quoted {
                         Origin::Quoted
                     } else {
@@ -3016,7 +3062,7 @@ impl<'a> Invocation<'a> {
                         field.push(protected(&home));
                     } else {
                         field.push(Fragment {
-                            text: format!("~{login}"),
+                            text: format!("~{login}").into_bytes(),
                             origin: Origin::Literal,
                         });
                     }
@@ -3035,16 +3081,16 @@ impl<'a> Invocation<'a> {
                         .chars()
                         .next()
                         .map_or("", |ch| &separator[..ch.len_utf8()]);
-                    field.push(fragment(self.args.join(first)));
+                    field.push(bytes(self.args.join(first.as_bytes())));
                 }
                 Part::Positional { .. } => {
                     let Some((first, rest)) = self.args.split_first() else {
                         continue;
                     };
-                    field.push(fragment(first.clone()));
+                    field.push(bytes(first.clone()));
                     for arg in rest {
                         fields.push(std::mem::take(&mut field));
-                        field.push(fragment(arg.clone()));
+                        field.push(bytes(arg.clone()));
                     }
                 }
                 Part::Array { name, index } => {
@@ -3168,7 +3214,7 @@ impl<'a> Invocation<'a> {
                                 let text = expanded
                                     .into_iter()
                                     .map(field_text)
-                                    .collect::<Vec<_>>()
+                                    .collect::<Result<Vec<_>, _>>()?
                                     .join(" ");
                                 field.push(fragment(text));
                                 continue;
@@ -3193,10 +3239,10 @@ impl<'a> Invocation<'a> {
                         }
                         field.push(fragment(String::new()));
                     } else {
-                        field.push(fragment(
+                        field.push(bytes(
                             value
                                 .filter(|_| !alternate)
-                                .map(|value| value.to_string_lossy().into_owned())
+                                .map(OsString::into_vec)
                                 .unwrap_or_default(),
                         ));
                     }

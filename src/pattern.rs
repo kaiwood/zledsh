@@ -3,12 +3,12 @@ use std::ffi::CString;
 pub(crate) struct TextPattern(CString);
 
 pub(crate) fn unescape(
-    mut chars: impl Iterator<Item = (char, bool)>,
-) -> impl Iterator<Item = (char, bool)> {
+    mut chars: impl Iterator<Item = (u8, bool)>,
+) -> impl Iterator<Item = (u8, bool)> {
     std::iter::from_fn(move || {
         let (ch, quoted) = chars.next()?;
-        Some(if ch == '\\' && !quoted {
-            chars.next().map_or(('\\', true), |(ch, _)| (ch, true))
+        Some(if ch == b'\\' && !quoted {
+            chars.next().map_or((b'\\', true), |(ch, _)| (ch, true))
         } else {
             (ch, quoted)
         })
@@ -16,26 +16,28 @@ pub(crate) fn unescape(
 }
 
 impl TextPattern {
-    pub(crate) fn compile(chars: impl Iterator<Item = (char, bool)>) -> Result<Self, String> {
+    pub(crate) fn compile(chars: impl Iterator<Item = (u8, bool)>) -> Result<Self, String> {
         let (pattern, _) = Self::encode(&unescape(chars).collect::<Vec<_>>())?;
         Ok(pattern)
     }
 
-    pub(crate) fn encode(chars: &[(char, bool)]) -> Result<(Self, bool), String> {
-        let closing_bracket = chars.iter().rposition(|&(ch, quoted)| ch == ']' && !quoted);
+    pub(crate) fn encode(chars: &[(u8, bool)]) -> Result<(Self, bool), String> {
+        let closing_bracket = chars
+            .iter()
+            .rposition(|&(ch, quoted)| ch == b']' && !quoted);
         let mut active = false;
-        let mut encoded = String::new();
+        let mut encoded = Vec::new();
         for (i, &(ch, quoted)) in chars.iter().enumerate() {
-            let unmatched_bracket = ch == '[' && closing_bracket.is_none_or(|end| i >= end);
-            active |= !quoted && !unmatched_bracket && matches!(ch, '*' | '?' | '[');
+            let unmatched_bracket = ch == b'[' && closing_bracket.is_none_or(|end| i >= end);
+            active |= !quoted && !unmatched_bracket && matches!(ch, b'*' | b'?' | b'[');
             if unmatched_bracket
                 || (quoted
                     && matches!(
                         ch,
-                        '*' | '?' | '[' | ']' | '\\' | '-' | '!' | '^' | ':' | '=' | '.'
+                        b'*' | b'?' | b'[' | b']' | b'\\' | b'-' | b'!' | b'^' | b':' | b'=' | b'.'
                     ))
             {
-                encoded.push('\\');
+                encoded.push(b'\\');
             }
             encoded.push(ch);
         }
