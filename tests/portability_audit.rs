@@ -423,3 +423,23 @@ fn builtin_printf_preserves_percent_s_bytes_in_redirections_and_pipelines() {
     assert_eq!(output.stdout, b"<text><v\xff><>v\xff");
     assert!(output.stderr.is_empty(), "{output:?}");
 }
+
+#[test]
+fn arithmetic_rejects_non_text_values_only_when_read() {
+    use std::os::unix::ffi::OsStrExt;
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .env("VALUE", std::ffi::OsStr::from_bytes(b"\xff"))
+        .args([
+            "-c",
+            r#"printf '%s\n' "$((0 && VALUE))"; printf '%s\n' "$((VALUE + 1))"; printf unexpected"#,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert_eq!(output.stdout, b"0\n");
+    assert_eq!(
+        output.stderr,
+        b"zledsh: arithmetic expansion: arithmetic variable is not an integer\n"
+    );
+}

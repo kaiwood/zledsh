@@ -2995,11 +2995,15 @@ impl<'a> Invocation<'a> {
                     .map_err(|_| "assignment to a read-only variable")?;
                 Ok(None)
             } else {
-                if self.options.nounset && self.variable_os(name).is_none() {
+                let value = self.variable_os(name);
+                if self.options.nounset && value.is_none() {
                     unset = Some(format!("{name}: parameter is unset"));
                     return Err("unset arithmetic parameter");
                 }
-                Ok(self.variable(name))
+                value
+                    .map(OsString::into_string)
+                    .transpose()
+                    .map_err(|_| "arithmetic variable is not an integer")
             }
         });
         if let Some(error) = unset {
