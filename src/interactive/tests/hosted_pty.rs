@@ -109,6 +109,43 @@ fn hosted_turns_in_a_real_terminal() {
         )?;
         writer.write_all(b"? listing stays local\n")?;
         wait_for(&mut reader, "listing kept local\r\ntest> ")?;
+        fs::write(
+            work.path().join("verbose-input"),
+            "# VERBOSE_FIXTURE\nset +v\n",
+        )?;
+        writer.write_all(b"set -v; . ./verbose-input\n")?;
+        wait_for(&mut reader, "\r\n# VERBOSE_FIXTURE\r\nset +v\r\ntest> ")?;
+        writer.write_all(b"? diagnostics stay local\n")?;
+        wait_for(&mut reader, "diagnostics kept local\r\ntest> ")?;
+
+        writer.write_all(b"value=TRACE_FIXTURE\n")?;
+        wait_for(&mut reader, "\r\ntest> ")?;
+        writer.write_all(b"set -x; : \"$value\"; set +x\n")?;
+        wait_for(&mut reader, "\r\n+ : TRACE_FIXTURE\r\n+ set +x\r\ntest> ")?;
+        writer.write_all(b"? diagnostics stay local\n")?;
+        wait_for(&mut reader, "diagnostics kept local\r\ntest> ")?;
+
+        writer.write_all(b"history pause\n")?;
+        wait_for(&mut reader, "[private] test> ")?;
+        writer.write_all(b"set -vx\n")?;
+        wait_for(&mut reader, "\r\n[private] test> ")?;
+        writer.write_all(b": PRIVATE_FIXTURE\n")?;
+        wait_for(
+            &mut reader,
+            "\r\n: PRIVATE_FIXTURE\r\n+ : PRIVATE_FIXTURE\r\n[private] test> ",
+        )?;
+        writer.write_all(b"set +vx\n")?;
+        wait_for(&mut reader, "\r\n[private] test> ")?;
+        writer.write_all(b"history resume\n")?;
+        wait_for(&mut reader, "\r\ntest> ")?;
+        let saved = fs::read_to_string(work.path().join("history.jsonl"))?;
+        assert!(!saved.contains("PRIVATE_FIXTURE"));
+        assert!(!saved.contains("+ : TRACE_FIXTURE"));
+        assert!(!saved.contains("VERBOSE_FIXTURE"));
+        writer.write_all(b"printf 'clean\\n'\n")?;
+        wait_for(&mut reader, "\r\nclean\r\ntest> ")?;
+        writer.write_all(b"? clean output returns\n")?;
+        wait_for(&mut reader, "clean snapshot received\r\ntest> ")?;
         writer.write_all(b"exit\n")?;
         wait_for(&mut reader, "1 passed")?;
         Ok(())
@@ -184,6 +221,26 @@ fn respond(request: &Value, cancelled: &AtomicBool) -> Result<chatgpt::Reply, ch
         assert!(prompt["context"]["last_output"].is_null());
         let event = json!({"type":"response.completed", "response": {"object":"response", "status":"completed", "output":[
             {"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":"listing kept local"}]}
+        ]}});
+        return chatgpt::Session::fixture_stream(&format!("data: {event}\n\n"), cancelled);
+    }
+    let diagnostic_answer = match prompt["question"].as_str() {
+        Some("diagnostics stay local") => {
+            assert!(prompt["context"]["last_output"].is_null(), "{prompt}");
+            Some("diagnostics kept local")
+        }
+        Some("clean output returns") => {
+            assert_eq!(
+                prompt["context"]["last_output"].as_str().unwrap().trim(),
+                "clean"
+            );
+            Some("clean snapshot received")
+        }
+        _ => None,
+    };
+    if let Some(answer) = diagnostic_answer {
+        let event = json!({"type":"response.completed", "response": {"object":"response", "status":"completed", "output":[
+            {"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":answer}]}
         ]}});
         return chatgpt::Session::fixture_stream(&format!("data: {event}\n\n"), cancelled);
     }

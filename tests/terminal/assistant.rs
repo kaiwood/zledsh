@@ -145,3 +145,23 @@ fn assistant_omits_output_from_a_job_that_reads_terminal_input() {
     assert_eq!(request["context"]["exit_status"], 0);
     tty.finish();
 }
+
+#[test]
+fn delayed_background_trace_is_local_and_does_not_contaminate_next_capture() {
+    let mut tty = context_terminal();
+    tty.send("value=WORKER_TRACE_FIXTURE\n");
+    tty.expect("context> ");
+    tty.send(
+        "( while /bin/test ! -f gate; do /bin/sleep 0.02; done; set -x; : \"$value\"; set +x ) &\n",
+    );
+    tty.expect("context> ");
+    tty.send(": > gate; wait \"$!\"\n");
+    tty.expect("+ : WORKER_TRACE_FIXTURE\r\n+ set +x\r\n");
+    tty.expect("context> ");
+    assert!(request(&mut tty)["context"]["last_output"].is_null());
+    tty.send("printf 'clean\\n'\n");
+    tty.expect("\r\nclean\r\n");
+    tty.expect("context> ");
+    assert_eq!(request(&mut tty)["context"]["last_output"], "clean\n");
+    tty.finish();
+}

@@ -55,7 +55,8 @@ fn run_shell(
     }
     invocation.diagnostic_marker = transcript
         .as_ref()
-        .map(|capture| capture.marker().to_owned());
+        .map(|capture| std::path::absolute(capture.marker()))
+        .transpose()?;
     load_startup(invocation, input);
     if invocation.exited {
         return Ok(invocation.finish(input, Ok(invocation.status)));
