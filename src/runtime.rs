@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::{CStr, CString, OsStr, OsString};
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Seek, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::process::Stdio;
@@ -2755,8 +2755,8 @@ impl<'a> Invocation<'a> {
     }
 
     fn run_worker(state: impl Read, closed: Option<u8>) -> Result<u8, String> {
-        let saved: WorkerState =
-            serde_json::from_reader(state).map_err(|_| "invalid shell worker state")?;
+        let saved: WorkerState = serde_json::from_reader(BufReader::new(state))
+            .map_err(|_| "invalid shell worker state")?;
         let mut shell = Invocation::new(&saved.name, &saved.args);
         shell.options = saved.options;
         shell.diagnostic_marker = saved.diagnostic_marker;
@@ -3431,7 +3431,11 @@ impl<'a> Invocation<'a> {
 // Send private shell variables via an anonymous fd, not argv or the environment.
 fn worker_payload(state: &impl serde::Serialize) -> io::Result<File> {
     let mut payload = tempfile::tempfile()?;
-    serde_json::to_writer(&mut payload, state)?;
+    {
+        let mut writer = BufWriter::new(&mut payload);
+        serde_json::to_writer(&mut writer, state)?;
+        writer.flush()?;
+    }
     payload.rewind()?;
     Ok(payload)
 }
