@@ -68,3 +68,63 @@ fn verbose_distinguishes_sourced_code_from_read_data() {
         "read data\n. ./sourced\nprintf 'inside\\n'\nprintf '%s\\n' \"$data\"\n",
     );
 }
+
+#[test]
+fn xtrace_reports_expanded_commands_before_execution_and_honors_ps4() {
+    let home = tempfile::tempdir().unwrap();
+    let script = r#"value='two words'
+PS4='[$tag] '
+tag=trace
+set -o xtrace
+value='two words'
+false && printf skipped
+printf '<%s>\n' "$value" ''
+printf 'stderr\n' >&2
+set +x
+printf 'quiet\n'
+"#;
+    expect(
+        run(home.path(), &["-c", script], ""),
+        "<two words>\n<>\nquiet\n",
+        "[trace] 'value=two words'\n[trace] false\n[trace] printf '<%s>\\n' 'two words' ''\n[trace] printf 'stderr\\n'\nstderr\n[trace] set +x\n",
+    );
+}
+
+#[test]
+fn xtrace_keeps_worker_diagnostics_out_of_pipeline_and_substitution_stdout() {
+    let home = tempfile::tempdir().unwrap();
+    fs::write(home.path().join("sourced"), "printf '%s' sourced\n").unwrap();
+    let result = run(
+        home.path(),
+        &[
+            "-x",
+            "-c",
+            r#"
+f() { . ./sourced; }
+value=$(f)
+printf '%s\n' "$value" | /bin/cat
+( printf '%s\n' background ) &
+wait
+"#,
+        ],
+        "",
+    );
+    assert!(result.status.success(), "{result:?}");
+    assert_eq!(result.stdout, b"sourced\nbackground\n");
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    for line in [
+        "+ f",
+        "+ . ./sourced",
+        "+ printf '%s' sourced",
+        "+ value=sourced",
+        "+ printf '%s\\n' sourced",
+        "+ /bin/cat",
+        "+ printf '%s\\n' background",
+        "+ wait",
+    ] {
+        assert!(
+            stderr.lines().any(|actual| actual == line),
+            "Missing {line:?}: {stderr:?}"
+        );
+    }
+}

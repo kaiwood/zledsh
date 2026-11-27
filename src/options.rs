@@ -11,6 +11,7 @@ pub(crate) struct ShellOptions {
     pub noclobber: bool,
     pub promptsubst: bool,
     pub verbose: bool,
+    pub xtrace: bool,
 }
 
 impl ShellOptions {
@@ -24,6 +25,7 @@ impl ShellOptions {
             "nounset" => self.nounset = enabled,
             "noglob" => self.noglob = enabled,
             "noclobber" => self.noclobber = enabled,
+            "xtrace" => self.xtrace = enabled,
             "verbose" => self.verbose = enabled,
             "promptsubst" => self.promptsubst = enabled,
             _ => return Err(format!("unsupported option: {name}")),
@@ -43,12 +45,14 @@ impl ShellOptions {
             ("pipefail", self.pipefail),
             ("promptsubst", self.promptsubst),
             ("verbose", self.verbose),
+            ("xtrace", self.xtrace),
         ]
         .into_iter()
     }
 
     pub fn set_short(&mut self, letter: char, enabled: bool) -> Result<(), String> {
         match letter {
+            'x' => self.xtrace = enabled,
             'v' => self.verbose = enabled,
             'a' => self.allexport = enabled,
             'e' => self.errexit = enabled,
@@ -91,6 +95,9 @@ impl ShellOptions {
         }
         if self.verbose {
             letters.push('v');
+        }
+        if self.xtrace {
+            letters.push('x');
         }
         letters
     }

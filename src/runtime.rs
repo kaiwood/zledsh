@@ -986,6 +986,7 @@ impl<'a> Invocation<'a> {
         let temporary = !argv.is_empty() && !direct_special;
         let export_prefix = temporary || argv.first().is_some_and(|name| name == "exec");
         let mut saved = HashMap::new();
+        let mut assignments = Vec::new();
         let result = (|| -> Result<(), String> {
             for word in prefix {
                 let fields = self.expand_assignment(word, &mut substitution_status)?;
@@ -1003,6 +1004,9 @@ impl<'a> Invocation<'a> {
                     self.exported.insert(name.into());
                 }
                 self.assign(field)?;
+                if self.options.xtrace {
+                    assignments.push(field.clone());
+                }
             }
             Ok(())
         })();
@@ -1011,6 +1015,7 @@ impl<'a> Invocation<'a> {
             report(&descriptors[2], &error);
             self.status = 2;
         } else {
+            self.trace_command(&assignments, &argv, &descriptors[2]);
             self.execute_argv(
                 &argv,
                 input,
@@ -1021,6 +1026,35 @@ impl<'a> Invocation<'a> {
             );
         }
         self.restore_variables(saved);
+    }
+
+    fn trace_command(&mut self, assignments: &[String], argv: &[String], stderr: &Descriptor) {
+        if !self.options.xtrace || (assignments.is_empty() && argv.is_empty()) {
+            return;
+        }
+        let status = self.exited;
+        let prefix = self
+            .variable("PS4")
+            .and_then(|template| self.parameter_text(&template).ok());
+        self.exited = status;
+        let mut trace = prefix.unwrap_or_else(|| "+ ".into());
+        let mut first = true;
+        for word in assignments.iter().chain(argv) {
+            if !std::mem::replace(&mut first, false) {
+                trace.push(' ');
+            }
+            if !word.is_empty()
+                && word
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"_./=:+-".contains(&b))
+            {
+                trace.push_str(word);
+            } else {
+                trace.push_str(&quote_value(word));
+            }
+        }
+        trace.push('\n');
+        self.write_diagnostic(stderr, &trace);
     }
 
     fn execute_argv(
@@ -2108,13 +2142,17 @@ impl<'a> Invocation<'a> {
                     "shell functions must be submitted by the user",
                 ));
             }
+            self.trace_command(&[], &argv, &descriptors[2]);
             let (exec, worker_state) = if is_builtin(&name) {
                 let executable = std::env::current_exe()?;
                 let state = worker_payload(&PipelineVariables {
                     name: self.name.into(),
                     args: self.args.clone(),
                     getopts_offset: self.getopts_offset,
-                    options: self.options,
+                    options: ShellOptions {
+                        xtrace: false,
+                        ..self.options
+                    },
                     trap_snapshot: self.traps.snapshot(),
                     directory_stack: self.directory_stack.clone(),
                     ignore_errexit: self.ignore_errexit,
@@ -2463,7 +2501,6 @@ impl<'a> Invocation<'a> {
             .and_then(|value| value.into_string().ok())
     }
 
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub fn parameter_text(&mut self, value: &str) -> Result<String, String> {
         self.expand(&crate::syntax::parameter_text(value)?, &mut None)
             .map(|fields| fields.join(" "))

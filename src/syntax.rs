@@ -1396,7 +1396,6 @@ fn double_quoted(input: &mut Source<'_>, word: &mut Word, depth: usize) -> Parse
     Err(ParseError::Incomplete("unclosed double quote"))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub(crate) fn parameter_text(value: &str) -> Result<Word, String> {
     expansion_text(value, None)
 }
