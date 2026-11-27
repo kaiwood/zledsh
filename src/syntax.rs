@@ -129,6 +129,8 @@ pub(crate) enum ArrayIndex {
 struct Source<'a> {
     chars: Peekable<Chars<'a>>,
     offset: usize,
+    physical_offset: usize,
+    next_frame: usize,
     aliases: Option<&'a HashMap<String, String>>,
     replacements: Vec<Replacement<'a>>,
     alias_next: bool,
@@ -138,6 +140,7 @@ struct Source<'a> {
 
 #[derive(Clone)]
 struct Replacement<'a> {
+    id: usize,
     name: &'a str,
     chars: Peekable<Chars<'a>>,
     separator: bool,
@@ -149,6 +152,8 @@ impl<'a> Source<'a> {
         Self {
             chars: source.chars().peekable(),
             offset: 0,
+            physical_offset: 0,
+            next_frame: 0,
             aliases: None,
             replacements: Vec::new(),
             alias_next: false,
@@ -179,6 +184,7 @@ impl<'a> Source<'a> {
             }
         } else {
             self.chars.next();
+            self.physical_offset += ch.len_utf8();
         }
         if !matches!(ch, ' ' | '\t') {
             self.alias_next = false;
@@ -234,11 +240,13 @@ impl<'a> Source<'a> {
             // Only consume the name, leaving the parent frame active for recursion checks.
             self.by_ref().take(name.len()).for_each(drop);
             self.replacements.push(Replacement {
+                id: self.next_frame,
                 name,
                 chars: text.chars().peekable(),
                 separator: true,
                 trailing_blank: text.ends_with([' ', '\t']),
             });
+            self.next_frame += 1;
             // The first word of an argument-position replacement is eligible too.
             self.alias_next = true;
         }
@@ -1704,20 +1712,42 @@ fn substitution(input: &mut Source<'_>, word: &mut Word, quoted: bool) -> ParseR
     }
     input.next(); // '('
     let start = input.clone();
-    let aliases = input.aliases.take();
+    let alias_next = std::mem::take(&mut input.alias_next);
     input.substitutions = Some(depth + 1);
     let pending = std::mem::take(&mut input.pending_here);
+    // Alias expansion must participate in delimiter detection: an alias may
+    // introduce a here-document whose body contains a literal right parenthesis.
     list(input, &[")"], 0)?;
     input.require_here_documents()?;
-    input.pending_here = pending;
-    input.substitutions = Some(depth);
-    input.aliases = aliases;
-    let end = input.offset;
+    if input.peek().is_none() {
+        return Err(ParseError::Incomplete("unclosed command substitution"));
+    }
+    if input
+        .replacements
+        .last()
+        .is_some_and(|frame| frame.id >= start.next_frame)
+    {
+        return Err("command substitution cannot end inside an alias replacement".into());
+    }
+    // Capture the input as it existed on entry, not replacement text inserted
+    // during this scan. The worker evaluates aliases in its own environment.
+    let remaining_bytes = |frame: &Replacement<'_>| {
+        frame.chars.clone().map(char::len_utf8).sum::<usize>() + usize::from(frame.separator)
+    };
+    let mut remaining = input.physical_offset - start.physical_offset;
+    for before in &start.replacements {
+        let after = input
+            .replacements
+            .iter()
+            .find(|frame| frame.id == before.id);
+        remaining += remaining_bytes(before) - after.map_or(0, remaining_bytes);
+    }
     if input.next_if_eq(&')').is_none() {
         return Err(ParseError::Incomplete("unclosed command substitution"));
     }
-    // The worker re-parses the original substitution text with its alias table.
-    let mut remaining = end - start.offset;
+    input.pending_here = pending;
+    input.substitutions = Some(depth);
+    input.alias_next = alias_next;
     let source = start
         .take_while(|ch| {
             if remaining == 0 {

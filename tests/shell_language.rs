@@ -1527,3 +1527,46 @@ printf 'remaining:%s\n' "$1"
         "zledsh: shift: expected a valid argument count\n",
     );
 }
+
+#[test]
+fn aliases_inside_substitutions_respect_here_document_bodies() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            r#"
+alias doc='again' again='/bin/cat <<EOF'
+printf '<%s>\n' "$(doc
+)
+$(printf nested)
+EOF
+)"
+alias outer='printf "%s\n" "$(printf from-alias)"'
+outer
+alias loop='cycle' cycle='loop'
+loop() { printf loop; }
+printf '<%s>\n' "$(loop)"
+"#,
+        ])
+        .output()
+        .unwrap();
+    assert_output(output, 0, "<)\nnested>\nfrom-alias\n<loop>\n", "");
+}
+
+#[test]
+fn a_substitution_requires_a_closing_token_in_its_original_input() {
+    let home = tempfile::tempdir().unwrap();
+    let output = shell(home.path())
+        .args([
+            "-c",
+            "alias close='printf unexpected; )'\nprintf '%s' \"$(close)\"\n",
+        ])
+        .output()
+        .unwrap();
+    assert_output(
+        output,
+        2,
+        "",
+        "zledsh: command substitution cannot end inside an alias replacement\n",
+    );
+}
