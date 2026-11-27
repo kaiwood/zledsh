@@ -194,9 +194,9 @@ enum LoopControl {
     Continue(usize),
 }
 
+// State inherited by both native workers and checked assistant builtin stages.
 #[derive(serde::Serialize, serde::Deserialize)]
-struct PipelineVariables {
-    name: String,
+struct WorkerContext {
     args: Vec<Vec<u8>>,
     getopts_offset: usize,
     options: ShellOptions,
@@ -210,23 +210,20 @@ struct PipelineVariables {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
+struct PipelineWorkerState {
+    name: String,
+    context: WorkerContext,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
 struct WorkerState {
+    name: String,
+    context: WorkerContext,
     diagnostic_marker: Option<std::path::PathBuf>,
     task: WorkerTask,
-    options: ShellOptions,
-    trap_snapshot: BTreeMap<libc::c_int, String>,
-    directory_stack: Vec<String>,
-    ignore_errexit: bool,
-    name: String,
-    args: Vec<Vec<u8>>,
-    getopts_offset: usize,
-    variables: HashMap<String, Vec<u8>>,
     arrays: HashMap<String, BTreeMap<usize, String>>,
     aliases: HashMap<String, String>,
     functions: HashMap<String, Script>,
-    exported: HashSet<String>,
-    readonly: HashSet<String>,
-    unset: HashSet<String>,
     depth: u8,
     status: u8,
     last_background_pid: Option<libc::pid_t>,
@@ -935,18 +932,8 @@ impl<'a> Invocation<'a> {
         state: File,
     ) -> serde_json::Result<u8> {
         // Consume and close the private descriptor before evaluating any commands.
-        let state: PipelineVariables = serde_json::from_reader(BufReader::new(state))?;
-        let mut shell = Invocation::new(&state.name, &state.args);
-        shell.options = state.options;
-        shell.inherit_traps(state.trap_snapshot);
-        shell.directory_stack = state.directory_stack;
-        shell.getopts_offset = state.getopts_offset;
-        shell.ignore_errexit = state.ignore_errexit;
-        shell.shell_worker = true;
-        shell.variables = state.variables;
-        shell.exported = state.exported;
-        shell.readonly = state.readonly;
-        shell.unset = state.unset;
+        let state: PipelineWorkerState = serde_json::from_reader(BufReader::new(state))?;
+        let mut shell = Invocation::from_worker_context(&state.name, state.context);
         let descriptors = worker_descriptors(closed);
         shell.run_pipeline_with_descriptors(std::slice::from_ref(command), input, &descriptors);
         Ok(shell.finish(input, Ok(shell.status)))
@@ -2286,21 +2273,11 @@ impl<'a> Invocation<'a> {
             self.trace_command(&[], &argv, &descriptors[2]);
             let (exec, worker_state) = if is_builtin(&name) {
                 let executable = std::env::current_exe()?;
-                let state = worker_payload(&PipelineVariables {
+                let mut context = self.worker_context();
+                context.options.xtrace = false; // The parent already traced this argv.
+                let state = worker_payload(&PipelineWorkerState {
                     name: self.name.into(),
-                    args: self.args.clone(),
-                    getopts_offset: self.getopts_offset,
-                    options: ShellOptions {
-                        xtrace: false,
-                        ..self.options
-                    },
-                    trap_snapshot: self.traps.snapshot(),
-                    directory_stack: self.directory_stack.clone(),
-                    ignore_errexit: self.ignore_errexit,
-                    variables: self.variables.clone(),
-                    exported: self.exported.clone(),
-                    readonly: self.readonly.clone(),
-                    unset: self.unset.clone(),
+                    context,
                 })?;
                 let state_fd = process::duplicate(state.as_raw_fd())?;
                 let mut args = vec![
@@ -2766,21 +2743,11 @@ impl<'a> Invocation<'a> {
     fn run_worker(state: impl Read, closed: Option<u8>) -> Result<u8, String> {
         let saved: WorkerState = serde_json::from_reader(BufReader::new(state))
             .map_err(|_| "invalid shell worker state")?;
-        let mut shell = Invocation::new(&saved.name, &saved.args);
-        shell.options = saved.options;
+        let mut shell = Invocation::from_worker_context(&saved.name, saved.context);
         shell.diagnostic_marker = saved.diagnostic_marker;
-        shell.inherit_traps(saved.trap_snapshot);
-        shell.directory_stack = saved.directory_stack;
-        shell.getopts_offset = saved.getopts_offset;
-        shell.ignore_errexit = saved.ignore_errexit;
-        shell.shell_worker = true;
-        shell.variables = saved.variables;
         shell.arrays = saved.arrays;
         shell.aliases = saved.aliases;
         shell.functions = saved.functions;
-        shell.exported = saved.exported;
-        shell.readonly = saved.readonly;
-        shell.unset = saved.unset;
         shell.substitution_depth = saved.depth;
         shell.status = saved.status;
         shell.inherited_background_pid = saved.last_background_pid;
@@ -2867,24 +2834,45 @@ impl<'a> Invocation<'a> {
         Some(crate::completion::run_callback(command).unwrap_or_default())
     }
 
-    fn worker_state(&self, task: WorkerTask) -> WorkerState {
-        WorkerState {
-            diagnostic_marker: self.diagnostic_marker.clone(),
-            task,
+    fn worker_context(&self) -> WorkerContext {
+        WorkerContext {
             options: self.options,
             trap_snapshot: self.traps.snapshot(),
             directory_stack: self.directory_stack.clone(),
             ignore_errexit: self.ignore_errexit,
-            name: self.name.into(),
             args: self.args.clone(),
             getopts_offset: self.getopts_offset,
             variables: self.variables.clone(),
-            arrays: self.arrays.clone(),
-            aliases: self.aliases.clone(),
-            functions: self.functions.clone(),
             exported: self.exported.clone(),
             readonly: self.readonly.clone(),
             unset: self.unset.clone(),
+        }
+    }
+
+    fn from_worker_context(name: &'a str, context: WorkerContext) -> Self {
+        let mut shell = Self::new(name, &context.args);
+        shell.options = context.options;
+        shell.inherit_traps(context.trap_snapshot);
+        shell.directory_stack = context.directory_stack;
+        shell.getopts_offset = context.getopts_offset;
+        shell.ignore_errexit = context.ignore_errexit;
+        shell.shell_worker = true;
+        shell.variables = context.variables;
+        shell.exported = context.exported;
+        shell.readonly = context.readonly;
+        shell.unset = context.unset;
+        shell
+    }
+
+    fn worker_state(&self, task: WorkerTask) -> WorkerState {
+        WorkerState {
+            name: self.name.into(),
+            context: self.worker_context(),
+            diagnostic_marker: self.diagnostic_marker.clone(),
+            task,
+            arrays: self.arrays.clone(),
+            aliases: self.aliases.clone(),
+            functions: self.functions.clone(),
             depth: self.substitution_depth + 1,
             status: self.status,
             last_background_pid: self.last_background_pid(),
