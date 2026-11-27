@@ -283,6 +283,7 @@ impl<'a> Invocation<'a> {
         let versions = self.fd_versions;
         let mut pending = String::new();
         for line in source.split_inclusive('\n') {
+            self.verbose_input_to(line, &self.updated_descriptors(descriptors, versions)[2]);
             pending.push_str(line);
             match self.parse(&pending) {
                 Ok(commands) => {
@@ -687,6 +688,20 @@ impl<'a> Invocation<'a> {
                 self.persistent_fds[fd].clone()
             }
         })
+    }
+
+    pub fn verbose_input(&self, text: &str) {
+        self.verbose_input_to(text, &self.persistent_fds[2]);
+    }
+
+    fn verbose_input_to(&self, text: &str, stderr: &Descriptor) {
+        if self.options.verbose && !text.is_empty() {
+            self.write_diagnostic(stderr, text);
+        }
+    }
+
+    fn write_diagnostic(&self, stderr: &Descriptor, text: &str) {
+        let _ = crate::diagnostics::write(self.diagnostic_marker.as_deref(), || stderr.write(text));
     }
 
     pub fn read_stdin_line(&self, input: &mut dyn BufRead, text: &mut String) -> io::Result<usize> {

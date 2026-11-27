@@ -10,6 +10,7 @@ pub(crate) struct ShellOptions {
     pub globstar: bool,
     pub noclobber: bool,
     pub promptsubst: bool,
+    pub verbose: bool,
 }
 
 impl ShellOptions {
@@ -23,6 +24,7 @@ impl ShellOptions {
             "nounset" => self.nounset = enabled,
             "noglob" => self.noglob = enabled,
             "noclobber" => self.noclobber = enabled,
+            "verbose" => self.verbose = enabled,
             "promptsubst" => self.promptsubst = enabled,
             _ => return Err(format!("unsupported option: {name}")),
         }
@@ -40,12 +42,14 @@ impl ShellOptions {
             ("nounset", self.nounset),
             ("pipefail", self.pipefail),
             ("promptsubst", self.promptsubst),
+            ("verbose", self.verbose),
         ]
         .into_iter()
     }
 
     pub fn set_short(&mut self, letter: char, enabled: bool) -> Result<(), String> {
         match letter {
+            'v' => self.verbose = enabled,
             'a' => self.allexport = enabled,
             'e' => self.errexit = enabled,
             'n' => self.noexec = enabled,
@@ -84,6 +88,9 @@ impl ShellOptions {
         }
         if self.nounset {
             letters.push('u');
+        }
+        if self.verbose {
+            letters.push('v');
         }
         letters
     }

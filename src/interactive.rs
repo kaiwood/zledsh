@@ -110,6 +110,7 @@ fn run_shell(
         if history.paused {
             prompt.insert_str(0, "[private] ");
         }
+        let start = source.len();
         let primary = source.is_empty();
         let mut input_pending = false;
         if let Some(editor) = &mut editor {
@@ -137,6 +138,7 @@ fn run_shell(
                 break;
             }
         }
+        invocation.verbose_input(&source[start..]);
         if let Some(instruction) = source.strip_prefix('?').filter(|_| primary) {
             if history.paused {
                 eprintln!(

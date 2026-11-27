@@ -329,11 +329,13 @@ fn run_input(
 ) -> Result<u8, String> {
     let mut source = String::new();
     while !invocation.exited {
+        let start = source.len();
         let count = match &mut script {
             Some(script) => script.read_line(&mut source),
             None => invocation.read_stdin_line(input, &mut source),
         }
         .map_err(|error| error.to_string())?;
+        invocation.verbose_input(&source[start..]);
         if count == 0 && source.is_empty() {
             break;
         }

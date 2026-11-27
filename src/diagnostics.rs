@@ -6,7 +6,6 @@ use std::path::Path;
 // Writers take a shared lock while marking and emitting diagnostics. A
 // nonblocking exclusive sample fails closed if any writer is still active,
 // including a stopped worker. No diagnostic text is stored here.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn write(path: Option<&Path>, emit: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
     let Some(path) = path else {
         return emit();
