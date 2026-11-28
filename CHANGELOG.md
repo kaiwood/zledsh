@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.0
+
+### Shell
+
+- `set -v` echoes shell input; `set -x` traces expanded commands with a `PS4` prefix. Both write to stderr even when history is paused. Agent snapshots that overlap diagnostics from zledsh or its native workers are discarded.
+- Non-UTF-8 data survives external arguments, scalar variables, `read`, command substitution, and native workers. Redirections, `cd` and `pwd`, function arguments, `set --`, `for` loops, and `printf %s` preserve those bytes too. The filesystem must support any non-UTF-8 names used.
+- Shell patterns and pathname ordering honor locale settings. Parser input, some builtin operands and variable listings, and the editor still have UTF-8 limits; field splitting and regex handling are not generally locale-aware.
+- Added `export -p` and a `print` builtin supporting `-n`, `-r`, and common escapes for prompt helpers.
+- `return` stops the innermost sourced file or function. Invalid direct `shift` calls now exit noninteractive scripts; use `command shift` to handle the failure. Earlier successful `exec` redirections persist when a later one fails and the shell survives.
+- Aliases inside command substitutions can introduce here-documents, but cannot supply the closing delimiter. Fixed line continuations and enabled blocking reads in stdin script mode.
+
+### Interactive
+
+- Trapped signals run at an idle editing prompt without discarding the draft. Plain script input and `read` may still defer traps.
+- Fixed stale editor rows and pasted line breaks.
+
+### Install
+
+```sh
+cargo install --locked --git https://github.com/kaiwood/zledsh.git --tag v0.3.0
+```
+
+This is a source release for macOS and Linux with Rust 1.85 or newer. Open a new terminal after upgrading. zledsh does not claim POSIX conformance or drop-in compatibility with Bash.
+
 ## 0.2.0
 
 ### Shell
